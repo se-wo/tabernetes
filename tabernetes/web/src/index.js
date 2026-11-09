@@ -5,6 +5,7 @@ import { proxyBuiltins } from "./proxy.js";
 import { installWasi } from "./wasi.js";
 import { nodeBuiltins } from "./nodes.js";
 import { installGPU } from "./gpu.js";
+import { vncBuiltins } from "./vnc.js";
 
 const el = document.getElementById("tabernetes");
 // The panel of "proxy" goes next to the terminal: both share a row.
@@ -44,6 +45,8 @@ startTerminal(el, {
     }),
     ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes }),
     ...proxyBuiltins({ status: status && ports, terminal: el }),
+    // The VNC screen covers the terminal, the panel of "proxy" and the status line.
+    ...vncBuiltins({ box: el.closest(".tabernetes-wrap") || el.parentElement }),
   },
 }).then((t) => (globalThis.tabernetesTerminal = t)).catch((e) => {
   el.textContent = "Tabernetes failed to start: " + e;

@@ -75,6 +75,18 @@ browser tab (single wasm binary)                     docker run tabernetes
   While `kubectl port-forward` runs, the status line under the terminal links
   each of its local ports the same way (`k8s/tabernetes/forwards.go`): a click
   shows it in the panel, Ctrl-click in a new tab.
+- `vnc <port>` shows a VNC server on `localhost` of the Wasm (a
+  `kubectl port-forward`) on top of the terminal.
+  [noVNC](https://github.com/novnc/noVNC) speaks RFB, and `tabernetes.dial`
+  (`k8s/tabernetes/dial.go`) gives it a TCP connection into the in-process
+  network. `doom` uses it: it starts
+  [KubeDoom](https://github.com/storax/kubedoom) on a Docker node with a
+  Deployment of five pause pods (`k8s/tabernetes/doom/kubedoom.yaml`), and
+  every pod of the default namespace is a monster. Shoot one, and KubeDoom
+  deletes the pod. KubeDoom is a real container image, so it needs a node
+  from `join`: node affinity keeps it off the nodes with the label
+  `tabernetes.io/tab` (the tab node and the nodes in Web Workers). The
+  monsters are pause pods and run anywhere, the tab node included.
 - `free` shows the WebAssembly memory (wasm32 ends at 4 GiB, and the linear
   memory never shrinks), the Go heap and the number of goroutines.
 - `vi` (`k8s/tabernetes/vi.go`) is a small vi for manifests. It runs in raw mode:
