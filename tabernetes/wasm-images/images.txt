@@ -4,6 +4,6 @@
 #   artifact  <reference> <dir>     the same as a wasm OCI artifact (the module is the layer)
 #   mirror    <reference> [crate]   copied from its registry; if that fails and RUNWASI_SRC points to a runwasi
 #                                   checkout, the crate is built from it with cargo (target wasm32-wasip1) and packed instead
-image     ghcr.io/jkroepke/tabernetes/wasi-hello:latest    hello
-artifact  ghcr.io/jkroepke/tabernetes/wasi-hello:artifact  hello
+image     ghcr.io/se-wo/tabernetes/wasi-hello:latest    hello
+artifact  ghcr.io/se-wo/tabernetes/wasi-hello:artifact  hello
 mirror    ghcr.io/containerd/runwasi/wasi-demo-app:latest  wasi-demo-app

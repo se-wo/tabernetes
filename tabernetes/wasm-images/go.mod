@@ -1,3 +1,3 @@
-module github.com/jkroepke/blog/tabernetes/wasm-images
+module github.com/se-wo/tabernetes/tabernetes/wasm-images
 
 go 1.24
