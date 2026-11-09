@@ -132,6 +132,27 @@ func main() {
 		)
 	}
 
+	// The proxy subresources of services and pods, webhooks and aggregated
+	// APIs dial from the apiserver. Without a dialer, net/http in js uses
+	// fetch(), which cannot reach the in-process network of the pods.
+	edit("pkg/controlplane/apiserver/config.go",
+		"\tvar proxyDialerFn utilnet.DialFunc\n",
+		"\tproxyDialerFn := utilnet.DialFunc(proxyDial) // tabernetes\n",
+	)
+	write("pkg/controlplane/apiserver/tabernetes.go", `package apiserver
+
+import (
+	"context"
+	"net"
+)
+
+// proxyDial dials pods and services in the in-process network of the wasm
+// for the apiserver. Added by tabernetes (k8s/patch.go).
+func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, addr)
+}
+`)
+
 	// The shell of the terminal. Its only other dependencies, golang.org/x/sys
 	// and golang.org/x/term, are vendored by Kubernetes already.
 	vendorModule("mvdan.cc/sh/v3", os.Getenv("MVDAN_SH_VERSION"),
