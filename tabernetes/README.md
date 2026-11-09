@@ -2,8 +2,10 @@
 
 A real Kubernetes control plane in a browser tab. kube-apiserver,
 kube-controller-manager, kube-scheduler and kubectl are compiled with
-`GOOS=js GOARCH=wasm` into a single binary. The page at
-[/tabernetes/](https://jkroepke.de/tabernetes/) boots it in a terminal.
+`GOOS=js GOARCH=wasm` into a single binary. The page
+(original: [jkroepke.de/tabernetes](https://jkroepke.de/tabernetes/), this
+version: [se-wo.github.io/tabernetes](https://se-wo.github.io/tabernetes/))
+boots it in a terminal.
 A real node can join with Docker. The node talks to the browser over WebRTC.
 
 ## How it works
@@ -50,7 +52,7 @@ browser tab (single wasm binary)                     docker run tabernetes
   `kubectl proxy` included. On Windows and Linux, Ctrl-C copies instead while
   text is selected, and Ctrl-V pastes.
 - `proxy 8080` opens `localhost:8080` of the Wasm in a new browser tab. A
-  service worker under `/tabernetes-proxy/` (`static/tabernetes-proxy/sw.js`) hands
+  service worker under `tabernetes-proxy/` next to the page (`web/proxy-sw.js`) hands
   every request of that tab to the terminal tab, which sends it to the
   in-process network. The tab works as long as the terminal tab is open;
   leaving the terminal page unregisters the worker. While
@@ -98,10 +100,20 @@ The tasks live in `tabernetes/mise.toml`. mise installs Go and Node.js.
 
 ```bash
 cd tabernetes
-mise run build       # assets/tabernetes/{tabernetes.wasm.zst,tabernetes.js,unzstd.js,xterm.css}
-mise run node-image  # ghcr.io/jkroepke/tabernetes:latest for the local platform
-cd .. && hugo server # http://localhost:1313/tabernetes/
+mise run build       # .build/assets/{tabernetes.wasm.zst,tabernetes.js,unzstd.js,xterm.css,...}
+mise run site        # .build/site/: the page, the assets, the proxy worker, the licenses
+mise run node-image  # $NODE_IMAGE:latest for the local platform
+python3 -m http.server -d .build/site 8080   # http://localhost:8080/
 ```
+
+`site/build.mjs` builds the standalone page from `site/index.md` (the text),
+`site/page.html` and `site/terminal.html`. All its URLs are relative, so it
+works under any base path, such as `/tabernetes/` on GitHub Pages
+(`.github/workflows/pages.yaml`). It also writes `THIRD_PARTY_LICENSES.txt`:
+the Go modules in the binary (`go list -deps`, collected by the `wasm` task
+while the Kubernetes checkout is there) and the npm packages in the bundles,
+each with its license text. `join` prints `TABERNETES_IMAGE` if set at build
+time, else `$NODE_IMAGE:latest`.
 
 The binary is around 290 MB, or 28 MB with zstd (gzip: 45 MB). GitHub Pages
 does not send `Content-Encoding` for it, and `DecompressionStream` has no
@@ -110,8 +122,8 @@ zstd. The page fetches the `.zst` file and unpacks it with
 while it downloads. The browser compiles the WebAssembly while the bytes
 arrive, so download, unpacking and compiling overlap.
 
-Hugo fingerprints the files in `assets/tabernetes/`, so the name of the binary
-changes with its content. The page keeps the binary in the Cache Storage of
+The page links every file with `?v=<hash of the content>`, so the URL of the
+binary changes with its content. The page keeps the binary in the Cache Storage of
 the browser and the next visit downloads nothing. GitHub Pages itself sends
 only `max-age=600`.
 

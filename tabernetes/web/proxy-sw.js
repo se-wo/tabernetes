@@ -1,11 +1,13 @@
 // Service worker behind the "proxy <port>" command of the Tabernetes terminal.
 //
-// A tab on /tabernetes-proxy/<port>/... shows what listens on localhost:<port>
+// A tab on <page>/tabernetes-proxy/<port>/... shows what listens on localhost:<port>
 // inside the WebAssembly of the terminal tab, typically kubectl
 // port-forward. A web page cannot open a TCP port, so this worker hands each
 // request to the terminal tab, which runs it against its in-process network
 // and posts the response back.
-const scope = new URL(self.registration.scope).pathname; // "/tabernetes-proxy/"
+// The page registers it next to itself: "/tabernetes-proxy/" on a domain root,
+// "/<repo>/tabernetes-proxy/" on GitHub Pages.
+const scope = new URL(self.registration.scope).pathname;
 const TIMEOUT = 60_000;
 
 self.addEventListener("install", () => self.skipWaiting());

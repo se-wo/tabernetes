@@ -256,7 +256,7 @@ export async function startTerminal(el, opts) {
     if (search) return `(${search.failed ? "failed " : ""}reverse-i-search)\`${search.query}': `;
     if (pending) return "> ";
     const dir = globalThis.tabernetes.cwd().replace(/^\/root(?=\/|$)/, "~");
-    return `\x1b[1;34mjkroepke.de\x1b[0m:\x1b[1;32m${dir}\x1b[0m$ `;
+    return `\x1b[1;34m${location.hostname || "tabernetes"}\x1b[0m:\x1b[1;32m${dir}\x1b[0m$ `;
   };
   // redraw renders prompt and line, also when the line wraps over several rows.
   let row = 0; // row of the cursor, relative to the prompt
@@ -473,7 +473,7 @@ export async function startTerminal(el, opts) {
 const escape = (s) => /^\x1b(?:\[[0-9;?]*[@-~]|O.|[^]?)/.exec(s)[0];
 
 // download fetches the binary, from the Cache Storage when it is there. The
-// file name has a hash of the content (Hugo fingerprint), so a cached copy is
+// URL has a hash of the content (?v=, site/build.mjs), so a cached copy is
 // always current. GitHub Pages sends max-age=600 and nothing longer.
 async function download(url) {
   let cache = null;

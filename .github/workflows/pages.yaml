@@ -1,0 +1,98 @@
+name: Pages
+
+# Builds the standalone Tabernetes page (tabernetes/site/) and publishes it
+# with GitHub Pages: https://<owner>.github.io/<repository>/.
+# One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions: {}
+
+# One deployment at a time; a running one is not cancelled.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      contents: read
+      # configure-pages reads the Pages settings of the repository.
+      pages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # tabernetes/mise.toml inherits the root mise.toml: node and go in one go.
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          working_directory: tabernetes
+
+      # Fails with a clear message when Pages is not enabled for GitHub Actions.
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # "join" prints the node image of this repository's owner
+      # (tabernetes-image.yaml pushes it there). ghcr.io wants lower case.
+      - name: Node image
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=ghcr.io/${OWNER,,}/tabernetes:latest" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache tabernetes
+        id: cache-tabernetes
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tabernetes/.build/assets/tabernetes.wasm.zst
+            tabernetes/.build/assets/THIRD_PARTY_LICENSES.go.json
+            tabernetes/.build/wasm_exec.js
+          key: tabernetes-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/k8s/**', 'tabernetes/site/third-party.mjs') }}
+
+      # On a cache hit only the (cheap) web part and the page are built.
+      - name: Build tabernetes
+        if: steps.cache-tabernetes.outputs.cache-hit != 'true'
+        working-directory: tabernetes
+        run: mise run wasm
+
+      - name: Test tabernetes
+        if: steps.cache-tabernetes.outputs.cache-hit != 'true'
+        working-directory: tabernetes
+        run: mise run test
+
+      - name: Build page
+        working-directory: tabernetes
+        run: mise run site
+        env:
+          TABERNETES_IMAGE: ${{ steps.image.outputs.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: tabernetes/.build/site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      id-token: write
+      pages: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
