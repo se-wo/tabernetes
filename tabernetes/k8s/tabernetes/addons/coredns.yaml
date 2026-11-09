@@ -82,6 +82,14 @@ spec:
         operator: Exists
       nodeSelector:
         kubernetes.io/os: linux
+      # Not on the tab node (tabnode.go): it runs no real containers.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: tabernetes.io/tab
+                operator: DoesNotExist
       containers:
       - name: coredns
         image: registry.k8s.io/coredns/coredns:v1.15.0

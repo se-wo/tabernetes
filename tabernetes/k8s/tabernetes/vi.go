@@ -62,7 +62,7 @@ func viCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 	}
 	path := ""
 	if len(args) == 1 {
-		path = abs(hc, args[0])
+		path = abs(ctx, hc, args[0])
 	}
 	if err := runVi(ctx, path); err != nil {
 		return fail(hc, 1, "vi: %v", err)

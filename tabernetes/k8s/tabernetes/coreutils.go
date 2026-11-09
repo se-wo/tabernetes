@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -100,11 +99,10 @@ func opts(name string, args []string, spec string, long map[string]string) (map[
 
 func has(o map[string]string, k string) bool { _, ok := o[k]; return ok }
 
-func abs(hc interp.HandlerContext, p string) string {
-	if filepath.IsAbs(p) {
-		return p
-	}
-	return filepath.Join(hc.Dir, p)
+// abs makes p absolute. Inside a container of the tab node (tabnode_proc.go)
+// the path goes through the root file system of the container.
+func abs(ctx context.Context, hc interp.HandlerContext, p string) string {
+	return realPath(ctx, hc.Dir, p)
 }
 
 func fail(hc interp.HandlerContext, code int, format string, a ...any) error {
@@ -113,7 +111,7 @@ func fail(hc interp.HandlerContext, code int, format string, a ...any) error {
 }
 
 // inputs calls fn for stdin or each named file ("-" is stdin).
-func inputs(hc interp.HandlerContext, name string, files []string, fn func(file string, r io.Reader) error) error {
+func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []string, fn func(file string, r io.Reader) error) error {
 	if len(files) == 0 {
 		files = []string{"-"}
 	}
@@ -126,7 +124,7 @@ func inputs(hc interp.HandlerContext, name string, files []string, fn func(file 
 		if f == "/dev/null" {
 			r = strings.NewReader("")
 		} else if f != "-" {
-			fh, err := os.Open(abs(hc, f))
+			fh, err := os.Open(abs(ctx, hc, f))
 			if err != nil {
 				fmt.Fprintf(hc.Stderr, "%s: %s: %v\n", name, f, unwrap(err))
 				code = 1
@@ -169,14 +167,14 @@ func count(o map[string]string, def int) (int, error) {
 	return strconv.Atoi(strings.TrimPrefix(v, "+"))
 }
 
-func cat(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	return inputs(hc, "cat", args, func(_ string, r io.Reader) error {
+func cat(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	return inputs(ctx, hc, "cat", args, func(_ string, r io.Reader) error {
 		_, err := io.Copy(hc.Stdout, r)
 		return err
 	})
 }
 
-func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("grep", args, "ivcnEFoqwe:", map[string]string{"ignore-case": "i", "invert-match": "v", "count": "c", "regexp": "e"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -205,7 +203,7 @@ func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		return fail(hc, 2, "grep: %v", err)
 	}
 	found := false
-	err = inputs(hc, "grep", args, func(file string, r io.Reader) error {
+	err = inputs(ctx, hc, "grep", args, func(file string, r io.Reader) error {
 		prefix := ""
 		if len(args) > 1 {
 			prefix = file + ":"
@@ -245,7 +243,7 @@ func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	return nil
 }
 
-func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("head", args, "n:#", map[string]string{"lines": "n"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -254,7 +252,7 @@ func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	if err != nil {
 		return fail(hc, 2, "head: invalid number of lines")
 	}
-	return inputs(hc, "head", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
 		sc := bufio.NewScanner(r)
 		sc.Buffer(nil, 16<<20)
 		for i := 0; i < n && sc.Scan(); i++ {
@@ -266,7 +264,7 @@ func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func tail(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("tail", args, "n:#", map[string]string{"lines": "n"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -276,7 +274,7 @@ func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		return fail(hc, 2, "tail: invalid number of lines")
 	}
 	from := strings.HasPrefix(o["n"], "+")
-	return inputs(hc, "tail", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "tail", args, func(_ string, r io.Reader) error {
 		l := lines(r)
 		switch {
 		case from:
@@ -291,7 +289,7 @@ func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func wc(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("wc", args, "lwc", map[string]string{"lines": "l", "words": "w", "bytes": "c"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -299,7 +297,7 @@ func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	if len(o) == 0 {
 		o = map[string]string{"l": "", "w": "", "c": ""}
 	}
-	return inputs(hc, "wc", args, func(file string, r io.Reader) error {
+	return inputs(ctx, hc, "wc", args, func(file string, r io.Reader) error {
 		b, _ := io.ReadAll(r)
 		var f []string
 		if has(o, "l") {
@@ -319,7 +317,7 @@ func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	})
 }
 
-func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func sortCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("sort", args, "rnuk:t:", map[string]string{"reverse": "r", "numeric-sort": "n", "unique": "u", "key": "k", "field-separator": "t"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -344,7 +342,7 @@ func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ inter
 		}
 	}
 	var all []string
-	inputs(hc, "sort", args, func(_ string, r io.Reader) error { all = append(all, lines(r)...); return nil })
+	inputs(ctx, hc, "sort", args, func(_ string, r io.Reader) error { all = append(all, lines(r)...); return nil })
 	less := func(a, b string) bool { return key(a) < key(b) }
 	if has(o, "n") {
 		num := func(s string) float64 {
@@ -368,12 +366,12 @@ func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ inter
 	return nil
 }
 
-func uniq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func uniq(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("uniq", args, "cd", map[string]string{"count": "c", "repeated": "d"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
-	return inputs(hc, "uniq", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "uniq", args, func(_ string, r io.Reader) error {
 		l := lines(r)
 		for i := 0; i < len(l); {
 			j := i
@@ -393,7 +391,7 @@ func uniq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func cut(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("cut", args, "d:f:", map[string]string{"delimiter": "d", "fields": "f"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -424,7 +422,7 @@ func cut(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 		}
 		fields = append(fields, [2]int{a, b})
 	}
-	return inputs(hc, "cut", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "cut", args, func(_ string, r io.Reader) error {
 		for _, l := range lines(r) {
 			f := strings.Split(l, d)
 			if len(f) == 1 {
@@ -492,12 +490,12 @@ func tr(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return nil
 }
 
-func base64Cmd(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("base64", args, "dw:", map[string]string{"decode": "d", "wrap": "w"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
-	return inputs(hc, "base64", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "base64", args, func(_ string, r io.Reader) error {
 		b, _ := io.ReadAll(r)
 		if has(o, "d") {
 			s := strings.Join(strings.Fields(string(b)), "")
@@ -525,7 +523,7 @@ func base64Cmd(_ context.Context, hc interp.HandlerContext, args []string, _ int
 	})
 }
 
-func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("ls", args, "la1Ad", nil)
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -535,7 +533,7 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	}
 	code := 0
 	for n, a := range args {
-		fi, err := os.Lstat(abs(hc, a))
+		fi, err := os.Lstat(abs(ctx, hc, a))
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "ls: %s: %v\n", a, unwrap(err))
 			code = 2
@@ -543,7 +541,7 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 		}
 		var entries []fs.FileInfo
 		if fi.IsDir() && !has(o, "d") {
-			des, _ := os.ReadDir(abs(hc, a))
+			des, _ := os.ReadDir(abs(ctx, hc, a))
 			for _, de := range des {
 				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 					continue
@@ -579,16 +577,16 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return exitCode(code)
 }
 
-func mkdir(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func mkdir(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("mkdir", args, "p", map[string]string{"parents": "p"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
 	for _, a := range args {
 		if has(o, "p") {
-			err = os.MkdirAll(abs(hc, a), 0o755)
+			err = os.MkdirAll(abs(ctx, hc, a), 0o755)
 		} else {
-			err = os.Mkdir(abs(hc, a), 0o755)
+			err = os.Mkdir(abs(ctx, hc, a), 0o755)
 		}
 		if err != nil {
 			return fail(hc, 1, "mkdir: %s: %v", a, unwrap(err))
@@ -597,14 +595,14 @@ func mkdir(_ context.Context, hc interp.HandlerContext, args []string, _ interp.
 	return nil
 }
 
-func rm(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func rm(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("rm", args, "rfR", map[string]string{"recursive": "r", "force": "f"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
 	code := 0
 	for _, a := range args {
-		p := abs(hc, a)
+		p := abs(ctx, hc, a)
 		if _, err := os.Lstat(p); err != nil {
 			if !has(o, "f") {
 				fmt.Fprintf(hc.Stderr, "rm: %s: %v\n", a, unwrap(err))
@@ -625,9 +623,9 @@ func rm(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return exitCode(code)
 }
 
-func touch(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func touch(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	for _, a := range args {
-		f, err := os.OpenFile(abs(hc, a), os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(abs(ctx, hc, a), os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return fail(hc, 1, "touch: %s: %v", a, unwrap(err))
 		}
@@ -636,7 +634,7 @@ func touch(_ context.Context, hc interp.HandlerContext, args []string, _ interp.
 	return nil
 }
 
-func tee(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func tee(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("tee", args, "a", map[string]string{"append": "a"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -647,7 +645,7 @@ func tee(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 	}
 	ws := []io.Writer{hc.Stdout}
 	for _, a := range args {
-		f, err := os.OpenFile(abs(hc, a), flag, 0o644)
+		f, err := os.OpenFile(abs(ctx, hc, a), flag, 0o644)
 		if err != nil {
 			return fail(hc, 1, "tee: %s: %v", a, unwrap(err))
 		}
@@ -879,7 +877,7 @@ func download(ctx context.Context, hc interp.HandlerContext, u, name string, qui
 	}
 	w := hc.Stdout
 	if name != "-" {
-		f, err := os.Create(abs(hc, name))
+		f, err := os.Create(abs(ctx, hc, name))
 		if err != nil {
 			return fail(hc, 1, "wget: %s: %v", name, unwrap(err))
 		}

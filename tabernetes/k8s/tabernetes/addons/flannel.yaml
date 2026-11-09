@@ -126,6 +126,9 @@ spec:
                 operator: In
                 values:
                 - linux
+              # Not on the tab node (tabnode.go): it runs no real containers.
+              - key: tabernetes.io/tab
+                operator: DoesNotExist
       containers:
       - args:
         - --ip-masq
