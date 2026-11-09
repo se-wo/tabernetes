@@ -2,8 +2,11 @@ import "./wasm_exec.js";
 import { startTerminal } from "./terminal.js";
 import { joinBuiltins } from "./join.js";
 import { proxyBuiltins } from "./proxy.js";
+import { installWasi } from "./wasi.js";
 
 const el = document.getElementById("tabernetes");
+// WebAssembly pods run in workers. Both default to files next to tabernetes.js.
+installWasi({ workerURL: el.dataset.wasiWorker, mirror: el.dataset.oci });
 // The status line under the terminal: the nodes, then the forwarded ports.
 const status = document.getElementById("tabernetes-status");
 const nodes = document.createElement("span");

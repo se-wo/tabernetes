@@ -163,6 +163,7 @@ func (n *tabNode) nodeLabels() map[string]string {
 		"kubernetes.io/arch":               "wasm",
 		"node.kubernetes.io/instance-type": "browser-tab",
 		tabTaintKey:                        "true",
+		"tabernetes.io/wasm":               "true", // WebAssembly pods (runtimeclass.yaml)
 	}
 }
 
