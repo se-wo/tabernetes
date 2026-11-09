@@ -98,15 +98,19 @@ pins (v0.2.1).
   endpoint pod, as on a real node after DNAT.
 - **H3** The engine evaluates egress and ingress (`PolicyEngine.EvaluatePacket`
   runs both, as upstream). Deny: no connection is made.
-- **H4** `listenPod` wraps its listener. `Accept` asks the engine for the
-  ingress of each connection, by `RemoteAddr`. It catches dials that do not
-  use `dialCluster`. A denied connection is closed at once (a reset, the
-  dialer already got a connection).
+- **H4** `listenPod` wraps its listener. It catches dials that do not use
+  `dialCluster`. H3 and H6 note each connection they admit (source and
+  destination address, for a few seconds); `Accept` lets those through
+  without asking again, so no connection is decided twice and a policy update
+  between the two cannot reset one the dialer saw open. For any other
+  connection `Accept` asks the engine for the ingress by `RemoteAddr`. A
+  denied one is closed at once (a reset, the dialer already got a
+  connection).
 - **H5** For a pod IP of another node, `dialCluster` opens a `pod` channel to
   that node and sends a header first.
 - **H6** The receiving node checks the header against the sending node and
   asks its own engine. Then it dials the pod from the source IP of the header,
-  so H4 sees the real source there too.
+  so H4 sees the real source there too (and skips it, see H4).
 - **H7, H8** Docker nodes, see below.
 
 ### Denied connections
@@ -309,8 +313,10 @@ Their dials have no `procOf(ctx)` pod and come from 127.0.0.1 or the node IP.
   upstream's `input` chain.
 - A pod to itself (its pod IP, which is also its localhost): always allowed.
   On Linux this is loopback. The proof of concept shows that the engine
-  would deny it, so the hooks skip the engine when source and destination
-  IPs are the same pod.
+  would deny it, so `dialCluster` skips the engine when the address the pod
+  dials, before H2, is its own IP. A pod that reaches itself through a
+  Service (hairpin) is evaluated after H2 like any other connection, as on a
+  Docker node, where the hairpinned packet passes the policy hooks.
 - `kubectl port-forward` to a pod: never evaluated. CRI port-forward enters
   the pod like loopback on a real node too.
 
@@ -346,8 +352,10 @@ goes in the same way:
   `KUBERNETES_VERSION`; renovate PRs show a mismatch at build time.
 - `vendorModule("sigs.k8s.io/kube-network-policies", ..., "pkg/api",
   "pkg/network", "pkg/networkpolicy", "pkg/podinfo")`. `pkg/network/netlink.go`
-  is not copied: only the dataplane uses `IsNetlinkRejection`, and the
-  mdlayher/netlink module is then not needed. `vendorModule` gets an exclude
+  is not copied: only `pkg/dataplane` and `pkg/dns` use
+  `IsNetlinkRejection`, and neither is vendored, so the mdlayher/netlink
+  module is not needed. Vendoring `pkg/dns` later (FQDN rules) needs it
+  back. `vendorModule` gets an exclude
   list for that.
 - One `edit` in `packet.go`: the five `syscall.IPPROTO_*` become numbers. It
   fails like every patch when upstream changes the line. Better: an upstream PR

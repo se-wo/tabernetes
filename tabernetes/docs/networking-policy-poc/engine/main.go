@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -59,8 +60,8 @@ func main() {
 	f := informers.NewSharedInformerFactory(client, 0)
 	pods, nss, nodes, nps := f.Core().V1().Pods(), f.Core().V1().Namespaces(), f.Core().V1().Nodes(), f.Networking().V1().NetworkPolicies()
 	np := networkpolicy.NewStandardNetworkPolicy("tab", nss, pods, nps)
-	syncs := 0
-	np.SetDataplaneSyncCallback(func() { syncs++ })
+	var syncs atomic.Int32 // informer handlers call it from their goroutines
+	np.SetDataplaneSyncCallback(func() { syncs.Add(1) })
 	resolver, err := podinfo.NewInformerResolver(pods.Informer())
 	if err != nil {
 		panic(err)
@@ -75,7 +76,7 @@ func main() {
 	if !cache.WaitForCacheSync(ctx.Done(), pods.Informer().HasSynced, nss.Informer().HasSynced, nps.Informer().HasSynced, nodes.Informer().HasSynced) {
 		panic("no sync")
 	}
-	fmt.Println("engine ready:", engine.Ready(), "sync callbacks:", syncs)
+	fmt.Println("engine ready:", engine.Ready(), "sync callbacks so far:", syncs.Load())
 
 	conn := func(src, dst string, port int) {
 		p := &network.Packet{Family: v1.IPv4Protocol, SrcIP: net.ParseIP(src), DstIP: net.ParseIP(dst), Proto: v1.ProtocolTCP, SrcPort: 40000, DstPort: port}

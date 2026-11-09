@@ -21,6 +21,18 @@ nft 'add rule inet tp pre ip daddr 10.244.0.0/24 meta l4proto tcp tproxy ip to :
 ip rule add fwmark 1 lookup 100
 ip route add local 0.0.0.0/0 dev lo table 100
 python3 -I "$1" &
-sleep 0.5
-ip netns exec pod python3 -I -c 'import socket; s = socket.create_connection(("10.244.0.7", 80), 2); print("pod connected from", s.getsockname())'
-wait
+listener=$!
+trap 'kill "$listener" 2>/dev/null || true' EXIT
+# Retry until the listener is bound: its start-up time varies.
+ip netns exec pod python3 -I -c '
+import socket, time
+for _ in range(50):
+    try:
+        s = socket.create_connection(("10.244.0.7", 80), 2)
+        break
+    except ConnectionRefusedError:
+        time.sleep(0.1)
+else:
+    raise SystemExit("no listener")
+print("pod connected from", s.getsockname())'
+wait "$listener"

@@ -17,8 +17,8 @@ engine)
 	cp "$here/engine/main.go" "$tmp/"
 	cd "$tmp"
 	go mod init poc >/dev/null 2>&1
-	go get "sigs.k8s.io/kube-network-policies@$KNP_VERSION" >/dev/null 2>&1
-	go mod tidy >/dev/null 2>&1
+	go get "sigs.k8s.io/kube-network-policies@$KNP_VERSION" >/dev/null
+	go mod tidy >/dev/null
 	go mod vendor
 	# The only change js/wasm needs: syscall of js has no IPPROTO_{DSTOPTS,
 	# HOPOPTS,ROUTING,FRAGMENT,SCTP}. The numbers are the IANA ones.
