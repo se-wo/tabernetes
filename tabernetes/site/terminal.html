@@ -1,7 +1,24 @@
 <link rel="stylesheet" href="%CSS%" integrity="%CSS_SRI%">
 <style>
   .tabernetes-wrap { position: relative; display: flex; flex-direction: column; border-radius: 6px; background: #0d1117; overflow: hidden; }
-  .tabernetes-terminal { height: 70vh; min-height: 420px; background: #0d1117; overflow: hidden; box-sizing: border-box; }
+  /* The terminal and the panel of "proxy" share a row; narrow screens stack them. */
+  .tabernetes-row { display: flex; height: 70vh; min-height: 420px; }
+  .tabernetes-terminal { flex: 1 1 0; min-width: 0; height: 100%; background: #0d1117; overflow: hidden; box-sizing: border-box; }
+  .tabernetes-panel { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid #30363d; background: #fff; }
+  .tabernetes-panel[hidden] { display: none; }
+  .tabernetes-panel-bar { display: flex; align-items: center; gap: .4rem; padding: 4px 8px; font: .8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c9d1d9; background: #161b22; border-bottom: 1px solid #30363d; }
+  .tabernetes-panel-bar button, .tabernetes-panel-bar a { padding: 0 .4rem; font: inherit; color: #c9d1d9; background: #21262d; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; text-decoration: none; }
+  .tabernetes-panel-bar button:hover, .tabernetes-panel-bar a:hover { background: #30363d; }
+  /* Room for the full screen button, which sits on the top right. */
+  .tabernetes-row > .tabernetes-panel:last-child .tabernetes-panel-bar { padding-right: 130px; }
+  .tabernetes-panel-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabernetes-panel iframe { flex: 1; width: 100%; border: 0; background: #fff; }
+  @media (max-width: 800px) {
+    .tabernetes-row { flex-direction: column; height: auto; min-height: 0; }
+    .tabernetes-terminal { flex: none; height: 60vh; min-height: 360px; }
+    .tabernetes-panel { flex: none; height: 60vh; border-left: 0; border-top: 1px solid #30363d; }
+    .tabernetes-row > .tabernetes-panel:last-child .tabernetes-panel-bar { padding-right: 8px; }
+  }
   /* The padding belongs on .xterm: the fit addon subtracts it there, but it
      counts the full height of the parent, so padding on the parent pushes the
      last row under the status line. */
@@ -16,7 +33,7 @@
   .tabernetes-fullscreen:hover { opacity: 1; }
   .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { position: fixed; inset: 0; z-index: 9999; background: #0d1117; }
   .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { border-radius: 0; }
-  .tabernetes-wrap:fullscreen .tabernetes-terminal, .tabernetes-wrap.tabernetes-fs .tabernetes-terminal { flex: 1; height: auto; min-height: 0; }
+  .tabernetes-wrap:fullscreen .tabernetes-row, .tabernetes-wrap.tabernetes-fs .tabernetes-row { flex: 1; height: auto; min-height: 0; }
 </style>
 <div class="tabernetes-wrap" id="tabernetes-wrap" hidden>
   <div class="tabernetes-terminal" id="tabernetes" data-wasm="%WASM%" data-worker="%WORKER%" data-size="%SIZE%"></div>
