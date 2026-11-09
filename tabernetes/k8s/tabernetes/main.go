@@ -350,15 +350,15 @@ func main() {
 			return c.prepareJoin(open)
 		})
 	}))
-	// prepareWorkerNode(open: (label: string) => Promise<channel>): Promise<config>
+	// prepareWorkerNode(open: (label: string) => Promise<channel>, gpu: boolean): Promise<config>
 	// for a node in a Web Worker (web/src/nodes.js, nodeworker.go).
 	api.Set("prepareWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
-		open := a[0]
+		open, gpu := a[0], len(a) > 1 && a[1].Truthy()
 		return promise(func() (any, error) {
 			if c == nil {
 				return nil, fmt.Errorf("cluster is not ready yet")
 			}
-			return c.prepareWorkerNode(open)
+			return c.prepareWorkerNode(open, gpu)
 		})
 	}))
 	// drainNode(name, write): Promise<number>, kubectl drain before rmnode

@@ -4,6 +4,7 @@ import { joinBuiltins } from "./join.js";
 import { proxyBuiltins } from "./proxy.js";
 import { installWasi } from "./wasi.js";
 import { nodeBuiltins } from "./nodes.js";
+import { installGPU } from "./gpu.js";
 
 const el = document.getElementById("tabernetes");
 // The panel of "proxy" goes next to the terminal: both share a row.
@@ -22,6 +23,8 @@ const wasi = {
   mirror: el.dataset.oci === "" ? "" : url(el.dataset.oci, "oci/"),
 };
 installWasi(wasi);
+// The tab node offers the WebGPU adapter of the browser as a DRA device.
+installGPU();
 // The status line under the terminal: the nodes (Docker, then Web Workers),
 // then the forwarded ports.
 const status = document.getElementById("tabernetes-status");

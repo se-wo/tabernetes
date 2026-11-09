@@ -75,6 +75,9 @@ type tabNode struct {
 	workers map[types.UID]*podWorker
 
 	net *serviceProxy
+
+	gpuMu sync.Mutex
+	gpu   *gpuAdapter // the WebGPU adapter it offers (tabnode_gpu.go), nil for none
 }
 
 var theTabNode *tabNode
@@ -157,6 +160,8 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 		return fmt.Errorf("kubelet server: %w", err)
 	}
 	go n.heartbeat(ctx)
+	// The WebGPU adapter of the browser as a DRA device (tabnode_gpu.go).
+	n.syncGPU(ctx)
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
@@ -331,6 +336,7 @@ func (n *tabNode) heartbeat(ctx context.Context) {
 			if err := n.updateStatus(ctx); err != nil && ctx.Err() == nil {
 				fmt.Fprintln(os.Stderr, "tab node: status:", err)
 			}
+			n.syncGPU(ctx)
 			lastStatus = time.Now()
 		}
 		select {
