@@ -360,15 +360,19 @@ func main() {
 			return c.prepareWorkerNode(open)
 		})
 	}))
-	// removeWorkerNode(name): Promise, after its worker is gone. The pod GC
-	// deletes the pods of the node, their controllers make new ones.
+	// removeWorkerNode(name): Promise, after its worker is gone. The node is
+	// gone for good, so its pods are deleted at once (the pod GC would wait
+	// for a while) and their controllers make new ones on other nodes.
 	api.Set("removeWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
 		name := a[0].String()
 		return promise(func() (any, error) {
 			removeWorkerNode(name)
-			if code := runKubectl(context.Background(), []string{"delete", "node", name, "--wait=false"}, nil, io.Discard, os.Stderr); code != 0 {
+			ctx := context.Background()
+			if code := runKubectl(ctx, []string{"delete", "node", name, "--wait=false"}, nil, io.Discard, os.Stderr); code != 0 {
 				return nil, fmt.Errorf("deleting node %s failed (exit %d)", name, code)
 			}
+			runKubectl(ctx, []string{"delete", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=" + name,
+				"--grace-period=0", "--force", "--wait=false"}, nil, io.Discard, io.Discard)
 			return nil, nil
 		})
 	}))
