@@ -246,6 +246,15 @@ runc with `--no-new-keyring --no-pivot`, because the profile blocks `keyctl`
 and `pivot_root`. `CAP_SYS_ADMIN` is close to root, though. `--privileged`
 still works, too. Real isolation from the host needs rootless Docker or Podman.
 
+WebAssembly pods (`runtimeClassName: wasmtime`) run with the wasmtime shim of
+[runwasi](https://github.com/containerd/runwasi), and the node has the label
+`tabernetes.io/wasm=true`. The shim creates containers with libcontainer
+instead of runc. In the user namespace containerd starts it through the agent
+(`agent/wasm.go`), which turns the `sysfs` mounts into read-only bind mounts of
+`/sys`: libcontainer mounts `sysfs` read-write first, which the kernel refuses
+there. With capabilities instead of the user namespace, the node runs no
+WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
+
 ## Limits
 
 - Wasm runs on one thread. The boot takes about 15 seconds. Everything shares
