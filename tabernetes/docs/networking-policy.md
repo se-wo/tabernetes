@@ -38,7 +38,7 @@ Docker nodes run the upstream DaemonSet unchanged, next to flannel.
 
 | Question | Result |
 | --- | --- |
-| Do the engine packages build for `GOOS=js GOARCH=wasm`? (`run.sh engine`) | Yes, with one change. `pkg/network/packet.go` uses `syscall.IPPROTO_{DSTOPTS,HOPOPTS,ROUTING,FRAGMENT,SCTP}`. js has no such constants; the patch writes their IANA numbers. `pkg/network/netlink.go` builds as it is: mdlayher/netlink has a stub for other systems. `pkg/api`, `pkg/networkpolicy`, `pkg/podinfo` and `plugins/npa-v1alpha2` need nothing. |
+| Do the engine packages build for `GOOS=js GOARCH=wasm`? (`run.sh engine`) | Yes, with one change to `pkg/network/packet.go`: js has no `syscall.IPPROTO_{DSTOPTS,HOPOPTS,ROUTING,FRAGMENT,SCTP}`, the patch writes their IANA numbers. `pkg/network/netlink.go` builds (mdlayher/netlink has a stub). The other packages need nothing. |
 | Does it decide correctly in Wasm? (`run.sh engine`) | Yes. With a fake clientset, informers and a policy "web only from role=client on port 80" it allows client→web:80, denies client→web:8080, another pod→web and the node IP→web. One decision takes 0.1 ms, the first 1 ms. |
 | Does the source IP survive the fake network of Go? (`run.sh fakenet`) | Yes. A `net.Dialer` with `LocalAddr` set to the pod IP gives the listener exactly that address as `RemoteAddr`. A dial to an address without a listener fails at once with "connection refused". |
 | Can a rootless Docker node catch traffic to tab pods? (`run.sh tproxy`) | Yes, on this kernel. In a new user and network namespace (the agent's setup), an nftables `tproxy` rule hands a pod's connection to a listener with `IP_TRANSPARENT`. The listener sees the source pod IP and the original destination. |
@@ -171,7 +171,7 @@ one origin, and a Docker node joined with a bootstrap token the user pasted.
 Only the page creates channels. A pod has no handle on them: native containers
 are goroutines with a context, WASI pods have no sockets, and pods on Docker
 nodes live in network namespaces of their own. WebRTC data channels run over
-DTLS, with the fingerprints of the copy-paste signaling. So the channel is
+DTLS, with the fingerprints exchanged by copy and paste. So the channel is
 an authenticated link between two nodes. The header is as trustworthy as the
 node that sends it.
 
@@ -359,7 +359,7 @@ goes in the same way:
 
 ### Size
 
-Measured on a small js/wasm binary with client-go informers, with and without
+Measured on a small Wasm binary with client-go informers, with and without
 the engine (`-s -w`):
 
 | | raw | zstd -19 |
@@ -393,7 +393,7 @@ every connection.
 
 ## Proof that it is real
 
-The NetworkPolicy e2e tests of Kubernetes (`test/e2e/network/netpol`,
+The NetworkPolicy end-to-end tests of Kubernetes (`test/e2e/network/netpol`,
 `[sig-network] Netpol`) create namespaces x, y, z with pods a, b, c and probe
 every pair with `kubectl exec ... /agnhost connect <host:port> --timeout=<t>
 --protocol=<p>`. [Cyclonus](https://github.com/mattfenwick/cyclonus) does
@@ -445,7 +445,7 @@ Each phase is one small PR.
 | 4 | Docker nodes: the DaemonSet addon, the bridge sysctl, the `pod` channel in the agent with the transparent helper (H7) and TPROXY (H8). Docker pods reach tab pods. | 4 days |
 | 5 | ClusterNetworkPolicy: the network-policy-api CRDs as an addon, `plugins/npa-v1alpha2` in the engine on tab nodes, the matching flag on the DaemonSet. | 2 days |
 | 6 | Strict mode: cut open connections on policy changes. | 2 days |
-| 7 | e2e and Cyclonus runs, documented in the README, maybe in CI with a Docker node. | 2 days |
+| 7 | End-to-end and Cyclonus runs, documented in `README.md`, maybe in CI with a Docker node. | 2 days |
 
 ## Risks
 
