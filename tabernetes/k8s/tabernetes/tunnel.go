@@ -117,8 +117,10 @@ func splice(a, b io.ReadWriteCloser) {
 	go func() { io.Copy(b, a); once.Do(closeBoth) }()
 }
 
-// attachChannel is called from JS for every data channel the node agent opens.
-// Label "api" tunnels to the kube-apiserver.
+// attachChannel is called from JS for every data channel the other side
+// opens. Label "api" tunnels to the kube-apiserver (from a Docker node or a
+// node in a Web Worker), "kubelet:10250" to the kubelet API of this
+// instance's node (in a Web Worker, from the apiserver of the page).
 func attachChannel(dc js.Value) {
 	label := dc.Get("label").String()
 	conn := newDCConn(dc)
@@ -127,6 +129,8 @@ func attachChannel(dc js.Value) {
 		switch label {
 		case "api":
 			target = "127.0.0.1:6443"
+		case "kubelet:10250":
+			target = net.JoinHostPort(tabNodeIP, "10250")
 		default:
 			fmt.Fprintln(os.Stderr, "tabernetes: unknown data channel", label)
 			conn.Close()

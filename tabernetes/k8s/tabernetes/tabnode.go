@@ -46,9 +46,14 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// The node of this wasm instance: "tab" next to the control plane, or a
+// node in a Web Worker (nodeworker.go). One node per instance.
+var (
+	tabNodeName = "tab"
+	tabNodeIP   = advertiseIP
+)
+
 const (
-	tabNodeName  = "tab"
-	tabNodeIP    = advertiseIP
 	tabTaintKey  = "tabernetes.io/tab"
 	tabPodsDir   = "/var/lib/tabnode/pods"
 	kubeletPort  = 10250
@@ -74,23 +79,50 @@ type tabNode struct {
 
 var theTabNode *tabNode
 
+// nodeCreds are what a tab node needs to talk to the apiserver: its client
+// certificate as system:node:<name>, the serving certificate of its kubelet
+// API and the admin token for the service proxy. PEM encoded.
+type nodeCreds struct {
+	ca, cert, key, servingCert, servingKey []byte
+	adminToken                             string
+}
+
+// issueNodeCreds issues the credentials of the node name with IP ip. The
+// kubelet authenticates as system:node:<name>, so the Node authorizer and
+// NodeRestriction treat it like any other kubelet.
+func (c *cluster) issueNodeCreds(name, ip string) (nodeCreds, error) {
+	c.ca.issue("node-"+name, "system:node:"+name, []string{"system:nodes"}, false, nil, nil)
+	c.ca.issue("node-"+name+"-serving", name, nil, true, []string{name}, []net.IP{net.ParseIP(ip)})
+	nc := nodeCreds{ca: c.ca.caPEM, adminToken: c.adminToken}
+	for _, f := range []struct {
+		dst  *[]byte
+		file string
+	}{
+		{&nc.cert, "node-" + name + ".crt"}, {&nc.key, "node-" + name + ".key"},
+		{&nc.servingCert, "node-" + name + "-serving.crt"}, {&nc.servingKey, "node-" + name + "-serving.key"},
+	} {
+		b, err := os.ReadFile(p(f.file))
+		if err != nil {
+			return nc, err
+		}
+		*f.dst = b
+		os.Remove(p(f.file)) // the keys of another node stay out of this one
+	}
+	return nc, nil
+}
+
 // startTabNode registers the node and runs it until the tab closes.
-func startTabNode(ctx context.Context, c *cluster) error {
-	// The kubelet authenticates as system:node:tab, so the Node authorizer
-	// and NodeRestriction treat it like any other kubelet.
-	c.ca.issue("tab-kubelet", "system:node:"+tabNodeName, []string{"system:nodes"}, false, nil, nil)
-	c.ca.issue("tab-kubelet-serving", tabNodeName, nil, true, []string{tabNodeName}, []net.IP{net.ParseIP(tabNodeIP)})
-	certPEM, err := os.ReadFile(p("tab-kubelet.crt"))
-	if err != nil {
+func startTabNode(ctx context.Context, nc nodeCreds) error {
+	// servingTLS reads the serving certificate from the file system.
+	if err := os.WriteFile(p("tab-kubelet-serving.crt"), nc.servingCert, 0o644); err != nil {
 		return err
 	}
-	keyPEM, err := os.ReadFile(p("tab-kubelet.key"))
-	if err != nil {
+	if err := os.WriteFile(p("tab-kubelet-serving.key"), nc.servingKey, 0o600); err != nil {
 		return err
 	}
 	cfg := &rest.Config{
 		Host:            "https://127.0.0.1:6443",
-		TLSClientConfig: rest.TLSClientConfig{CAData: c.ca.caPEM, CertData: certPEM, KeyData: keyPEM},
+		TLSClientConfig: rest.TLSClientConfig{CAData: nc.ca, CertData: nc.cert, KeyData: nc.key},
 		QPS:             50,
 		Burst:           100,
 		UserAgent:       "tabernetes-kubelet/" + version.Get().GitVersion,
@@ -101,8 +133,8 @@ func startTabNode(ctx context.Context, c *cluster) error {
 	}
 	adminCfg := &rest.Config{
 		Host:            "https://127.0.0.1:6443",
-		BearerToken:     c.adminToken,
-		TLSClientConfig: rest.TLSClientConfig{CAData: c.ca.caPEM},
+		BearerToken:     nc.adminToken,
+		TLSClientConfig: rest.TLSClientConfig{CAData: nc.ca},
 		QPS:             50,
 		Burst:           100,
 		UserAgent:       "tabernetes-proxy/" + version.Get().GitVersion,
@@ -112,7 +144,7 @@ func startTabNode(ctx context.Context, c *cluster) error {
 		return err
 	}
 
-	n := &tabNode{client: client, admin: admin, caPEM: c.ca.caPEM, usedIPs: map[string]bool{}, workers: map[types.UID]*podWorker{}}
+	n := &tabNode{client: client, admin: admin, caPEM: nc.ca, usedIPs: map[string]bool{}, workers: map[types.UID]*podWorker{}}
 	broadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 	n.recorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "kubelet", Host: tabNodeName})

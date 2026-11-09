@@ -275,7 +275,7 @@ func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint) (io.ReadWri
 		return s.portForward(ctx, e.pod.Namespace, e.pod.Name, e.port)
 	}
 	ip := e.ip
-	if ip == tabNodeIP && e.port == 6443 {
+	if ip == advertiseIP && e.port == 6443 { // the apiserver, also from a node in a Web Worker
 		// The kubernetes service: the apiserver listens on 127.0.0.1 only.
 		ip = "127.0.0.1"
 	}
