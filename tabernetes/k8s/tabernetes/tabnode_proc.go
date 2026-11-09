@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -181,9 +182,12 @@ func podCall(ctx context.Context, args []string) ([]string, error) {
 	return args, nil
 }
 
-// throttle limits the CPU of a container. A container may run for one
-// slice, then it sleeps: 1ms per 20ms by default, more with a CPU limit
-// below one core (limits.cpu: 100m runs 10% of the time).
+// throttle limits the CPU of a container. The whole tab has one thread:
+// every command yields to the other goroutines (the control plane), and a
+// container that runs a whole slice without blocking sleeps as long as it
+// ran, so the browser gets its event loop back. That is half of the thread
+// at most, less with a lower CPU limit (limits.cpu: 100m runs 10% of the
+// time).
 type throttle struct {
 	streak time.Time // start of the current run without a pause
 	last   time.Time // the previous command
@@ -192,21 +196,24 @@ type throttle struct {
 
 func newThrottle(res v1.ResourceRequirements) *throttle {
 	now := time.Now()
-	t := &throttle{streak: now, last: now, share: 0.95}
-	if q, ok := res.Limits[v1.ResourceCPU]; ok && q.MilliValue() > 0 && q.MilliValue() < 1000 {
+	t := &throttle{streak: now, last: now, share: 0.5}
+	if q, ok := res.Limits[v1.ResourceCPU]; ok && q.MilliValue() > 0 && q.MilliValue() < 500 {
 		t.share = float64(q.MilliValue()) / 1000
 	}
 	return t
 }
 
 const (
-	slice = 20 * time.Millisecond
+	slice = 10 * time.Millisecond
 	// A gap this long between two commands means the container blocked
 	// (sleep, a read, a pipe) and let everything else run already.
 	idleGap = 2 * time.Millisecond
 )
 
 func (t *throttle) tick(ctx context.Context) error {
+	// wasm has no preemption: without this, a busy container keeps the
+	// thread for the whole slice and the apiserver waits.
+	runtime.Gosched()
 	now := time.Now()
 	if now.Sub(t.last) > idleGap {
 		t.streak = now
