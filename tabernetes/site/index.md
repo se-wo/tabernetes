@@ -5,7 +5,10 @@ description = "A real Kubernetes control plane, compiled to WebAssembly: kube-ap
 
 Tabernetes is a real Kubernetes v1.37 control plane. Not a simulator. kube-apiserver, kube-controller-manager, kube-scheduler and kubectl are the upstream Go code, compiled to WebAssembly into one binary. The only replaced part is etcd: a small in-memory implementation of the etcd v3 API. Everything runs in your browser tab. Reload the page and the cluster is gone.
 
-This version also has a node inside the tab: `kubectl get nodes` shows the node `tab`, and pods run there without Docker. Try `k create deploy web --image=nginx --replicas=3`, `k expose deploy web --port 80` and `wget -qO- web`. Pods with `runtimeClassName: wasmtime` run WebAssembly (WASI) images in Web Workers, and the same manifest runs on a Docker node with [runwasi](https://github.com/containerd/runwasi). Type `join` and start the printed `docker run` command to add a real node. The container runs a kubelet and containerd and connects to your browser with WebRTC. Then `kubectl get pods -A` shows flannel, kube-proxy and CoreDNS on a real node.
+This version also has a node inside the tab: `kubectl get nodes` shows the node `tab`, and pods run there without Docker.
+Try `k create deploy web --image=nginx --replicas=3`, `k expose deploy web --port 80` and `wget -qO- web`.
+Pods with `runtimeClassName: wasmtime` run WebAssembly (WASI) images in Web Workers, and the same manifest runs on a Docker node with [runwasi](https://github.com/containerd/runwasi).
+Type `join` and start the printed `docker run` command to add a real node. The container runs a kubelet and containerd and connects to your browser with WebRTC. Then `kubectl get pods -A` shows flannel, kube-proxy and CoreDNS on a real node.
 
 {{< tabernetes >}}
 

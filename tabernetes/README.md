@@ -90,8 +90,8 @@ A container is not a process:
   kubectl (with the service account of the pod, through 10.96.0.1) and the
   programs of the built-in images (`tabnode_images*.go`): nginx (it reads
   nginx.conf and conf.d), httpd, pause, whoami, http-echo, echo-server,
-  agnhost, podinfo, hello-app, redis with redis-cli, the busybox/alpine/ubuntu
-  family, curlimages/curl, bitnami/kubectl. Any other image runs its command
+  agnhost, podinfo, hello-app, redis with redis-cli, the `busybox`/`alpine`/`ubuntu`
+  family, `curlimages/curl`, `bitnami/kubectl`. Any other image runs its command
   in the shell; an unknown image without a command waits as
   `UnsupportedImage`. Each container sees its own root directory with the
   files of its image and its volume mounts.
@@ -113,16 +113,16 @@ graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
 
-Pods listen on their pod IP in the in-process network of the wasm. There is
+Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port
 and forwards to ready endpoints (endpoints on a Docker node through the
-port-forward of the apiserver). wget, curl and nslookup resolve service names
+port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service names
 with the search path of the pod, in pods and in the terminal:
 `k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
 
-wasm has no preemption: a busy loop in a goroutine would freeze the tab.
+Wasm has no preemption: a busy loop in a goroutine would freeze the tab.
 Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
 with `limits.cpu` below 500m).
