@@ -8,7 +8,9 @@
 //   - excludes unix-only files from js with build tags,
 //   - copies _overlay/ (js stubs and helpers) into the tree,
 //   - applies a few content patches,
-//   - vendors mvdan.cc/sh (the terminal's shell) at MVDAN_SH_VERSION and
+//   - vendors mvdan.cc/sh (the terminal's shell) at MVDAN_SH_VERSION,
+//   - vendors the engine of sigs.k8s.io/kube-network-policies at
+//     KUBE_NETWORK_POLICIES_VERSION and
 //   - copies tabernetes/ (the main package) to cmd/tabernetes.
 //
 // Every patch fails when its target is gone. A Kubernetes update shows exactly
@@ -157,6 +159,24 @@ func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	// and golang.org/x/term, are vendored by Kubernetes already.
 	vendorModule("mvdan.cc/sh/v3", os.Getenv("MVDAN_SH_VERSION"),
 		"expand", "fileutil", "internal", "interp", "pattern", "syntax")
+
+	// The NetworkPolicy engine of the tab nodes (tabernetes/tabnode_netpol.go,
+	// docs/networking-policy.md): its decision packages, not its nftables
+	// dataplane. Kubernetes vendors their other dependencies already.
+	vendorModule("sigs.k8s.io/kube-network-policies", os.Getenv("KUBE_NETWORK_POLICIES_VERSION"),
+		"pkg/api", "pkg/network", "pkg/networkpolicy", "pkg/podinfo")
+	// netlink.go needs mdlayher/netlink and only serves pkg/dataplane and
+	// pkg/dns, which are not vendored.
+	remove("vendor/sigs.k8s.io/kube-network-policies/pkg/network/netlink.go")
+	// syscall of js has no IPPROTO_{DSTOPTS,HOPOPTS,ROUTING,FRAGMENT,SCTP}:
+	// the IANA numbers.
+	edit("vendor/sigs.k8s.io/kube-network-policies/pkg/network/packet.go",
+		"syscall.IPPROTO_DSTOPTS", "60",
+		"syscall.IPPROTO_HOPOPTS", "0",
+		"syscall.IPPROTO_ROUTING", "43",
+		"syscall.IPPROTO_FRAGMENT", "44",
+		"syscall.IPPROTO_SCTP", "132",
+	)
 
 	// A background job ("k port-forward ... &") runs with the context of its
 	// command line, which ends with the line. The hook lets tabernetes give each
@@ -307,6 +327,13 @@ func vendorModule(path, version string, pkgs ...string) {
 	b, err := os.ReadFile(filepath.Join(mod.Dir, "LICENSE"))
 	must(err)
 	must(os.WriteFile(filepath.Join(dst, "LICENSE"), b, 0o644))
+}
+
+// remove deletes a file that must exist.
+func remove(path string) {
+	if err := os.Remove(path); err != nil {
+		fail("%s: patch target not found: %v", path, err)
+	}
 }
 
 func must(err error) {

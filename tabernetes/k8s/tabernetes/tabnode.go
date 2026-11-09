@@ -74,7 +74,8 @@ type tabNode struct {
 	mu      sync.Mutex
 	workers map[types.UID]*podWorker
 
-	net *serviceProxy
+	net    *serviceProxy
+	policy *netPolicy // NetworkPolicy (tabnode_netpol.go)
 }
 
 var theTabNode *tabNode
@@ -160,6 +161,9 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
+	if n.policy, err = newNetPolicy(ctx, admin, tabNodeName); err != nil {
+		return fmt.Errorf("network policy: %w", err)
+	}
 
 	// The pod CIDR comes from the node IPAM controller of the
 	// controller-manager, a moment after the node exists.

@@ -21,6 +21,11 @@ NODE_IMAGE = "ghcr.io/jkroepke/tabernetes"
 # The shell of the terminal, vendored into the Kubernetes checkout by k8s/patch.go.
 # renovate: datasource=go depName=mvdan.cc/sh/v3
 MVDAN_SH_VERSION = "v3.14.1"
+# The NetworkPolicy engine of the tab nodes (docs/networking-policy.md),
+# vendored into the Kubernetes checkout by k8s/patch.go. Its k8s.io modules
+# must match KUBERNETES_VERSION.
+# renovate: datasource=go depName=sigs.k8s.io/kube-network-policies
+KUBE_NETWORK_POLICIES_VERSION = "v1.1.3"
 
 [tasks.checkout]
 description = "Clone Kubernetes at KUBERNETES_VERSION into .build/kubernetes"
