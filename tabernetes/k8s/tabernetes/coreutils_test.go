@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -81,6 +82,11 @@ func TestCoreutilsErrors(t *testing.T) {
 		"wget",
 		"wget ftp://example.com",
 		"wget -O a -O",
+		"wget web",
+		"curl",
+		"curl -s web",
+		"curl --nope x",
+		"nslookup web",
 	} {
 		if out, code := sh(t, script); code == 0 {
 			t.Errorf("%s: exit 0, output %q", script, out)
@@ -124,6 +130,8 @@ func TestSplitWgetArgs(t *testing.T) {
 		{[]string{"u", "-O", "-"}, []string{"-O", "-"}, []string{"u"}},
 		{[]string{"-O", "x.md", "u"}, []string{"-O", "x.md"}, []string{"u"}},
 		{[]string{"--", "-u"}, nil, []string{"-u"}},
+		{[]string{"-qO", "/dev/null", "u"}, []string{"-qO", "/dev/null"}, []string{"u"}},
+		{[]string{"-qT", "2", "-O-", "u"}, []string{"-qT", "2", "-O-"}, []string{"u"}},
 	} {
 		flags, urls := splitWgetArgs(tc.args)
 		if !slices.Equal(flags, tc.flags) || !slices.Equal(urls, tc.urls) {
@@ -150,6 +158,53 @@ func TestWgetURL(t *testing.T) {
 	for _, raw := range []string{"ftp://example.com", "https://"} {
 		if u, err := wgetURL(raw); err == nil {
 			t.Errorf("wgetURL(%q) = %v, want an error", raw, u)
+		}
+	}
+}
+
+func TestParseCurl(t *testing.T) {
+	c, err := parseCurl(context.Background(), interp.HandlerContext{}, []string{
+		"-sSfL", "-XPUT", "-H", "A: b", "--data", "x=1", "-d", "y=2", "-o", "out", "web:8080", "-m", "1.5", "-w", "%{http_code}", "--compressed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.silent || !c.showErr || !c.fail || !c.location || c.method != "PUT" || !slices.Equal(c.headers, []string{"A: b"}) ||
+		!slices.Equal(c.data, []string{"x=1", "y=2"}) || !slices.Equal(c.outputs, []string{"out"}) ||
+		!slices.Equal(c.urls, []string{"web:8080"}) || c.timeout != 1500*time.Millisecond || c.writeOut != "%{http_code}" {
+		t.Errorf("parseCurl: %+v", c)
+	}
+	for _, args := range [][]string{{"-Z"}, {"--nope"}, {"-o"}, {"-m", "x", "u"}} {
+		if _, err := parseCurl(context.Background(), interp.HandlerContext{}, args); err == nil {
+			t.Errorf("parseCurl(%q): no error", args)
+		}
+	}
+}
+
+func TestCurlWriteOut(t *testing.T) {
+	got := curlWriteOut(`code=%{http_code}\n%%{x}%{nope}\t.`, map[string]string{"http_code": "200"})
+	if want := "code=200\n%{x}\t."; got != want {
+		t.Errorf("curlWriteOut = %q, want %q", got, want)
+	}
+}
+
+func TestClusterURLs(t *testing.T) {
+	// Without a tab node only localhost and cluster IPs are known.
+	for raw, want := range map[string]string{
+		"10.96.0.20":         "http://10.96.0.20",
+		"10.96.0.20:8080/x":  "http://10.96.0.20:8080/x",
+		"10.244.0.5?a=b":     "http://10.244.0.5?a=b",
+		"[::1]:80":           "http://[::1]:80",
+		"example.com/10.96.": "https://example.com/10.96.",
+	} {
+		u, err := cmdURL(context.Background(), raw)
+		if err != nil || u.String() != want {
+			t.Errorf("cmdURL(%q) = %v, %v; want %s", raw, u, err, want)
+		}
+	}
+	for host, want := range map[string]bool{"web": true, "web.default.svc": true, "x.cluster.local": true, "example.com": false, "localhost": false, "10.96.0.1": false} {
+		if got := noSuchHost(context.Background(), host); got != want {
+			t.Errorf("noSuchHost(%q) = %v, want %v", host, got, want)
 		}
 	}
 }
