@@ -19,6 +19,9 @@ ARG CONTAINERD_VERSION=2.4.2
 ARG RUNC_VERSION=v1.5.2
 ARG CNI_PLUGINS_VERSION=v1.9.1
 ARG CRICTL_VERSION=v1.37.0
+# The shim of runwasi runs WebAssembly pods (runtimeClassName: wasmtime).
+# renovate: github-releases=containerd/runwasi versioning=regex:^containerd-shim-wasmtime/v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+ARG WASMTIME_SHIM_VERSION=containerd-shim-wasmtime/v0.6.1
 RUN apt-get update && apt-get install -y --no-install-recommends binutils ca-certificates curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /out
 # Every download is checked against the sha256 its release publishes. That
@@ -47,6 +50,10 @@ RUN set -eux; \
     url="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz"; \
     get "${url}" "${url}.sha256"; \
     tar -xzf "/tmp/${url##*/}" -C usr/local/bin crictl; \
+    case "${TARGETARCH}" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; *) echo "no wasmtime shim for ${TARGETARCH}" >&2; exit 1 ;; esac; \
+    url="https://github.com/containerd/runwasi/releases/download/${WASMTIME_SHIM_VERSION}"; \
+    get "${url}/containerd-shim-wasmtime-${arch}-linux-musl.tar.gz" "${url}/SHA256SUMS"; \
+    tar -xzf "/tmp/containerd-shim-wasmtime-${arch}-linux-musl.tar.gz" --no-same-owner -C usr/local/bin ./containerd-shim-wasmtime-v1; \
     rm -f /tmp/*.tar.gz /tmp/*.tgz; \
     # crictl and the CNI plugins ship with symbols: about 12 MB less compressed
     strip usr/local/bin/crictl opt/cni/bin/*; \
@@ -103,7 +110,9 @@ COPY --from=passt /out/ /
 COPY --from=images /out/ /
 COPY --from=agent /tabernetes /usr/local/bin/tabernetes
 # containerd calls runc through the agent when the node is not privileged
-RUN ln -s tabernetes /usr/local/bin/tabernetes-runc
+# and the wasmtime shim, see agent/wasm.go
+RUN ln -s tabernetes /usr/local/bin/tabernetes-runc \
+ && ln -s tabernetes /usr/local/bin/tabernetes-wasmtime
 COPY crictl.yaml /etc/crictl.yaml
 # containerd needs a real file system for its overlayfs snapshots
 VOLUME ["/var/lib/containerd"]

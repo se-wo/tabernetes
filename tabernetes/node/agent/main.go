@@ -80,6 +80,10 @@ func main() {
 		runRuncWrapper(os.Args[1:])
 		return
 	}
+	if filepath.Base(os.Args[0]) == filepath.Base(wasmShimWrapper) {
+		runWasmShimWrapper(os.Args[1:])
+		return
+	}
 	stun := flag.String("stun", "stun:stun.l.google.com:19302", "STUN server, empty to disable")
 	noKubelet := flag.Bool("no-kubelet", false, "only run the tunnel (for testing)")
 	advertise := flag.String("advertise", "127.0.0.1", "extra host ICE candidate addresses, comma separated (for docker -p port mappings), empty to disable")
@@ -444,6 +448,10 @@ failCgroupV1: false
 		containerdConfig += "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]\n" +
 			"  BinaryName = '" + runcWrapper + "'\n"
 	}
+	wasm := wasmRuntime()
+	if wasm {
+		containerdConfig += wasmContainerdConfig()
+	}
 	if err := writeFile("/etc/tabernetes/containerd.toml", containerdConfig, 0o644); err != nil {
 		return err
 	}
@@ -461,14 +469,18 @@ failCgroupV1: false
 	if err := waitForSocket(ctx, "/run/containerd/containerd.sock", 30*time.Second); err != nil {
 		return fmt.Errorf("containerd did not start, see /var/log/containerd.log: %w", err)
 	}
-	go supervise(ctx, "kubelet", "kubelet",
+	kubeletArgs := []string{
 		"--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf",
 		"--kubeconfig=/var/lib/kubelet/kubeconfig",
 		"--config=/var/lib/kubelet/config.yaml",
-		"--hostname-override="+tok.Name,
-		"--node-ip="+tok.IP,
+		"--hostname-override=" + tok.Name,
+		"--node-ip=" + tok.IP,
 		"--v=1",
-	)
+	}
+	if wasm {
+		kubeletArgs = append(kubeletArgs, "--node-labels="+wasmNodeLabel)
+	}
+	go supervise(ctx, "kubelet", "kubelet", kubeletArgs...)
 	return nil
 }
 
