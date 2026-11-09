@@ -20,10 +20,11 @@ import (
 // ctr is one container of a pod. Its fields are guarded by the mutex of the
 // pod worker.
 type ctr struct {
-	w       *podWorker
-	spec    v1.Container
-	init    bool // a classic init container: runs once, before the others
-	sidecar bool // an init container with restartPolicy Always
+	w         *podWorker
+	spec      v1.Container
+	init      bool // a classic init container: runs once, before the others
+	sidecar   bool // an init container with restartPolicy Always
+	ephemeral bool // spec.ephemeralContainers: runs once, never restarted
 
 	state     v1.ContainerState
 	last      v1.ContainerState
@@ -38,6 +39,9 @@ type ctr struct {
 	delay     time.Duration // the next crash loop back-off
 	proc      *process
 	stdin     *stdinHub
+	launched  bool          // an ephemeral container that was started
+	started   chan struct{} // closed when the container started the first time
+	didStart  bool
 
 	// set by prepare
 	image *builtinImage
@@ -49,7 +53,7 @@ type ctr struct {
 }
 
 func newCtr(w *podWorker, spec v1.Container, init, sidecar bool) *ctr {
-	c := &ctr{w: w, spec: spec, init: init, sidecar: sidecar, logs: newLogBuf()}
+	c := &ctr{w: w, spec: spec, init: init, sidecar: sidecar, logs: newLogBuf(), started: make(chan struct{})}
 	c.state.Waiting = &v1.ContainerStateWaiting{Reason: "ContainerCreating"}
 	if init || sidecar {
 		c.state.Waiting.Reason = "PodInitializing"
@@ -61,6 +65,9 @@ func newCtr(w *podWorker, spec v1.Container, init, sidecar bool) *ctr {
 }
 
 func (c *ctr) fieldPath() string {
+	if c.ephemeral {
+		return fmt.Sprintf("spec.ephemeralContainers{%s}", c.spec.Name)
+	}
 	if c.init || c.sidecar {
 		return fmt.Sprintf("spec.initContainers{%s}", c.spec.Name)
 	}
@@ -74,10 +81,23 @@ func (c *ctr) setWaiting(reason, msg string) {
 	c.w.markDirty()
 }
 
-func (c *ctr) isRunning() bool {
-	c.w.mu.Lock()
-	defer c.w.mu.Unlock()
-	return c.state.Running != nil
+// markStartedLocked notes that the container started (it runs, its
+// postStart hook and startup probe passed). w.mu is held.
+func (c *ctr) markStartedLocked() {
+	if !c.didStart {
+		c.didStart = true
+		close(c.started)
+	}
+}
+
+// waitStarted waits until the container started the first time.
+func (c *ctr) waitStarted(ctx context.Context) bool {
+	select {
+	case <-c.started:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // final reports whether the container ended for good. w.mu is held.
@@ -104,7 +124,7 @@ func (c *ctr) status() v1.ContainerStatus {
 		ImageID:              imageID(c.spec.Image, c.image, c.wasm),
 		ContainerID:          c.id,
 	}
-	if !c.init {
+	if !c.init && !c.ephemeral {
 		cs.Started = ptr.To(c.state.Running != nil && c.startupOK)
 	}
 	return cs
@@ -158,7 +178,8 @@ func (c *ctr) prepare() error {
 
 // runOnce starts the container and waits until it exits. ok is false when
 // the pod stops.
-func (c *ctr) runOnce(ctx context.Context) (code int, ok bool) {
+func (c *ctr) runOnce() (code int, ok bool) {
+	ctx := c.w.ctx
 	if ctx.Err() != nil {
 		return 0, false
 	}
@@ -193,7 +214,9 @@ func (c *ctr) runOnce(ctx context.Context) (code int, ok bool) {
 	c.id = "tabernetes://" + randToken(32)
 	c.w.mu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
+	// The run ends with the kill at the end of a stop, not with the start
+	// of it: a stopping pod runs the preStop hooks first.
+	runCtx, cancel := context.WithCancel(c.w.killCtx)
 	defer cancel()
 	var proc *process
 	var err error
@@ -224,26 +247,38 @@ func (c *ctr) runOnce(ctx context.Context) (code int, ok bool) {
 	c.w.mu.Lock()
 	c.proc = proc
 	c.runStart = time.Now()
-	c.state = v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: started}}
-	c.startupOK = c.spec.StartupProbe == nil
-	c.ready = !c.init && c.spec.ReadinessProbe == nil && c.startupOK
 	c.w.mu.Unlock()
-	c.w.markDirty()
 
-	if !c.init {
-		go c.probe(runCtx, proc)
+	// Like the kubelet, the container counts as running only once its
+	// postStart hook returned. A hook that fails kills the run.
+	if !c.postStart(runCtx, proc) {
+		c.w.mu.Lock()
+		c.state = v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: started}}
+		c.startupOK = c.spec.StartupProbe == nil
+		c.ready = !c.init && !c.ephemeral && c.spec.ReadinessProbe == nil && c.startupOK
+		if c.startupOK {
+			c.markStartedLocked()
+		}
+		c.w.mu.Unlock()
+		c.w.markDirty()
+		if !c.init && !c.ephemeral {
+			go c.probe(runCtx, proc)
+		}
 	}
 
 	select {
 	case <-proc.done:
 	case <-ctx.Done():
+		// The pod stops: the preStop hook, then the kill.
+		c.stopProc(proc, c.w.stopDeadline(), "", true)
+	case <-c.w.killCtx.Done():
 		proc.kill("")
-		select {
-		case <-proc.done:
-		case <-time.After(2 * time.Second):
-			// A goroutine that ignores its context: the code is gone
-			// with the tab only, but the container counts as stopped.
-		}
+	}
+	select {
+	case <-proc.done:
+	case <-time.After(2 * time.Second):
+		// A goroutine that ignores its context: the code is gone
+		// with the tab only, but the container counts as stopped.
 	}
 	code = proc.exitCode()
 	reason := "Completed"
@@ -295,11 +330,12 @@ func (c *ctr) backoff(ctx context.Context) bool {
 
 // process is a running container: a goroutine or a Web Worker.
 type process struct {
-	done   chan struct{}
-	code   atomic.Int32
-	cancel context.CancelFunc
-	reason atomic.Value // why it was killed
-	killed atomic.Bool
+	done     chan struct{}
+	code     atomic.Int32
+	cancel   context.CancelFunc
+	reason   atomic.Value // why it was killed
+	killed   atomic.Bool
+	stopping atomic.Bool // a stop (preStop hook, kill) is under way
 }
 
 func newProcess(cancel context.CancelFunc) *process {
@@ -374,7 +410,9 @@ func (r *rootFS) real(p string) string {
 	p = path.Clean("/" + p)
 	for _, m := range r.mounts {
 		if p == m.path || strings.HasPrefix(p, m.path+"/") {
-			return m.real + p[len(m.path):]
+			// path.Join: a hostPath of / (kubectl debug node/...) must
+			// not turn /host/etc into //etc.
+			return path.Join(m.real, p[len(m.path):])
 		}
 	}
 	if p == "/" {
@@ -392,10 +430,7 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 			return nil, err
 		}
 	}
-	hostname := pod.Name
-	if pod.Spec.Hostname != "" {
-		hostname = pod.Spec.Hostname
-	}
+	hostname := specHostname(pod)
 	_, ip := w.podInfo()
 	files := map[string]string{
 		"/etc/hostname":    hostname + "\n",

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ func (c *ctr) probe(ctx context.Context, proc *process) {
 				c.w.mu.Lock()
 				c.startupOK = true
 				c.ready = spec.ReadinessProbe == nil
+				c.markStartedLocked()
 				c.w.mu.Unlock()
 				c.w.markDirty()
 			}
@@ -87,9 +89,14 @@ func (c *ctr) runProbe(ctx context.Context, proc *process, kind string, p *v1.Pr
 				case "Readiness":
 					result(false)
 				default:
-					msg := fmt.Sprintf("Container %s failed %s probe, will be restarted", c.spec.Name, strings.ToLower(kind))
-					c.w.ctrEvent(c, v1.EventTypeNormal, "Killing", "%s", msg)
-					proc.kill(msg)
+					// Like the kubelet: the preStop hook runs, within the
+					// grace period of the probe or the pod.
+					msg := fmt.Sprintf("Container %s failed %s probe", c.spec.Name, strings.ToLower(kind))
+					if c.sidecar || c.w.restartPolicy() != v1.RestartPolicyNever {
+						msg += ", will be restarted"
+					}
+					pod, _ := c.w.podInfo()
+					c.stopProc(proc, time.Now().Add(killGrace(pod, p)), msg, false)
 					return false
 				}
 			}
@@ -106,29 +113,9 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 	_, ip := c.w.podInfo()
 	switch {
 	case p.HTTPGet != nil:
-		port, err := c.resolvePort(p.HTTPGet.Port)
+		req, err := c.httpGetRequest(ctx, p.HTTPGet, ip, "probe")
 		if err != nil {
 			return err
-		}
-		host := p.HTTPGet.Host
-		if host == "" {
-			host = ip
-		}
-		scheme := strings.ToLower(string(p.HTTPGet.Scheme))
-		if scheme == "" {
-			scheme = "http"
-		}
-		path := p.HTTPGet.Path
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, strconv.Itoa(port)), path), nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("User-Agent", "kube-probe/tabernetes")
-		for _, h := range p.HTTPGet.HTTPHeaders {
-			req.Header.Set(h.Name, h.Value)
 		}
 		resp, err := probeClient.Do(req)
 		if err != nil {
@@ -179,15 +166,72 @@ var probeClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// resolvePort turns a named port into its number.
-func (c *ctr) resolvePort(p intstr.IntOrString) (int, error) {
-	if p.Type == intstr.Int {
-		return p.IntValue(), nil
+// httpGetRequest is the request of an httpGet probe or hook, like
+// NewRequestForHTTPGetAction of the kubelet: the host is the pod IP unless
+// set, the port may be a name of the container, and the headers may set
+// Host, User-Agent and Accept.
+func (c *ctr) httpGetRequest(ctx context.Context, a *v1.HTTPGetAction, ip, purpose string) (*http.Request, error) {
+	port, err := c.resolvePort(a.Port)
+	if err != nil {
+		return nil, err
 	}
-	for _, cp := range c.spec.Ports {
-		if cp.Name == p.StrVal {
-			return int(cp.ContainerPort), nil
+	host := a.Host
+	if host == "" {
+		host = ip
+	}
+	scheme := strings.ToLower(string(a.Scheme))
+	if scheme == "" {
+		scheme = "http"
+	}
+	u, err := url.Parse(a.Path)
+	if err != nil {
+		u = &url.URL{Path: a.Path}
+	}
+	u.Scheme = scheme
+	u.Host = net.JoinHostPort(host, strconv.Itoa(port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	h := http.Header{}
+	for _, hh := range a.HTTPHeaders {
+		h.Add(hh.Name, hh.Value)
+	}
+	if _, ok := h["User-Agent"]; !ok {
+		h.Set("User-Agent", "kube-"+purpose+"/tabernetes")
+	}
+	if _, ok := h["Accept"]; !ok {
+		h.Set("Accept", "*/*")
+	} else if h.Get("Accept") == "" {
+		h.Del("Accept")
+	}
+	req.Header = h
+	req.Host = h.Get("Host")
+	return req, nil
+}
+
+// resolvePort turns a named port into its number, like the kubelet: a name
+// that is no port of the container may still be a number.
+func (c *ctr) resolvePort(p intstr.IntOrString) (int, error) {
+	port := p.IntValue()
+	if p.Type == intstr.String {
+		port = -1
+		for _, cp := range c.spec.Ports {
+			if cp.Name == p.StrVal {
+				port = int(cp.ContainerPort)
+				break
+			}
+		}
+		if port < 0 {
+			n, err := strconv.Atoi(p.StrVal)
+			if err != nil {
+				return 0, fmt.Errorf("port %q not found in container %s", p.StrVal, c.spec.Name)
+			}
+			port = n
 		}
 	}
-	return 0, fmt.Errorf("port %q not found in container %s", p.StrVal, c.spec.Name)
+	if port <= 0 || port >= 65536 {
+		return 0, fmt.Errorf("invalid port number: %v", port)
+	}
+	return port, nil
 }

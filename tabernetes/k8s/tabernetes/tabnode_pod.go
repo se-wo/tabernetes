@@ -23,31 +23,42 @@ type podWorker struct {
 	name      string
 	dir       string // real directory of the pod in the in-memory file system
 
-	ctx    context.Context // ends when the pod stops
-	cancel context.CancelFunc
+	ctx     context.Context // ends when the pod stops: nothing starts any more
+	cancel  context.CancelFunc
+	killCtx context.Context // ends when the grace period is over: kills what is left
+	kill    context.CancelFunc
 
 	mu          sync.Mutex
 	pod         *v1.Pod // latest from the informer
 	ip          string
 	started     time.Time
 	ctrs        []*ctr // init containers first
+	ephemeral   []*ctr // spec.ephemeralContainers, as they come
 	volumesOK   bool
 	initDone    bool
 	initFailed  bool
 	terminating bool
 	deleted     bool
+	stopping    bool      // set (under mu) before ctx ends; then no wg.Add
+	stopBy      time.Time // end of the grace period of the stop
+	failReason  string    // the kubelet failed the pod (DeadlineExceeded)
+	failMessage string
 	sent        *v1.PodStatus // last status written
 
-	kick chan struct{}
-	wg   sync.WaitGroup // container supervisors
+	kick        chan struct{}
+	specChanged chan struct{}  // wakes the active deadline
+	wg          sync.WaitGroup // container supervisors
+	ewg         sync.WaitGroup // ephemeral containers
 }
 
 func newPodWorker(n *tabNode, pod *v1.Pod) *podWorker {
 	ctx, cancel := context.WithCancel(context.Background())
+	killCtx, kill := context.WithCancel(context.Background())
 	w := &podWorker{
 		n: n, uid: pod.UID, namespace: pod.Namespace, name: pod.Name, pod: pod.DeepCopy(),
 		dir: filepath.Join(tabPodsDir, string(pod.UID)), ctx: ctx, cancel: cancel,
-		started: time.Now(), kick: make(chan struct{}, 1),
+		killCtx: killCtx, kill: kill, started: time.Now(),
+		kick: make(chan struct{}, 1), specChanged: make(chan struct{}, 1),
 	}
 	for _, c := range pod.Spec.InitContainers {
 		sidecar := c.RestartPolicy != nil && *c.RestartPolicy == v1.ContainerRestartPolicyAlways
@@ -56,6 +67,7 @@ func newPodWorker(n *tabNode, pod *v1.Pod) *podWorker {
 	for _, c := range pod.Spec.Containers {
 		w.ctrs = append(w.ctrs, newCtr(w, c, false, false))
 	}
+	w.addEphemeralLocked(pod)
 	return w
 }
 
@@ -88,9 +100,15 @@ func (w *podWorker) markDirty() {
 // run is the life of the pod on this node.
 func (w *podWorker) run() {
 	go w.statusLoop()
+	go w.deadlineLoop()
 	defer w.markDirty()
 
-	ip, err := w.n.allocIP()
+	// hostNetwork (kubectl debug node/...) shares the address of the node.
+	allocIP := w.n.allocIP
+	if w.hostNetwork() {
+		allocIP = func() (string, error) { return tabNodeIP, nil }
+	}
+	ip, err := allocIP()
 	for err != nil {
 		w.event(v1.EventTypeWarning, "FailedCreatePodSandBox", "%v", err)
 		select {
@@ -98,7 +116,7 @@ func (w *podWorker) run() {
 			return
 		case <-time.After(5 * time.Second):
 		}
-		ip, err = w.n.allocIP()
+		ip, err = allocIP()
 	}
 	w.mu.Lock()
 	w.ip = ip
@@ -137,17 +155,25 @@ func (w *podWorker) run() {
 	w.volumesOK = true
 	w.mu.Unlock()
 	w.markDirty()
+	w.startEphemeral()
 
-	// Init containers run one after the other, sidecars keep running.
+	// Init containers run one after the other, sidecars keep running. The
+	// container after a sidecar waits until the sidecar started (postStart
+	// hook and startup probe passed).
 	for _, c := range w.ctrs {
 		if !c.init && !c.sidecar {
 			continue
 		}
 		if c.sidecar {
-			w.supervise(c)
+			if !w.supervise(c, nil) || !c.waitStarted(w.ctx) {
+				return
+			}
 			continue
 		}
 		if !w.runInit(c) {
+			if w.ctx.Err() == nil {
+				w.stopAll(w.killGrace()) // failed: end the sidecars
+			}
 			return
 		}
 	}
@@ -156,19 +182,50 @@ func (w *podWorker) run() {
 	w.mu.Unlock()
 	w.markDirty()
 
+	var regular sync.WaitGroup
 	for _, c := range w.ctrs {
 		if !c.init && !c.sidecar {
-			w.supervise(c)
+			w.supervise(c, &regular)
 		}
 	}
-	w.wg.Wait()
+	regular.Wait()
+	// The pod is done. Like the kubelet, stop what still runs: sidecars and
+	// ephemeral containers.
+	if w.ctx.Err() == nil {
+		w.stopAll(w.killGrace())
+	}
+}
+
+// specHostname is the hostname of the containers of a pod: the one of the
+// node with hostNetwork (they share its UTS namespace), else spec.hostname
+// or the pod name.
+func specHostname(pod *v1.Pod) string {
+	switch {
+	case pod.Spec.HostNetwork:
+		return tabNodeName
+	case pod.Spec.Hostname != "":
+		return pod.Spec.Hostname
+	}
+	return pod.Name
+}
+
+func (w *podWorker) hostNetwork() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pod.Spec.HostNetwork
+}
+
+// killGrace is the grace period to stop the pod with.
+func (w *podWorker) killGrace() time.Duration {
+	pod, _ := w.podInfo()
+	return killGrace(pod, nil)
 }
 
 // runInit runs an init container until it succeeds. false: the pod failed or
 // stops.
 func (w *podWorker) runInit(c *ctr) bool {
 	for {
-		code, ok := c.runOnce(w.ctx)
+		code, ok := c.runOnce()
 		if !ok {
 			return false
 		}
@@ -196,13 +253,26 @@ func (w *podWorker) restartPolicy() v1.RestartPolicy {
 	return w.pod.Spec.RestartPolicy
 }
 
-// supervise runs a container and restarts it by the restart policy.
-func (w *podWorker) supervise(c *ctr) {
+// supervise runs a container and restarts it by the restart policy. group,
+// if not nil, waits for it as well. false: the pod stops, nothing starts.
+func (w *podWorker) supervise(c *ctr, group *sync.WaitGroup) bool {
+	w.mu.Lock()
+	if w.stopping {
+		w.mu.Unlock()
+		return false
+	}
 	w.wg.Add(1)
+	if group != nil {
+		group.Add(1)
+	}
+	w.mu.Unlock()
 	go func() {
 		defer w.wg.Done()
+		if group != nil {
+			defer group.Done()
+		}
 		for {
-			code, ok := c.runOnce(w.ctx)
+			code, ok := c.runOnce()
 			if !ok {
 				return
 			}
@@ -219,41 +289,33 @@ func (w *podWorker) supervise(c *ctr) {
 			}
 		}
 	}()
+	return true
 }
 
 // update takes a newer version of the pod from the informer.
 func (w *podWorker) update(pod *v1.Pod) {
 	w.mu.Lock()
 	w.pod = pod.DeepCopy()
+	w.addEphemeralLocked(w.pod)
 	start := pod.DeletionTimestamp != nil && !w.terminating
 	if start {
 		w.terminating = true
 	}
 	w.mu.Unlock()
+	w.startEphemeral()
+	select {
+	case w.specChanged <- struct{}{}:
+	default:
+	}
 	if start {
 		go w.terminate(pod)
 	}
 }
 
-// terminate stops the containers of a pod that is being deleted and then
-// removes the pod object.
+// terminate stops the containers of a pod that is being deleted, within
+// its deletion grace period, and then removes the pod object.
 func (w *podWorker) terminate(pod *v1.Pod) {
-	grace := 30 * time.Second
-	if pod.DeletionGracePeriodSeconds != nil {
-		grace = time.Duration(*pod.DeletionGracePeriodSeconds) * time.Second
-	}
-	for _, c := range w.ctrs {
-		if c.isRunning() {
-			w.ctrEvent(c, v1.EventTypeNormal, "Killing", "Stopping container %s", c.spec.Name)
-		}
-	}
-	w.cancel()
-	done := make(chan struct{})
-	go func() { w.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(grace):
-	}
+	w.stopAll(killGrace(pod, nil))
 	w.flushStatus()
 	w.n.deletePod(pod)
 }
@@ -262,12 +324,15 @@ func (w *podWorker) terminate(pod *v1.Pod) {
 func (w *podWorker) gone() {
 	w.mu.Lock()
 	w.deleted = true
-	ip := w.ip
+	w.stopping = true
+	ip, ownIP := w.ip, !w.pod.Spec.HostNetwork
 	w.mu.Unlock()
 	w.cancel()
+	w.kill()
 	go func() {
 		w.wg.Wait()
-		if ip != "" {
+		w.ewg.Wait()
+		if ip != "" && ownIP {
 			w.n.releaseIP(ip)
 		}
 		os.RemoveAll(w.dir)
@@ -382,6 +447,10 @@ func (w *podWorker) buildStatus() v1.PodStatus {
 		}
 	}
 
+	for _, c := range w.ephemeral {
+		st.EphemeralContainerStatuses = append(st.EphemeralContainerStatuses, c.status())
+	}
+
 	switch {
 	case w.initFailed:
 		st.Phase = v1.PodFailed
@@ -397,6 +466,10 @@ func (w *podWorker) buildStatus() v1.PodStatus {
 		st.Phase = v1.PodRunning
 	default:
 		st.Phase = v1.PodPending
+	}
+	if w.failReason != "" {
+		// The kubelet failed the pod (active deadline): it stays Failed.
+		st.Phase, st.Reason, st.Message = v1.PodFailed, w.failReason, w.failMessage
 	}
 	if st.Phase == v1.PodSucceeded || st.Phase == v1.PodFailed {
 		allReady = false
@@ -455,6 +528,13 @@ func (w *podWorker) podInfo() (pod *v1.Pod, ip string) {
 
 func (w *podWorker) container(name string) *ctr {
 	for _, c := range w.ctrs {
+		if c.spec.Name == name {
+			return c
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, c := range w.ephemeral {
 		if c.spec.Name == name {
 			return c
 		}
