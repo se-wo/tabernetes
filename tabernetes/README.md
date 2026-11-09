@@ -128,6 +128,14 @@ env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+`tabnode_lifecycle.go` adds what the kubelet drives on its own: `postStart`
+and `preStop` hooks with `exec`, `httpGet` and `sleep` (a failed postStart
+kills the container, preStop counts against the grace period),
+`activeDeadlineSeconds` (phase Failed, reason `DeadlineExceeded`) and
+ephemeral containers: `kubectl debug -i <pod> --image=busybox` starts one,
+and `kubectl logs/exec/attach -c` reach it. `kubectl debug node/tab` runs its
+pod with hostNetwork on the node IP and the file system of the terminal under
+`/host`.
 
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
@@ -300,6 +308,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 
 - Wasm runs on one thread. The boot takes about 15 seconds. Everything shares
   one CPU core.
+- Containers on the tab nodes get no signals. A container that stops gets
+  its preStop hook and is then killed at once; the rest of the grace period
+  is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a

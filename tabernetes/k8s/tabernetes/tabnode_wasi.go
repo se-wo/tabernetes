@@ -113,7 +113,12 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 	if rt.Type() != js.TypeObject {
 		return nil, errors.New("this page has no WebAssembly runtime (globalThis.tabernetesWasi), so it cannot run pods with runtimeClassName " + c.runtimeClass() + ". Join a Docker node with runwasi instead.")
 	}
-	img, mod, err := c.pullWasm(ctx, rt)
+	// ctx ends with the kill; the pull already ends when the pod stops.
+	pullCtx, stopPull := context.WithCancel(ctx)
+	unhook := context.AfterFunc(c.w.ctx, stopPull)
+	img, mod, err := c.pullWasm(pullCtx, rt)
+	unhook()
+	stopPull()
 	if err != nil {
 		return nil, err
 	}
