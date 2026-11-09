@@ -268,10 +268,7 @@ func resourceValue(pod *v1.Pod, ref *v1.ResourceFieldSelector) string {
 // kubelet: defaults, image, service links, envFrom, env.
 func (w *podWorker) containerEnv(pod *v1.Pod, ip string, c *v1.Container, img *builtinImage) ([]string, error) {
 	ctx := w.ctx
-	hostname := pod.Name
-	if pod.Spec.Hostname != "" {
-		hostname = pod.Spec.Hostname
-	}
+	hostname := specHostname(pod)
 	vars := map[string]string{}
 	var order []string
 	set := func(k, v string) {

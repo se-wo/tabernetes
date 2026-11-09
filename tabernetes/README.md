@@ -52,6 +52,15 @@ browser tab (single wasm binary)                     docker run tabernetes
   Ctrl-C stops the foreground command, `kubectl port-forward` and
   `kubectl proxy` included. On Windows and Linux, Ctrl-C copies instead while
   text is selected, and Ctrl-V pastes.
+- `kubectl exec -it`, `run -it`, `attach -it` and `debug -it` get the terminal
+  as their TTY: the moby/term package of kubectl asks hooks of the terminal
+  (`k8s/_overlay/vendor/github.com/moby/term/term_js.go`, `tty.go`), which
+  switch it to raw mode, so every key goes to the container, Ctrl-C included,
+  and report its size. On the tab node, a container with a TTY gets what the
+  line discipline of a kernel tty does (`tabnode_tty.go`): echo, backspace,
+  Ctrl-U, Ctrl-W, Ctrl-C ends the running command, Ctrl-D ends the input, and
+  "\n" becomes "\r\n". A shell on a TTY shows a prompt like `/ #` (BusyBox),
+  `root@<pod>:/#` (Bash) or its `PS1`.
 - `proxy svc/web` shows the service `web` in a panel next to the terminal
   (`-n <namespace>`, `svc/web:8080` or a port name for another port).
   Every request goes through the service proxy of the tab on a connection of
@@ -119,6 +128,14 @@ env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+`tabnode_lifecycle.go` adds what the kubelet drives on its own: `postStart`
+and `preStop` hooks with `exec`, `httpGet` and `sleep` (a failed postStart
+kills the container, preStop counts against the grace period),
+`activeDeadlineSeconds` (phase Failed, reason `DeadlineExceeded`) and
+ephemeral containers: `kubectl debug -i <pod> --image=busybox` starts one,
+and `kubectl logs/exec/attach -c` reach it. `kubectl debug node/tab` runs its
+pod with hostNetwork on the node IP and the file system of the terminal under
+`/host`.
 
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
@@ -146,8 +163,12 @@ MessageChannels instead of WebRTC data channels (`web/src/channel.js`):
 `api` channels to the apiserver, `kubelet:10250` channels from it. Its node IP
 comes from the same range as the Docker nodes, so both kinds mix: services
 balance over the pods of all nodes, pods on other nodes are reached through the
-port-forward of the apiserver. `rmnode <name>` stops a worker, deletes its node
-and its pods, and their controllers make new ones elsewhere. Each worker is a
+port-forward of the apiserver. `rmnode <name>` first runs `kubectl drain` on
+the node while its kubelet still runs: it cordons the node and evicts the pods,
+respecting PodDisruptionBudgets, so the pods end gracefully and their
+controllers make new ones elsewhere. Then it stops the worker and deletes the
+node. A drain that fails (a PodDisruptionBudget blocks it) keeps the node,
+cordoned; `rmnode --force <name>` skips the drain. Each worker is a
 whole Go runtime of 100 MB and more, `addnode` stops at eight.
 
 Wasm has no preemption: a busy loop in a goroutine would freeze the tab.
@@ -287,6 +308,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 
 - Wasm runs on one thread. The boot takes about 15 seconds. Everything shares
   one CPU core.
+- Containers on the tab nodes get no signals. A container that stops gets
+  its preStop hook and is then killed at once; the rest of the grace period
+  is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
@@ -295,8 +319,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   Docker node has no route into the browser.
 - The tab node is not a sandbox: all its containers share the tab, its
   memory and its in-memory file system. Native containers only look like
-  their images; nothing of a real image runs. `kubectl exec -it` and
-  `run -it` need a TTY the terminal does not pass on. UDP services,
+  their images; nothing of a real image runs. The TTY of a tab node container
+  has canonical mode only: full screen programs in a container (vi, top)
+  see lines, not keys. UDP services,
   WASI preview 2 components and sockets in WebAssembly pods are not
   supported. A shell loop without any command (`for ((;;)); do x=1; done`)
   still freezes the tab.

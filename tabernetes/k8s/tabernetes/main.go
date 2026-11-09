@@ -361,6 +361,16 @@ func main() {
 			return c.prepareWorkerNode(open)
 		})
 	}))
+	// drainNode(name, write): Promise<number>, kubectl drain before rmnode
+	// stops a worker: cordon, then evictions that respect PodDisruptionBudgets,
+	// while the kubelet of the node still runs, so pods end gracefully.
+	api.Set("drainNode", js.FuncOf(func(this js.Value, a []js.Value) any {
+		name, w := a[0].String(), jsWriter{a[1]}
+		return promise(func() (any, error) {
+			return runKubectl(context.Background(), []string{"drain", name, "--ignore-daemonsets",
+				"--delete-emptydir-data", "--force", "--timeout=120s"}, nil, w, w), nil
+		})
+	}))
 	// removeWorkerNode(name): Promise, after its worker is gone. The node is
 	// gone for good, so its pods are deleted at once (the pod GC would wait
 	// for a while) and their controllers make new ones on other nodes.

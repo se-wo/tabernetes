@@ -61,19 +61,32 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
       }
       write("They are Ready in a few seconds: k get nodes -w\n");
     },
-    // rmnode <name>... stops nodes in workers and deletes them.
+    // rmnode [--force] <name>... drains nodes in workers (kubectl drain),
+    // stops them and deletes them. --force skips the drain.
     async rmnode(args, { write }) {
-      if (!args.length) {
-        write(`usage: rmnode <name>... (${[...workers.keys()].join(", ") || "no nodes in workers"})\n`);
+      const force = args.includes("--force") || args.includes("-f");
+      const names = args.filter((a) => a !== "--force" && a !== "-f");
+      if (!names.length) {
+        write(`usage: rmnode [--force] <name>... (${[...workers.keys()].join(", ") || "no nodes in workers"})\n`);
         return 2;
       }
       let code = 0;
-      for (const name of args) {
+      for (const name of names) {
         const entry = workers.get(name);
         if (!entry) {
           write(`rmnode: ${name}: not a node in a worker\n`);
           code = 1;
           continue;
+        }
+        if (!force && entry.state === "running") {
+          // Evictions respect PodDisruptionBudgets; a blocked drain keeps the
+          // node, cordoned, like kubectl drain does.
+          const drained = await globalThis.tabernetes.drainNode(name, write);
+          if (drained !== 0) {
+            write(`rmnode: draining ${name} failed, it stays cordoned (rmnode --force ${name} removes it anyway)\n`);
+            code = 1;
+            continue;
+          }
         }
         entry.worker.terminate();
         workers.delete(name);

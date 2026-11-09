@@ -1,24 +1,30 @@
 package main
 
 import (
+	"context"
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/moby/term"
 )
 
-// tty is the terminal for full screen programs (vi, kubectl edit). Normally
-// the browser does the line editing and the shell gets complete lines. In raw
-// mode every key goes straight to the running program instead.
+// tty is the terminal for full screen programs (vi, kubectl edit) and for
+// kubectl exec -it, run -it and attach -it. Normally the browser does the
+// line editing and the shell gets complete lines. In raw mode every key goes
+// straight to the running program instead.
 var tty = &terminal{keys: make(chan string, 256)}
 
 type terminal struct {
-	mu   sync.Mutex
-	out  io.Writer // the terminal itself, also when stdout is redirected
-	held []byte    // output of everything else while a raw mode program runs
-	keys chan string
-	raw  atomic.Bool
-	cols atomic.Int32
-	rows atomic.Int32
+	mu      sync.Mutex
+	out     io.Writer // the terminal itself, also when stdout is redirected
+	held    []byte    // output of everything else while a full screen program runs
+	keys    chan string
+	raw     atomic.Bool
+	alt     bool          // raw mode on the alternate screen (vi): hold other output
+	rawDone chan struct{} // closes when the current raw mode ends
+	cols    atomic.Int32
+	rows    atomic.Int32
 }
 
 // resizeKey is sent to a raw mode program when the terminal changes size.
@@ -47,7 +53,7 @@ type holdWriter struct{ t *terminal }
 
 func (h holdWriter) Write(b []byte) (int, error) {
 	h.t.mu.Lock()
-	if h.t.raw.Load() {
+	if h.t.raw.Load() && h.t.alt {
 		h.t.held = append(h.t.held, b...)
 		h.t.mu.Unlock()
 		return len(b), nil
@@ -87,21 +93,112 @@ func (t *terminal) size() (cols, rows int) {
 // enterRaw switches to raw mode and the alternate screen. The returned
 // function switches back.
 func (t *terminal) enterRaw() func() {
-	for len(t.keys) > 0 {
-		<-t.keys
-	}
-	t.raw.Store(true)
+	t.startRaw(true)
 	io.WriteString(t, "\x1b[?1049h\x1b[H\x1b[2J")
 	return func() {
 		io.WriteString(t, "\x1b[?1049l")
-		t.mu.Lock()
-		t.raw.Store(false)
-		held := t.held
-		t.held = nil
-		t.mu.Unlock()
-		t.Write(held)
+		t.endRaw()
 	}
 }
+
+// startRaw passes every key to the program from now on; alt holds the
+// output of everything else (a full screen program owns the screen).
+func (t *terminal) startRaw(alt bool) {
+	for len(t.keys) > 0 {
+		<-t.keys
+	}
+	t.mu.Lock()
+	t.alt = alt
+	t.rawDone = make(chan struct{})
+	t.mu.Unlock()
+	t.raw.Store(true)
+}
+
+func (t *terminal) endRaw() {
+	t.mu.Lock()
+	if !t.raw.Load() {
+		t.mu.Unlock()
+		return
+	}
+	t.raw.Store(false)
+	close(t.rawDone)
+	held := t.held
+	t.held = nil
+	t.alt = false
+	t.mu.Unlock()
+	t.Write(held)
+}
+
+// The terminal for kubectl -it. kubectl asks github.com/moby/term whether
+// its stdin is a terminal, switches it to raw mode and polls its size; the
+// js variant of that package (k8s/_overlay) asks these hooks. Only the stdin
+// that the shell gives to kubectl in the foreground (ttyIn) and the output
+// below have the file descriptor ttyFd.
+const ttyFd = 1 << 30
+
+func init() {
+	term.JS.IsTerminal = func(fd uintptr) bool { return fd == ttyFd }
+	term.JS.MakeRaw = func(uintptr) error {
+		tty.startRaw(false)
+		return nil
+	}
+	term.JS.Restore = func(uintptr) { tty.endRaw() }
+	term.JS.Size = func(uintptr) (uint16, uint16) {
+		cols, rows := tty.size()
+		return uint16(cols), uint16(rows)
+	}
+	term.JS.Streams = func() (io.ReadCloser, io.Writer, io.Writer) {
+		return &ttyIn{ctx: context.Background()}, ttyOut{}, ttyOut{}
+	}
+}
+
+// ttyIn reads the keys of the browser terminal while it is in raw mode.
+// Outside raw mode it is at its end, like the stdin of other commands.
+type ttyIn struct {
+	ctx context.Context
+	buf []byte
+}
+
+func (r *ttyIn) Fd() uintptr  { return ttyFd }
+func (r *ttyIn) Close() error { return nil }
+
+func (r *ttyIn) Read(p []byte) (int, error) {
+	for len(r.buf) == 0 {
+		tty.mu.Lock()
+		done := tty.rawDone
+		tty.mu.Unlock()
+		if !tty.raw.Load() || done == nil {
+			return 0, io.EOF
+		}
+		select {
+		case s := <-tty.keys:
+			if s != resizeKey {
+				r.buf = []byte(s)
+			}
+		case <-done:
+			return 0, io.EOF
+		case <-r.ctx.Done():
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+// ttyOut writes to the browser terminal itself.
+type ttyOut struct{}
+
+func (ttyOut) Fd() uintptr                 { return ttyFd }
+func (ttyOut) Write(b []byte) (int, error) { return tty.Write(b) }
+
+// termStdin is the stdin of the shell of the terminal: commands that read it
+// get end of file, only kubectl -it in the foreground reads keys (ttyIn).
+type termStdinReader struct{}
+
+func (termStdinReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+var termStdin io.Reader = termStdinReader{}
 
 // key is one key press: a printable rune or the name of a special key.
 type key struct {
