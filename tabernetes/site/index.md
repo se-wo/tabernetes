@@ -9,7 +9,7 @@ This version also has a node inside the tab: `kubectl get nodes` shows the node 
 Try `k create deploy web --image=nginxdemos/hello --replicas=3`, `k expose deploy web --port 80` and `proxy svc/web`: the page of the service opens next to the terminal, and every reload shows the next replica.
 `addnode 2` starts two more nodes, each in a Web Worker of its own.
 Pods with `runtimeClassName: wasmtime` run WebAssembly (WASI) images in Web Workers, and the same manifest runs on a Docker node with [runwasi](https://github.com/containerd/runwasi).
-With WebGPU in your browser, `k get resourceslices` shows its adapter as a Dynamic Resource Allocation device (`webgpu.tabernetes.io`), and WebAssembly pods with a ResourceClaim for it run compute shaders on your GPU (see the README).
+With WebGPU in your browser, `k get resourceslices` shows its adapter as a Dynamic Resource Allocation device (`webgpu.tabernetes.io`), and WebAssembly pods with a ResourceClaim for it run compute shaders on your GPU.
 Type `join` and start the printed `docker run` command to add a real node. The container runs a kubelet and containerd and connects to your browser with WebRTC. Then `kubectl get pods -A` shows flannel, kube-proxy and CoreDNS on a real node.
 And yes, it runs Doom. After a join, type `doom`. [KubeDoom](https://github.com/storax/kubedoom) starts on the Docker node, and every pod in the default namespace is a monster. Shoot one, and KubeDoom deletes the pod. The Deployment brings it back, of course.
 
