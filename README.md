@@ -34,6 +34,8 @@ This is a modified version of Tabernetes. The changes to the original work:
   longer overwrite each other.
 - WebAssembly pods: a WASI runtime in Web Workers runs WebAssembly container
   images on the tab node, and runwasi runs them on the Docker node.
+- `doom` and `vnc`, taken over from a later version of the original, with
+  KubeDoom kept off the tab node and the nodes in Web Workers.
 - Publishing of only Tabernetes with GitHub Pages: a standalone page
   (`tabernetes/site/`) instead of the Hugo blog, the workflow
   `.github/workflows/pages.yaml`, the node image under the owner of this
@@ -67,8 +69,8 @@ Third-party software keeps its own license and is not covered by the
 Creative Commons license: Kubernetes (Apache License 2.0), the Go standard
 library (BSD-3-Clause), mvdan.cc/sh (BSD-3-Clause), the other Go modules
 compiled into the binary, and the JavaScript packages of the terminal
-(xterm.js and fzstd, MIT). The site build collects the list and the license
-texts into `THIRD_PARTY_LICENSES.txt` next to the page
+(xterm.js and fzstd, MIT; noVNC, MPL-2.0). The site build collects the list
+and the license texts into `THIRD_PARTY_LICENSES.txt` next to the page
 (`tabernetes/site/third-party.mjs`); the footer of the page links it.
 
 ## Build
