@@ -1,19 +1,4 @@
-{{- /* Browser terminal with a Kubernetes control plane compiled to WebAssembly. See tabernetes/. */ -}}
-{{- /* Built by "mise run build" in tabernetes/. Fingerprinted, so a new build gets
-       new URLs and the page can keep the binary in the Cache Storage. */ -}}
-{{- $wasm := resources.Get "tabernetes/tabernetes.wasm.zst" -}}
-{{- $js := resources.Get "tabernetes/tabernetes.js" -}}
-{{- $worker := resources.Get "tabernetes/unzstd.js" -}}
-{{- $css := resources.Get "tabernetes/xterm.css" -}}
-{{- if not (and $wasm $js $worker $css) -}}
-  {{- warnf "Tabernetes is not built, run \"mise run build\" in tabernetes/ (%s)" .Page.File.Path -}}
-<p><em>The Tabernetes terminal is not built.</em></p>
-{{- else -}}
-{{- $wasm = $wasm | fingerprint -}}
-{{- $js = $js | fingerprint -}}
-{{- $worker = $worker | fingerprint -}}
-{{- $css = $css | fingerprint -}}
-<link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+<link rel="stylesheet" href="%CSS%" integrity="%CSS_SRI%">
 <style>
   .tabernetes-wrap { position: relative; display: flex; flex-direction: column; border-radius: 6px; background: #0d1117; overflow: hidden; }
   .tabernetes-terminal { height: 70vh; min-height: 420px; background: #0d1117; overflow: hidden; box-sizing: border-box; }
@@ -34,11 +19,12 @@
   .tabernetes-wrap:fullscreen .tabernetes-terminal, .tabernetes-wrap.tabernetes-fs .tabernetes-terminal { flex: 1; height: auto; min-height: 0; }
 </style>
 <div class="tabernetes-wrap" id="tabernetes-wrap" hidden>
-  <div class="tabernetes-terminal" id="tabernetes" data-wasm="{{ $wasm.RelPermalink }}" data-worker="{{ $worker.RelPermalink }}" data-size="{{ len $wasm.Content }}"></div>
+  <div class="tabernetes-terminal" id="tabernetes" data-wasm="%WASM%" data-worker="%WORKER%" data-size="%SIZE%"></div>
   <div class="tabernetes-status" id="tabernetes-status" aria-live="polite"></div>
   <button class="tabernetes-fullscreen" id="tabernetes-fullscreen" type="button" title="Full screen (Esc to leave)">Full screen</button>
 </div>
-<button class="tabernetes-start" id="tabernetes-start" type="button">Boot the cluster (downloads ~{{ math.Round (div (float (len $wasm.Content)) 1048576) }} MB)</button>
+<button class="tabernetes-start" id="tabernetes-start" type="button">Boot the cluster (downloads ~%MB% MB)</button>
+<noscript><p><em>The terminal needs JavaScript and WebAssembly.</em></p></noscript>
 <script>
   (() => {
     const wrap = document.getElementById("tabernetes-wrap");
@@ -66,15 +52,18 @@
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && wrap.classList.contains("tabernetes-fs")) { wrap.classList.remove("tabernetes-fs"); label(); }
     });
-    document.getElementById("tabernetes-start").addEventListener("click", (e) => {
-      e.target.remove();
+    // The binary is large: download it only on request. #boot in the URL
+    // starts it right away.
+    const start = () => {
+      document.getElementById("tabernetes-start")?.remove();
       wrap.hidden = false;
       const s = document.createElement("script");
       s.type = "module";
-      s.src = "{{ $js.RelPermalink }}";
-      s.integrity = "{{ $js.Data.Integrity }}";
+      s.src = "%JS%";
+      s.integrity = "%JS_SRI%";
       document.body.appendChild(s);
-    });
+    };
+    document.getElementById("tabernetes-start").addEventListener("click", start);
+    if (location.hash === "#boot") start();
   })();
 </script>
-{{- end }}

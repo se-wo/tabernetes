@@ -38,6 +38,14 @@ jobs:
         id: version
         run: echo "kubernetes=$(sed -n 's/^KUBERNETES_VERSION = "\(.*\)"$/\1/p' tabernetes/mise.toml)" >> "${GITHUB_OUTPUT}"
 
+      # The image of this repository's owner: a fork publishes its own image,
+      # and its page (pages.yaml) prints it. ghcr.io wants lower case.
+      - name: Image name
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=ghcr.io/${OWNER,,}/tabernetes" >> "${GITHUB_OUTPUT}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
@@ -71,4 +79,4 @@ jobs:
           sbom: true
           # Only latest: the printed docker run uses --pull always, so every
           # join gets the image that matches the current page.
-          tags: ghcr.io/jkroepke/tabernetes:latest
+          tags: ${{ steps.image.outputs.name }}:latest

@@ -1,11 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-
   # All pull requests, also the ones stacked on another pull request branch.
+  # main is built, tested and published by pages.yaml.
   pull_request:
 
   workflow_dispatch:
@@ -13,7 +10,7 @@ on:
 permissions: {}
 
 # One run per branch at a time, so pull requests do not queue behind each
-# other or behind the Pages deployment of main.
+# other.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -24,58 +21,33 @@ jobs:
     runs-on: ubuntu-26.04-arm
     permissions:
       contents: read
-    env:
-      HUGO_ENVIRONMENT: production
-      TZ: Europe/Berlin
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
 
-      # tabernetes/mise.toml inherits the root mise.toml, so this installs the site
-      # tools (node, hugo, sass) and the tabernetes tools (go) in one go.
+      # tabernetes/mise.toml inherits the root mise.toml: node and go in one go.
       - name: Setup mise
         uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           working_directory: tabernetes
 
-      - name: Install frontend dependencies
-        run: npm install --ignore-scripts --no-audit --no-fund --no-package-lock
-
-      - name: Setup Pages
-        id: pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Cache Restore
-        id: cache-restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ runner.temp }}/hugo_cache
-          key: hugo-${{ github.run_id }}
-          restore-keys:
-            hugo-
-      
-      - name: Configure Git
-        run: git config core.quotepath false
-
+      # Same key as pages.yaml: pull requests reuse the binary of main.
       - name: Cache tabernetes
         id: cache-tabernetes
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            assets/tabernetes/tabernetes.wasm.zst
+            tabernetes/.build/assets/tabernetes.wasm.zst
+            tabernetes/.build/assets/THIRD_PARTY_LICENSES.go.json
             tabernetes/.build/wasm_exec.js
-          key: tabernetes-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/k8s/**') }}
+          key: tabernetes-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/k8s/**', 'tabernetes/site/third-party.mjs') }}
 
       - name: Build tabernetes
+        if: steps.cache-tabernetes.outputs.cache-hit != 'true'
         working-directory: tabernetes
-        run: mise run "${TARGET}"
-        env:
-          # on a cache hit only the (cheap) web part is rebuilt
-          TARGET: ${{ steps.cache-tabernetes.outputs.cache-hit == 'true' && 'web' || 'build' }}
+        run: mise run wasm
 
       # Only when the wasm was rebuilt: the cache key covers everything the
       # tests check (tabernetes/k8s/**, tabernetes/mise.toml).
@@ -83,40 +55,10 @@ jobs:
         if: steps.cache-tabernetes.outputs.cache-hit != 'true'
         working-directory: tabernetes
         run: mise run test
-      
-      # go mod tidy (e.g. from Renovate) drops the theme because no Go code
-      # imports it. Hugo then silently falls back to an old LoveIt release.
-      - name: Check Hugo module requirement
-        run: |
-          if ! grep -q '^require github.com/dillonzq/LoveIt ' go.mod; then
-            echo "::error file=go.mod::the LoveIt requirement is missing, go mod tidy removed it"
-            exit 1
-          fi
 
-      - name: Build with Hugo
-        run: |
-          hugo \
-            --gc \
-            --minify \
-            --baseURL "${BASE_URL}" \
-            --cacheDir "${RUNNER_TEMP}/hugo_cache"
-        env:
-          BASE_URL: ${{ steps.pages.outputs.base_url }}/
-          RUNNER_TEMP: ${{ runner.temp }}
-      
-      - name: Cache Save
-        if: github.ref_name == 'main'
-        id: cache-save
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ runner.temp }}/hugo_cache
-          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
-      
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: ./public
+      - name: Build page
+        working-directory: tabernetes
+        run: mise run site
 
   lint:
     name: Lint
@@ -153,22 +95,6 @@ jobs:
           VALIDATE_MARKDOWN: true
           VALIDATE_RENOVATE: true
           VALIDATE_SHELL_SHFMT: true
-          # Hugo layout templates contain Go template syntax and are not standalone HTML documents.
-          FILTER_REGEX_EXCLUDE: ^layouts/.*[.](html|md)$
+          # Templates of the page (tabernetes/site/build.mjs), not standalone HTML documents.
+          FILTER_REGEX_EXCLUDE: ^tabernetes/site/.*[.]html$
           STRIP_DEFAULT_WORKSPACE_FOR_REGEX: true
-  deploy:
-    if: github.repository_owner == 'jkroepke' && github.ref_name == 'main'
-    name: Deploy
-    permissions:
-      contents: read
-      id-token: write
-      pages: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-26.04
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

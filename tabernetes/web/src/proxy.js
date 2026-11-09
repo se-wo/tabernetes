@@ -1,11 +1,18 @@
 // proxy <port> opens what listens on localhost:<port> of the in-browser
 // cluster (kubectl port-forward) in a new tab. A service worker
-// (static/tabernetes-proxy/sw.js) catches the requests of that tab and posts them
-// here; Go runs them against its in-process network.
+// (web/proxy-sw.js, published as tabernetes-proxy/sw.js next to the page)
+// catches the requests of that tab and posts them here; Go runs them against
+// its in-process network.
 const B = (s) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
 
-export function proxyBuiltins({ worker = "/tabernetes-proxy/sw.js", scope = "/tabernetes-proxy/", status } = {}) {
+// The worker and its scope are relative to the page, so the site works under
+// any base path (GitHub Pages: /<repo>/tabernetes-proxy/).
+export function proxyBuiltins({
+  scope = new URL("tabernetes-proxy/", document.baseURI).pathname,
+  worker = `${scope}sw.js`,
+  status,
+} = {}) {
   const sw = navigator.serviceWorker;
   if (sw) {
     sw.addEventListener("message", async (e) => {

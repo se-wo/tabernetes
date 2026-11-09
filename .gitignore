@@ -1,25 +1,6 @@
-### Hugo template
-# Generated files by hugo
-/public/
-/resources/_gen/
-/assets/jsconfig.json
-hugo_stats.json
-
-# Executable may be added to repository
-hugo.exe
-hugo.darwin
-hugo.linux
-
-# Temporary lock file while building
-/.hugo_build.lock
-
 /.idea/
 
-# Frontend dependencies
-/node_modules/
-
 # tabernetes build output (built in CI, see tabernetes/mise.toml)
-/assets/tabernetes/
 /tabernetes/.build/
-/tabernetes/web/node_modules/
+/tabernetes/web/node_modules
 /tabernetes/web/src/wasm_exec.js
