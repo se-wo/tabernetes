@@ -98,6 +98,20 @@ export async function startTerminal(el, opts) {
   }));
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
+  // wasm_exec.js reads the wall clock from Date, in milliseconds. Kubernetes
+  // names an event <object>.<UnixNano in hex>, so two events of one object in
+  // the same millisecond got the same name and the second one overwrote the
+  // first ("Pulled" with the message of "Created"). A clock with the
+  // resolution of performance.now() that never repeats keeps them apart.
+  let lastWall = 0n;
+  go.importObject.gojs["runtime.walltime"] = (sp) => {
+    sp >>>= 0;
+    let ns = BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
+    if (ns <= lastWall) ns = lastWall + 1n;
+    lastWall = ns;
+    go.mem.setBigInt64(sp + 8, ns / 1000000000n, true);
+    go.mem.setInt32(sp + 16, Number(ns % 1000000000n), true);
+  };
   const instance = await instantiate(unpack(opts.wasmURL, counted, total, opts.workerURL), go.importObject);
   term.writeln("");
   globalThis.tabernetesStatus(cached ? "compiled WebAssembly from the browser cache" : "downloaded and compiled WebAssembly");
