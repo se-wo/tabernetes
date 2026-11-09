@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -96,5 +97,34 @@ func TestShellPromptDefault(t *testing.T) {
 	}
 	if got := shellPrompt(context.Background(), "bash", r); got != "root@localhost:/# " {
 		t.Errorf("bash prompt = %q", got)
+	}
+}
+
+// The shell wraps stdin in a type of its own; ttyOf and the terminal
+// shell need the reader they gave it.
+func TestUnwrapStdin(t *testing.T) {
+	want := strings.NewReader("")
+	var got io.Reader
+	r, err := interp.New(interp.StdIO(want, io.Discard, io.Discard), interp.ExecHandlers(func(interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			got = interp.HandlerCtx(ctx).Stdin
+			return nil
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := syntax.NewParser().Parse(strings.NewReader("x"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if unwrapStdin(got) != io.Reader(want) {
+		t.Fatalf("unwrapStdin(%T) is not the reader of the shell", got)
+	}
+	if unwrapStdin(termStdin) != termStdin {
+		t.Fatal("unwrapStdin changed termStdin")
 	}
 }

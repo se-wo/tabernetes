@@ -205,7 +205,7 @@ func (s *shell) kubectl(ctx context.Context, hc interp.HandlerContext, args []st
 	// In the foreground, without a redirection, stdin is the terminal: what
 	// kubectl exec -it, run -it and attach -it need. A job (&) has none.
 	stdin := hc.Stdin
-	if stdin == termStdin {
+	if unwrapStdin(stdin) == termStdin {
 		stdin = strings.NewReader("")
 		if !inJob(ctx) {
 			stdin = &ttyIn{ctx: ctx}

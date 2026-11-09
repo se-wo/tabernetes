@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -274,8 +275,30 @@ func (t *ttyOutput) follow(ctx context.Context, w io.Writer, done <-chan struct{
 // isatty(0) would tell.
 func ttyOf(ctx context.Context, stdin io.Reader) *pty {
 	pe := procOf(ctx)
-	if pe == nil || pe.tty == nil || stdin != io.Reader(pe.tty) {
+	if pe == nil || pe.tty == nil || unwrapStdin(stdin) != io.Reader(pe.tty) {
 		return nil
 	}
 	return pe.tty
+}
+
+// unwrapStdin returns the reader a shell was given as stdin: on js,
+// mvdan.cc/sh wraps it in a struct of its own with the reader embedded
+// (interp.jsReader), once per nested shell.
+func unwrapStdin(r io.Reader) io.Reader {
+	for range 8 {
+		v := reflect.ValueOf(r)
+		if v.Kind() != reflect.Struct {
+			return r
+		}
+		f := v.FieldByName("Reader")
+		if !f.IsValid() || !f.CanInterface() {
+			return r
+		}
+		in, ok := f.Interface().(io.Reader)
+		if !ok || in == nil {
+			return r
+		}
+		r = in
+	}
+	return r
 }
