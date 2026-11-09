@@ -19,6 +19,7 @@ class TCPChannel {
     this.onerror = null;
     this.onclose = null;
     this.conn = null;
+    this.error = ""; // why the dial failed, for the message of the viewer
   }
 
   // connect dials after noVNC attached its handlers.
@@ -39,6 +40,7 @@ class TCPChannel {
         this.onopen?.();
       })
       .catch((err) => {
+        this.error = err.message;
         this.onerror?.(err);
         closed(1006, err.message);
       });
@@ -87,7 +89,7 @@ function view(box, port, password, write, active) {
     rfb.addEventListener("disconnect", (e) => {
       clearInterval(watch);
       overlay.remove();
-      if (!e.detail.clean && !reason) reason = "the connection broke";
+      if (!e.detail.clean && !reason) reason = channel.error || "the connection broke";
       if (reason) write(`vnc: ${reason}\n`);
       resolve(reason ? 1 : 0);
     });
