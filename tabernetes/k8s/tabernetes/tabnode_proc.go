@@ -185,33 +185,43 @@ func podCall(ctx context.Context, args []string) ([]string, error) {
 // slice, then it sleeps: 1ms per 20ms by default, more with a CPU limit
 // below one core (limits.cpu: 100m runs 10% of the time).
 type throttle struct {
-	last  time.Time
-	share float64
+	streak time.Time // start of the current run without a pause
+	last   time.Time // the previous command
+	share  float64
 }
 
 func newThrottle(res v1.ResourceRequirements) *throttle {
-	t := &throttle{last: time.Now(), share: 0.95}
+	now := time.Now()
+	t := &throttle{streak: now, last: now, share: 0.95}
 	if q, ok := res.Limits[v1.ResourceCPU]; ok && q.MilliValue() > 0 && q.MilliValue() < 1000 {
 		t.share = float64(q.MilliValue()) / 1000
 	}
 	return t
 }
 
-const slice = 20 * time.Millisecond
+const (
+	slice = 20 * time.Millisecond
+	// A gap this long between two commands means the container blocked
+	// (sleep, a read, a pipe) and let everything else run already.
+	idleGap = 2 * time.Millisecond
+)
 
 func (t *throttle) tick(ctx context.Context) error {
-	ran := time.Since(t.last)
-	if ran < slice {
+	now := time.Now()
+	if now.Sub(t.last) > idleGap {
+		t.streak = now
+	}
+	t.last = now
+	if now.Sub(t.streak) < slice {
 		return nil
 	}
-	pause := time.Duration(float64(ran) * (1 - t.share) / t.share)
-	pause = max(pause, time.Millisecond)
+	pause := max(time.Duration(float64(slice)*(1-t.share)/t.share), time.Millisecond)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(pause):
 	}
-	t.last = time.Now()
+	t.streak, t.last = time.Now(), time.Now()
 	return nil
 }
 
