@@ -122,6 +122,27 @@ with the search path of the pod, in pods and in the terminal:
 `k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
 
+### More nodes in Web Workers
+
+`addnode [n]` starts more nodes, `tab-worker-1` and so on, each in a Web
+Worker of its own (`k8s/tabernetes/nodeworker.go`, `web/src/nodes.js`,
+`web/src/node.worker.js`). The worker gets the compiled WebAssembly module of
+the page, so nothing is downloaded or compiled again, and runs it as a node
+without the control plane. A worker is a thread with its own memory: the pods
+of different nodes run in parallel, for example a Deployment with
+`topologySpreadConstraints` on `kubernetes.io/hostname`. Real Wasm threads are
+not needed for that; they would need a cross-origin isolated page, which
+GitHub Pages cannot serve.
+
+A worker node talks to the control plane like a Docker node, only over
+MessageChannels instead of WebRTC data channels (`web/src/channel.js`):
+`api` channels to the apiserver, `kubelet:10250` channels from it. Its node IP
+comes from the same range as the Docker nodes, so both kinds mix: services
+balance over the pods of all nodes, pods on other nodes are reached through the
+port-forward of the apiserver. `rmnode <name>` stops a worker, deletes its node
+and its pods, and their controllers make new ones elsewhere. Each worker is a
+whole Go runtime of 100 MB and more, `addnode` stops at eight.
+
 Wasm has no preemption: a busy loop in a goroutine would freeze the tab.
 Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
@@ -263,6 +284,8 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
   Docker node, so service proxy URLs work only for pods on the tab node.
+- Pods on Docker nodes cannot reach pods on the tab nodes: kube-proxy of a
+  Docker node has no route into the browser.
 - The tab node is not a sandbox: all its containers share the tab, its
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. `kubectl exec -it` and
