@@ -77,6 +77,14 @@ spec:
         kubernetes.io/os: linux
       tolerations:
       - operator: Exists
+      # Not on the tab node (tabnode.go): it runs no real containers.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: tabernetes.io/tab
+                operator: DoesNotExist
       containers:
       - name: kube-proxy
         image: registry.k8s.io/kube-proxy:KUBERNETES_VERSION

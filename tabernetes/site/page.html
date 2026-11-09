@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%TITLE%</title>
+<meta name="description" content="%DESCRIPTION%">
+<meta name="color-scheme" content="light dark">
+<link rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">
+<style>
+  :root { --fg: #1f2328; --muted: #59636e; --bg: #ffffff; --link: #0969da; --rule: #d1d9e0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e6edf3; --muted: #9198a1; --bg: #0d1117; --link: #4493f8; --rule: #3d444d; }
+  }
+  html { background: var(--bg); color: var(--fg); }
+  body { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem 2rem; font: 1rem/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size: 1.8rem; line-height: 1.25; margin: .5rem 0 1rem; }
+  a { color: var(--link); }
+  code { font: .9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: .1em .3em; border-radius: 4px; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+  footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .85rem; }
+  footer p { margin: .4rem 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>%TITLE%</h1>
+
+%CONTENT%
+</main>
+
+<footer>
+<p>
+  <strong>Tabernetes</strong> © 2025-2026 <a href="https://github.com/jkroepke">Jan-Otto Kröpke (jkroepke)</a>, its creator:
+  <a href="https://jkroepke.de/tabernetes/">original page</a>,
+  <a href="https://github.com/jkroepke/blog/tree/main/tabernetes">original source</a>.
+  This page runs a <strong>modified version</strong> from <a href="%REPO_URL%">%REPO%</a>:
+  a Kubernetes node inside the browser tab, WebAssembly pods (a WASI runtime in Web Workers in the tab, runwasi on the Docker node)
+  and publishing with GitHub Pages. The changes are listed in the <a href="%REPO_URL%#changes">README</a>.
+  This site is not run or endorsed by the original author.
+</p>
+<p>
+  Tabernetes is licensed under <a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>
+  (<a href="LICENSE.txt">legal code</a>): non-commercial use only, adaptations under the same license.
+  It is provided as is, without warranties of any kind (section 5 of the license).
+  The page also contains third-party software (Kubernetes, Go, mvdan.cc/sh, xterm.js, fzstd and more) under its own licenses:
+  <a href="THIRD_PARTY_LICENSES.txt">third-party licenses</a>.
+</p>
+</footer>
+</body>
+</html>

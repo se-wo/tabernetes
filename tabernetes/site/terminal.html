@@ -1,0 +1,69 @@
+<link rel="stylesheet" href="%CSS%" integrity="%CSS_SRI%">
+<style>
+  .tabernetes-wrap { position: relative; display: flex; flex-direction: column; border-radius: 6px; background: #0d1117; overflow: hidden; }
+  .tabernetes-terminal { height: 70vh; min-height: 420px; background: #0d1117; overflow: hidden; box-sizing: border-box; }
+  /* The padding belongs on .xterm: the fit addon subtracts it there, but it
+     counts the full height of the parent, so padding on the parent pushes the
+     last row under the status line. */
+  .tabernetes-terminal .xterm { padding: 8px; }
+  .tabernetes-status { padding: 4px 12px; font: .8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b949e; background: #161b22; border-top: 1px solid #30363d; white-space: nowrap; overflow-x: auto; }
+  .tabernetes-status .tabernetes-node + .tabernetes-node, .tabernetes-status .tabernetes-port { margin-left: 1.5em; }
+  .tabernetes-status a.tabernetes-port { color: #58a6ff; text-decoration: none; }
+  .tabernetes-status a.tabernetes-port:hover { text-decoration: underline; }
+  .tabernetes-wrap[hidden] { display: none; }
+  .tabernetes-start { display: block; margin: 1rem auto; padding: .6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  .tabernetes-fullscreen { position: absolute; top: 8px; right: 16px; z-index: 5; padding: .2rem .5rem; font-size: .8rem; color: #c9d1d9; background: #21262d; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; opacity: .7; }
+  .tabernetes-fullscreen:hover { opacity: 1; }
+  .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { position: fixed; inset: 0; z-index: 9999; background: #0d1117; }
+  .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { border-radius: 0; }
+  .tabernetes-wrap:fullscreen .tabernetes-terminal, .tabernetes-wrap.tabernetes-fs .tabernetes-terminal { flex: 1; height: auto; min-height: 0; }
+</style>
+<div class="tabernetes-wrap" id="tabernetes-wrap" hidden>
+  <div class="tabernetes-terminal" id="tabernetes" data-wasm="%WASM%" data-worker="%WORKER%" data-size="%SIZE%"></div>
+  <div class="tabernetes-status" id="tabernetes-status" aria-live="polite"></div>
+  <button class="tabernetes-fullscreen" id="tabernetes-fullscreen" type="button" title="Full screen (Esc to leave)">Full screen</button>
+</div>
+<button class="tabernetes-start" id="tabernetes-start" type="button">Boot the cluster (downloads ~%MB% MB)</button>
+<noscript><p><em>The terminal needs JavaScript and WebAssembly.</em></p></noscript>
+<script>
+  (() => {
+    const wrap = document.getElementById("tabernetes-wrap");
+    const btn = document.getElementById("tabernetes-fullscreen");
+    // Browsers without element full screen (iPhone Safari) get a fixed overlay instead.
+    const isFull = () => document.fullscreenElement === wrap || wrap.classList.contains("tabernetes-fs");
+    const label = () => { btn.textContent = isFull() ? "Exit full screen" : "Full screen"; };
+    btn.addEventListener("click", () => {
+      if (document.fullscreenElement === wrap) document.exitFullscreen();
+      else if (wrap.classList.contains("tabernetes-fs")) wrap.classList.remove("tabernetes-fs");
+      else if (wrap.requestFullscreen) {
+        const overlay = () => { if (document.fullscreenElement !== wrap) { wrap.classList.add("tabernetes-fs"); label(); } };
+        wrap.requestFullscreen().catch(overlay);
+        // Embedded browsers (Electron) may never settle the promise.
+        setTimeout(overlay, 500);
+      }
+      else wrap.classList.add("tabernetes-fs");
+      label();
+      wrap.querySelector(".xterm-helper-textarea")?.focus();
+    });
+    document.addEventListener("fullscreenchange", () => {
+      if (document.fullscreenElement === wrap) wrap.classList.remove("tabernetes-fs");
+      label();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && wrap.classList.contains("tabernetes-fs")) { wrap.classList.remove("tabernetes-fs"); label(); }
+    });
+    // The binary is large: download it only on request. #boot in the URL
+    // starts it right away.
+    const start = () => {
+      document.getElementById("tabernetes-start")?.remove();
+      wrap.hidden = false;
+      const s = document.createElement("script");
+      s.type = "module";
+      s.src = "%JS%";
+      s.integrity = "%JS_SRI%";
+      document.body.appendChild(s);
+    };
+    document.getElementById("tabernetes-start").addEventListener("click", start);
+    if (location.hash === "#boot") start();
+  })();
+</script>

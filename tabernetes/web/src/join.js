@@ -47,21 +47,26 @@ export function joinBuiltins({ image, stun = "stun:stun.l.google.com:19302", sta
   let pending = null;
   let seq = 0;
 
+  const node = (name, text, color) => {
+    const el = document.createElement("span");
+    el.className = "tabernetes-node";
+    const dot = document.createElement("span");
+    dot.textContent = "\u25CF ";
+    dot.style.color = color;
+    el.append(dot, `${name} ${text}`);
+    return el;
+  };
   const render = () => {
     if (!status) return;
+    // The tab node (tabnode.go) is always there: a kubelet inside this tab.
+    const tab = node("tab", "in this tab", "#3fb950");
     if (!nodes.length) {
-      status.textContent = "No nodes. Type join to connect one.";
+      status.replaceChildren(tab, " \u00B7 type join to add a Docker node");
       return;
     }
-    status.replaceChildren(...nodes.map(({ info, pc }) => {
+    status.replaceChildren(tab, ...nodes.map(({ info, pc }) => {
       const [text, color] = STATES[pc.connectionState] || [pc.connectionState, "#8b949e"];
-      const el = document.createElement("span");
-      el.className = "tabernetes-node";
-      const dot = document.createElement("span");
-      dot.textContent = "\u25CF ";
-      dot.style.color = color;
-      el.append(dot, `${info.name} ${text}`);
-      return el;
+      return node(info.name, text, color);
     }));
   };
   render();

@@ -4,23 +4,28 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -34,8 +39,8 @@ var coreutils map[string]util
 
 func init() {
 	coreutils = map[string]util{
-		"base64": base64Cmd, "cat": cat, "cut": cut, "env": env, "free": free, "grep": grep,
-		"head": head, "ls": ls, "mkdir": mkdir, "rm": rm, "seq": seq, "sleep": sleepCmd,
+		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free, "grep": grep,
+		"head": head, "host": hostCmd, "ls": ls, "mkdir": mkdir, "nslookup": nslookup, "rm": rm, "seq": seq, "sleep": sleepCmd,
 		"sort": sortCmd, "tail": tail, "tee": tee, "touch": touch, "tr": tr,
 		"uniq": uniq, "vi": viCmd, "vim": viCmd, "wc": wc, "wget": wget, "xargs": xargs,
 	}
@@ -100,11 +105,10 @@ func opts(name string, args []string, spec string, long map[string]string) (map[
 
 func has(o map[string]string, k string) bool { _, ok := o[k]; return ok }
 
-func abs(hc interp.HandlerContext, p string) string {
-	if filepath.IsAbs(p) {
-		return p
-	}
-	return filepath.Join(hc.Dir, p)
+// abs makes p absolute. Inside a container of the tab node (tabnode_proc.go)
+// the path goes through the root file system of the container.
+func abs(ctx context.Context, hc interp.HandlerContext, p string) string {
+	return realPath(ctx, hc.Dir, p)
 }
 
 func fail(hc interp.HandlerContext, code int, format string, a ...any) error {
@@ -113,7 +117,7 @@ func fail(hc interp.HandlerContext, code int, format string, a ...any) error {
 }
 
 // inputs calls fn for stdin or each named file ("-" is stdin).
-func inputs(hc interp.HandlerContext, name string, files []string, fn func(file string, r io.Reader) error) error {
+func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []string, fn func(file string, r io.Reader) error) error {
 	if len(files) == 0 {
 		files = []string{"-"}
 	}
@@ -126,7 +130,7 @@ func inputs(hc interp.HandlerContext, name string, files []string, fn func(file 
 		if f == "/dev/null" {
 			r = strings.NewReader("")
 		} else if f != "-" {
-			fh, err := os.Open(abs(hc, f))
+			fh, err := os.Open(abs(ctx, hc, f))
 			if err != nil {
 				fmt.Fprintf(hc.Stderr, "%s: %s: %v\n", name, f, unwrap(err))
 				code = 1
@@ -169,14 +173,14 @@ func count(o map[string]string, def int) (int, error) {
 	return strconv.Atoi(strings.TrimPrefix(v, "+"))
 }
 
-func cat(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	return inputs(hc, "cat", args, func(_ string, r io.Reader) error {
+func cat(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	return inputs(ctx, hc, "cat", args, func(_ string, r io.Reader) error {
 		_, err := io.Copy(hc.Stdout, r)
 		return err
 	})
 }
 
-func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("grep", args, "ivcnEFoqwe:", map[string]string{"ignore-case": "i", "invert-match": "v", "count": "c", "regexp": "e"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -205,7 +209,7 @@ func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		return fail(hc, 2, "grep: %v", err)
 	}
 	found := false
-	err = inputs(hc, "grep", args, func(file string, r io.Reader) error {
+	err = inputs(ctx, hc, "grep", args, func(file string, r io.Reader) error {
 		prefix := ""
 		if len(args) > 1 {
 			prefix = file + ":"
@@ -245,7 +249,7 @@ func grep(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	return nil
 }
 
-func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("head", args, "n:#", map[string]string{"lines": "n"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -254,7 +258,7 @@ func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	if err != nil {
 		return fail(hc, 2, "head: invalid number of lines")
 	}
-	return inputs(hc, "head", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
 		sc := bufio.NewScanner(r)
 		sc.Buffer(nil, 16<<20)
 		for i := 0; i < n && sc.Scan(); i++ {
@@ -266,7 +270,7 @@ func head(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func tail(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("tail", args, "n:#", map[string]string{"lines": "n"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -276,7 +280,7 @@ func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		return fail(hc, 2, "tail: invalid number of lines")
 	}
 	from := strings.HasPrefix(o["n"], "+")
-	return inputs(hc, "tail", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "tail", args, func(_ string, r io.Reader) error {
 		l := lines(r)
 		switch {
 		case from:
@@ -291,7 +295,7 @@ func tail(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func wc(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("wc", args, "lwc", map[string]string{"lines": "l", "words": "w", "bytes": "c"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -299,7 +303,7 @@ func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	if len(o) == 0 {
 		o = map[string]string{"l": "", "w": "", "c": ""}
 	}
-	return inputs(hc, "wc", args, func(file string, r io.Reader) error {
+	return inputs(ctx, hc, "wc", args, func(file string, r io.Reader) error {
 		b, _ := io.ReadAll(r)
 		var f []string
 		if has(o, "l") {
@@ -319,7 +323,7 @@ func wc(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	})
 }
 
-func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func sortCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("sort", args, "rnuk:t:", map[string]string{"reverse": "r", "numeric-sort": "n", "unique": "u", "key": "k", "field-separator": "t"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -344,7 +348,7 @@ func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ inter
 		}
 	}
 	var all []string
-	inputs(hc, "sort", args, func(_ string, r io.Reader) error { all = append(all, lines(r)...); return nil })
+	inputs(ctx, hc, "sort", args, func(_ string, r io.Reader) error { all = append(all, lines(r)...); return nil })
 	less := func(a, b string) bool { return key(a) < key(b) }
 	if has(o, "n") {
 		num := func(s string) float64 {
@@ -368,12 +372,12 @@ func sortCmd(_ context.Context, hc interp.HandlerContext, args []string, _ inter
 	return nil
 }
 
-func uniq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func uniq(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("uniq", args, "cd", map[string]string{"count": "c", "repeated": "d"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
-	return inputs(hc, "uniq", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "uniq", args, func(_ string, r io.Reader) error {
 		l := lines(r)
 		for i := 0; i < len(l); {
 			j := i
@@ -393,7 +397,7 @@ func uniq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	})
 }
 
-func cut(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("cut", args, "d:f:", map[string]string{"delimiter": "d", "fields": "f"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -424,7 +428,7 @@ func cut(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 		}
 		fields = append(fields, [2]int{a, b})
 	}
-	return inputs(hc, "cut", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "cut", args, func(_ string, r io.Reader) error {
 		for _, l := range lines(r) {
 			f := strings.Split(l, d)
 			if len(f) == 1 {
@@ -492,12 +496,12 @@ func tr(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return nil
 }
 
-func base64Cmd(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("base64", args, "dw:", map[string]string{"decode": "d", "wrap": "w"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
-	return inputs(hc, "base64", args, func(_ string, r io.Reader) error {
+	return inputs(ctx, hc, "base64", args, func(_ string, r io.Reader) error {
 		b, _ := io.ReadAll(r)
 		if has(o, "d") {
 			s := strings.Join(strings.Fields(string(b)), "")
@@ -525,7 +529,7 @@ func base64Cmd(_ context.Context, hc interp.HandlerContext, args []string, _ int
 	})
 }
 
-func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("ls", args, "la1Ad", nil)
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -535,7 +539,7 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	}
 	code := 0
 	for n, a := range args {
-		fi, err := os.Lstat(abs(hc, a))
+		fi, err := os.Lstat(abs(ctx, hc, a))
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "ls: %s: %v\n", a, unwrap(err))
 			code = 2
@@ -543,7 +547,7 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 		}
 		var entries []fs.FileInfo
 		if fi.IsDir() && !has(o, "d") {
-			des, _ := os.ReadDir(abs(hc, a))
+			des, _ := os.ReadDir(abs(ctx, hc, a))
 			for _, de := range des {
 				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 					continue
@@ -579,16 +583,16 @@ func ls(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return exitCode(code)
 }
 
-func mkdir(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func mkdir(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("mkdir", args, "p", map[string]string{"parents": "p"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
 	for _, a := range args {
 		if has(o, "p") {
-			err = os.MkdirAll(abs(hc, a), 0o755)
+			err = os.MkdirAll(abs(ctx, hc, a), 0o755)
 		} else {
-			err = os.Mkdir(abs(hc, a), 0o755)
+			err = os.Mkdir(abs(ctx, hc, a), 0o755)
 		}
 		if err != nil {
 			return fail(hc, 1, "mkdir: %s: %v", a, unwrap(err))
@@ -597,14 +601,14 @@ func mkdir(_ context.Context, hc interp.HandlerContext, args []string, _ interp.
 	return nil
 }
 
-func rm(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func rm(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("rm", args, "rfR", map[string]string{"recursive": "r", "force": "f"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
 	code := 0
 	for _, a := range args {
-		p := abs(hc, a)
+		p := abs(ctx, hc, a)
 		if _, err := os.Lstat(p); err != nil {
 			if !has(o, "f") {
 				fmt.Fprintf(hc.Stderr, "rm: %s: %v\n", a, unwrap(err))
@@ -625,9 +629,9 @@ func rm(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	return exitCode(code)
 }
 
-func touch(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func touch(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	for _, a := range args {
-		f, err := os.OpenFile(abs(hc, a), os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(abs(ctx, hc, a), os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return fail(hc, 1, "touch: %s: %v", a, unwrap(err))
 		}
@@ -636,7 +640,7 @@ func touch(_ context.Context, hc interp.HandlerContext, args []string, _ interp.
 	return nil
 }
 
-func tee(_ context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+func tee(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, args, err := opts("tee", args, "a", map[string]string{"append": "a"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
@@ -647,7 +651,7 @@ func tee(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 	}
 	ws := []io.Writer{hc.Stdout}
 	for _, a := range args {
-		f, err := os.OpenFile(abs(hc, a), flag, 0o644)
+		f, err := os.OpenFile(abs(ctx, hc, a), flag, 0o644)
 		if err != nil {
 			return fail(hc, 1, "tee: %s: %v", a, unwrap(err))
 		}
@@ -768,23 +772,34 @@ func xargs(ctx context.Context, hc interp.HandlerContext, args []string, exec in
 
 // wget downloads with the fetch() of the browser (net/http on js/wasm), so
 // only servers that send CORS headers work, raw.githubusercontent.com does.
-// localhost stays in the wasm: kubectl port-forward 8080:80 & then
-// wget -qO- localhost:8080 reaches the pod.
+// Requests to the cluster stay in the wasm: localhost (kubectl port-forward),
+// names and cluster IPs of services, pod and node IPs (tabnode_dial.go).
 func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	flags, urls := splitWgetArgs(args)
-	o, _, err := opts("wget", flags, "qvO:", map[string]string{"quiet": "q", "verbose": "v", "output-document": "O"})
+	o, _, err := opts("wget", flags, "qvsO:T:", map[string]string{
+		"quiet": "q", "verbose": "v", "output-document": "O", "timeout": "T", "spider": "s",
+	})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
 	if len(urls) == 0 {
-		return fail(hc, 2, "usage: wget [-q] [-v] [-O file] url...")
+		return fail(hc, 2, "usage: wget [-q] [-v] [-O file] [-T seconds] [--spider] url...")
 	}
 	out, toFile := o["O"], has(o, "O")
 	if toFile && out != "-" && len(urls) > 1 {
 		return fail(hc, 2, "wget: -O with several urls is not supported")
 	}
+	if t := o["T"]; t != "" {
+		secs, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return fail(hc, 2, "wget: invalid timeout %q", t)
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(secs*float64(time.Second)))
+		defer cancel()
+	}
 	for _, raw := range urls {
-		u, err := wgetURL(raw)
+		u, err := cmdURL(ctx, raw)
 		if err != nil {
 			return fail(hc, 1, "wget: %v", err)
 		}
@@ -793,6 +808,9 @@ func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 			if name = path.Base(u.Path); name == "/" || name == "." || name == "" {
 				name = "index.html"
 			}
+		}
+		if has(o, "s") {
+			name = ""
 		}
 		if err := download(ctx, hc, u.String(), name, has(o, "q")); err != nil {
 			return err
@@ -809,7 +827,7 @@ func splitWgetArgs(args []string) (flags, urls []string) {
 		switch {
 		case a == "--":
 			return flags, append(urls, args[i+1:]...)
-		case a == "-O" || a == "--output-document":
+		case a == "-O" || a == "--output-document" || a == "-T" || a == "--timeout":
 			flags = append(flags, a)
 			if i+1 < len(args) {
 				i++
@@ -817,6 +835,11 @@ func splitWgetArgs(args []string) (flags, urls []string) {
 			}
 		case strings.HasPrefix(a, "-") && a != "-":
 			flags = append(flags, a)
+			// -qO file: the value of the last flag of a group follows.
+			if !strings.HasPrefix(a, "--") && strings.ContainsAny(a[len(a)-1:], "OT") && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
 		default:
 			urls = append(urls, a)
 		}
@@ -824,12 +847,18 @@ func splitWgetArgs(args []string) (flags, urls []string) {
 	return flags, urls
 }
 
-// wgetURL parses a url of the command line. Without a scheme it is http for
-// localhost (kubectl port-forward) and https for everything else.
-func wgetURL(raw string) (*url.URL, error) {
+// wgetURL is cmdURL outside of any pod.
+func wgetURL(raw string) (*url.URL, error) { return cmdURL(context.Background(), raw) }
+
+// cmdURL parses a url of the command line. Without a scheme it is http for
+// the cluster (localhost, services, cluster and pod IPs) and https for
+// everything else: the page itself is https, the browser blocks plain http.
+func cmdURL(ctx context.Context, raw string) (*url.URL, error) {
 	if !strings.Contains(raw, "://") {
 		scheme := "https://"
-		if h, _, _ := strings.Cut(raw, "/"); h == "localhost" || strings.HasPrefix(h, "localhost:") || h == "127.0.0.1" || strings.HasPrefix(h, "127.0.0.1:") {
+		h, _, _ := strings.Cut(raw, "/")
+		h, _, _ = strings.Cut(h, "?")
+		if host := urlHost(h); host == "localhost" || inCluster(ctx, host) {
 			scheme = "http://"
 		}
 		raw = scheme + raw
@@ -839,6 +868,25 @@ func wgetURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("%s: invalid url", raw)
 	}
 	return u, nil
+}
+
+// urlHost strips the port of host[:port].
+func urlHost(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
+}
+
+// noSuchHost reports names that only the cluster DNS could know but does
+// not: single labels like "web" and names under cluster.local. Those fail
+// right away instead of going to fetch().
+func noSuchHost(ctx context.Context, host string) bool {
+	h := strings.TrimSuffix(strings.ToLower(host), ".")
+	if h == "localhost" || net.ParseIP(h) != nil || inCluster(ctx, h) {
+		return false
+	}
+	return !strings.Contains(h, ".") || strings.HasSuffix(h, ".cluster.local") || strings.HasSuffix(h, ".svc")
 }
 
 // No keep-alive: a pooled connection would keep answering for a server that
@@ -854,20 +902,44 @@ func dialLocal(ctx context.Context, network, addr string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, network, addr)
 }
 
+// cmdTransport sends each request where it belongs: into the in-process
+// network for the cluster, to fetch() for the rest. A redirect may cross
+// from one to the other.
+type cmdTransport struct {
+	tlsConfig *tls.Config // for the cluster only, fetch() has its own
+}
+
+func (t cmdTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c := httpClientFor(req.Context(), req.URL.Hostname())
+	rt := c.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	if c != http.DefaultClient && t.tlsConfig != nil {
+		if tr, ok := rt.(*http.Transport); ok {
+			tr = tr.Clone()
+			tr.TLSClientConfig = t.tlsConfig
+			rt = tr
+		}
+	}
+	return rt.RoundTrip(req)
+}
+
 func download(ctx context.Context, hc interp.HandlerContext, u, name string, quiet bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fail(hc, 1, "wget: %v", err)
 	}
-	client := http.DefaultClient
-	if h := req.URL.Hostname(); h == "localhost" || h == "127.0.0.1" || h == "::1" {
-		// localhost is the in-process network of the wasm, where kubectl
-		// port-forward listens. A Transport with a dialer skips fetch().
-		client = localClient
+	if noSuchHost(ctx, req.URL.Hostname()) {
+		return fail(hc, 4, "wget: bad address '%s'", req.URL.Host)
 	}
-	resp, err := client.Do(req)
-	if err != nil && client == localClient {
-		return fail(hc, 4, "wget: %s: %v", u, err)
+	cluster := httpClientFor(ctx, req.URL.Hostname()) != http.DefaultClient
+	resp, err := (&http.Client{Transport: cmdTransport{}}).Do(req)
+	if err != nil && cluster {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fail(hc, 4, "wget: download timed out")
+		}
+		return fail(hc, 4, "wget: can't connect to remote host (%s): %v", req.URL.Host, connError(err))
 	}
 	if err != nil {
 		// fetch() reports a CORS block as a plain network error.
@@ -875,17 +947,19 @@ func download(ctx context.Context, hc interp.HandlerContext, u, name string, qui
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fail(hc, 8, "wget: %s: %s", u, resp.Status)
+		return fail(hc, 8, "wget: server returned error: %s %s", resp.Proto, resp.Status)
 	}
-	w := hc.Stdout
-	if name != "-" {
-		f, err := os.Create(abs(hc, name))
-		if err != nil {
-			return fail(hc, 1, "wget: %s: %v", name, unwrap(err))
+	if name == "" { // --spider
+		if !quiet {
+			fmt.Fprintln(hc.Stderr, "remote file exists")
 		}
-		defer f.Close()
-		w = f
+		return nil
 	}
+	w, err := createOutput(ctx, hc, name)
+	if err != nil {
+		return fail(hc, 1, "wget: %s: %v", name, unwrap(err))
+	}
+	defer w.Close()
 	n, err := io.Copy(w, resp.Body)
 	if err != nil {
 		return fail(hc, 4, "wget: %s: %v", u, err)
@@ -894,4 +968,570 @@ func download(ctx context.Context, hc interp.HandlerContext, u, name string, qui
 		fmt.Fprintf(hc.Stderr, "%s saved [%d bytes]\n", name, n)
 	}
 	return nil
+}
+
+// createOutput opens the output file of a download. "-" is stdout, and the
+// devices exist in the terminal, too.
+func createOutput(ctx context.Context, hc interp.HandlerContext, name string) (io.WriteCloser, error) {
+	switch name {
+	case "-", "/dev/stdout":
+		return nopCloser{hc.Stdout}, nil
+	case "/dev/stderr":
+		return nopCloser{hc.Stderr}, nil
+	case "/dev/null":
+		return nopCloser{io.Discard}, nil
+	}
+	return os.Create(abs(ctx, hc, name))
+}
+
+// refused reports a refused connection. The in-process network flattens
+// the error into a string.
+func refused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+// connError shortens the error of a failed dial in the in-process network to
+// what a socket would say.
+func connError(err error) string {
+	switch {
+	case refused(err):
+		return "Connection refused"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "Connection reset by peer"
+	}
+	return unwrap(err).Error()
+}
+
+// curlArgs is a parsed curl command line.
+type curlArgs struct {
+	silent, showErr, fail, include, head, location, verbose, insecure, get bool
+	outputs                                                                []string // -o file, or "" for -O, in the order of the urls
+	method, writeOut, user, cacert                                         string
+	data                                                                   []string
+	dataSet                                                                bool
+	headers                                                                []string
+	timeout                                                                time.Duration
+	urls                                                                   []string
+}
+
+// curlLong maps the long options to short ones; "" are accepted and ignored.
+var curlLong = map[string]string{
+	"silent": "s", "show-error": "S", "fail": "f", "include": "i", "head": "I", "location": "L",
+	"verbose": "v", "insecure": "k", "output": "o", "remote-name": "O", "request": "X", "data": "d",
+	"data-ascii": "d", "data-raw": "d+", "data-binary": "d+", "header": "H", "max-time": "m",
+	"write-out": "w", "user": "u", "user-agent": "A", "get": "G", "url": "url", "cacert": "cacert",
+	"connect-timeout": "connect-timeout", "compressed": "", "no-progress-meter": "", "progress-bar": "", "http1.1": "",
+}
+
+// curlValue lists the options that take a value.
+var curlValue = map[string]bool{
+	"o": true, "X": true, "d": true, "d+": true, "H": true, "m": true, "w": true, "u": true, "A": true,
+	"url": true, "cacert": true, "connect-timeout": true, "e": true,
+}
+
+func parseCurl(ctx context.Context, hc interp.HandlerContext, args []string) (*curlArgs, error) {
+	c := &curlArgs{}
+	set := func(k, v string) error {
+		switch k {
+		case "s":
+			c.silent = true
+		case "S":
+			c.showErr = true
+		case "f":
+			c.fail = true
+		case "i":
+			c.include = true
+		case "I":
+			c.head = true
+		case "L":
+			c.location = true
+		case "v":
+			c.verbose = true
+		case "k":
+			c.insecure = true
+		case "G":
+			c.get = true
+		case "o":
+			c.outputs = append(c.outputs, v)
+		case "O":
+			c.outputs = append(c.outputs, "")
+		case "X":
+			c.method = v
+		case "d", "d+":
+			if rest, ok := strings.CutPrefix(v, "@"); ok {
+				var b []byte
+				var err error
+				if rest == "-" {
+					b, err = io.ReadAll(hc.Stdin)
+				} else {
+					b, err = os.ReadFile(abs(ctx, hc, rest))
+				}
+				if err != nil {
+					return fmt.Errorf("Failed to open %s", rest)
+				}
+				v = string(b)
+				if k == "d" { // -d @file drops the line breaks, --data-binary keeps them
+					v = strings.NewReplacer("\r", "", "\n", "").Replace(v)
+				}
+			}
+			c.data = append(c.data, v)
+			c.dataSet = true
+		case "H":
+			c.headers = append(c.headers, v)
+		case "m":
+			secs, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("expected a proper numerical parameter: %s", v)
+			}
+			c.timeout = time.Duration(secs * float64(time.Second))
+		case "w":
+			c.writeOut = v
+		case "u":
+			c.user = v
+		case "A":
+			c.headers = append(c.headers, "User-Agent: "+v)
+		case "e":
+			c.headers = append(c.headers, "Referer: "+v)
+		case "url":
+			c.urls = append(c.urls, v)
+		case "cacert":
+			c.cacert = v
+		}
+		return nil
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			c.urls = append(c.urls, args[i+1:]...)
+			return c, nil
+		case strings.HasPrefix(a, "--"):
+			name, v, hasV := strings.Cut(a[2:], "=")
+			k, ok := curlLong[name]
+			if !ok {
+				return nil, fmt.Errorf("option --%s: is unknown", name)
+			}
+			if curlValue[k] && !hasV {
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("option --%s: requires parameter", name)
+				}
+				i++
+				v = args[i]
+			}
+			if err := set(k, v); err != nil {
+				return nil, err
+			}
+		case strings.HasPrefix(a, "-") && a != "-":
+			for j := 1; j < len(a); j++ {
+				k := string(a[j])
+				if !strings.Contains("sSfiILvkGoOXdHmwuAe", k) {
+					return nil, fmt.Errorf("option -%s: is unknown", k)
+				}
+				if curlValue[k] {
+					v := a[j+1:]
+					if v == "" {
+						if i+1 >= len(args) {
+							return nil, fmt.Errorf("option -%s: requires parameter", k)
+						}
+						i++
+						v = args[i]
+					}
+					if err := set(k, v); err != nil {
+						return nil, err
+					}
+					break
+				}
+				if err := set(k, ""); err != nil {
+					return nil, err
+				}
+			}
+		default:
+			c.urls = append(c.urls, a)
+		}
+	}
+	return c, nil
+}
+
+// curl is the curl of the tutorials: -sSfiILvk, -o/-O, -X, -d, -H, -m, -w.
+// Like wget it stays in the wasm for the cluster and uses fetch() otherwise,
+// where the browser decides about redirects, TLS and CORS.
+func curl(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	c, err := parseCurl(ctx, hc, args)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "curl: %v\ncurl: try 'curl --help' for more information\n", err)
+		return interp.ExitStatus(2)
+	}
+	if len(c.urls) == 0 {
+		fmt.Fprintln(hc.Stderr, "curl: no URL specified\ncurl: try 'curl --help' for more information")
+		return interp.ExitStatus(2)
+	}
+	tr := cmdTransport{}
+	if c.insecure || c.cacert != "" {
+		tr.tlsConfig = &tls.Config{InsecureSkipVerify: c.insecure}
+		if c.cacert != "" {
+			pem, err := os.ReadFile(abs(ctx, hc, c.cacert))
+			if err != nil {
+				return c.fail77(hc, err)
+			}
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(pem)
+			tr.tlsConfig.RootCAs = pool
+		}
+	}
+	code := 0
+	for i, raw := range c.urls {
+		out := "-"
+		if i < len(c.outputs) {
+			out = c.outputs[i]
+		}
+		if st := c.do(ctx, hc, tr, raw, out); st != 0 {
+			code = st
+		}
+	}
+	return exitCode(code)
+}
+
+func (c *curlArgs) fail77(hc interp.HandlerContext, err error) error {
+	c.errorf(hc, 77, "error setting certificate file: %v", unwrap(err))
+	return interp.ExitStatus(77)
+}
+
+// errorf prints a curl error unless -s without -S, and returns its code.
+func (c *curlArgs) errorf(hc interp.HandlerContext, code int, format string, a ...any) int {
+	if !c.silent || c.showErr {
+		fmt.Fprintf(hc.Stderr, "curl: (%d) %s\n", code, fmt.Sprintf(format, a...))
+	}
+	return code
+}
+
+// do runs one url and returns the exit code of curl for it.
+func (c *curlArgs) do(ctx context.Context, hc interp.HandlerContext, tr cmdTransport, raw, out string) int {
+	start := time.Now()
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
+	u, err := cmdURL(ctx, raw)
+	if err != nil {
+		return c.errorf(hc, 3, "URL rejected: Malformed input to a URL function")
+	}
+	method := http.MethodGet
+	var body io.Reader
+	data := strings.Join(c.data, "&")
+	switch {
+	case c.head:
+		method = http.MethodHead
+	case c.dataSet && c.get:
+		if u.RawQuery != "" {
+			u.RawQuery += "&"
+		}
+		u.RawQuery += data
+	case c.dataSet:
+		method = http.MethodPost
+		body = strings.NewReader(data)
+	}
+	if c.method != "" {
+		method = c.method
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return c.errorf(hc, 3, "%v", err)
+	}
+	req.Header.Set("User-Agent", "curl/8.11.1")
+	req.Header.Set("Accept", "*/*")
+	if c.dataSet && !c.get {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	for _, h := range c.headers {
+		k, v, _ := strings.Cut(h, ":")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch {
+		case v == "" && strings.HasSuffix(h, ";"): // -H 'X;' sends an empty header
+			req.Header.Set(strings.TrimSuffix(k, ";"), "")
+		case v == "": // -H 'X:' removes it
+			req.Header.Del(k)
+		case strings.EqualFold(k, "Host"):
+			req.Host = v
+		default:
+			req.Header.Add(k, v)
+		}
+	}
+	if c.user != "" {
+		user, pass, _ := strings.Cut(c.user, ":")
+		req.SetBasicAuth(user, pass)
+	}
+	host := req.URL.Hostname()
+	if noSuchHost(ctx, host) {
+		return c.errorf(hc, 6, "Could not resolve host: %s", host)
+	}
+	cluster := httpClientFor(ctx, host) != http.DefaultClient
+	redirects := 0
+	client := &http.Client{Transport: tr, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		if !c.location {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= 50 {
+			return errors.New("Maximum (50) redirects followed")
+		}
+		redirects++
+		return nil
+	}}
+	if c.verbose {
+		port := req.URL.Port()
+		if port == "" {
+			port = map[string]string{"http": "80", "https": "443"}[req.URL.Scheme]
+		}
+		if cluster {
+			fmt.Fprintf(hc.Stderr, "*   Trying %s:%s...\n", clusterHost(ctx, host), port)
+		} else {
+			fmt.Fprintf(hc.Stderr, "* Using fetch() of the browser for %s\n", host)
+		}
+		fmt.Fprintf(hc.Stderr, "> %s %s HTTP/1.1\n> Host: %s\n", method, req.URL.RequestURI(), req.URL.Host)
+		for _, k := range slices.Sorted(maps.Keys(req.Header)) {
+			for _, v := range req.Header[k] {
+				fmt.Fprintf(hc.Stderr, "> %s: %s\n", k, v)
+			}
+		}
+		fmt.Fprintln(hc.Stderr, ">")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		port := req.URL.Port()
+		if port == "" {
+			port = map[string]string{"http": "80", "https": "443"}[req.URL.Scheme]
+		}
+		ms := time.Since(start).Milliseconds()
+		switch {
+		case ctx.Err() == context.DeadlineExceeded:
+			return c.errorf(hc, 28, "Operation timed out after %d milliseconds with 0 bytes received", ms)
+		case refused(err):
+			return c.errorf(hc, 7, "Failed to connect to %s port %s after %d ms: Couldn't connect to server", host, port, ms)
+		case errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET):
+			return c.errorf(hc, 52, "Empty reply from server")
+		case strings.Contains(err.Error(), "certificate"):
+			return c.errorf(hc, 60, "SSL certificate problem: %v", unwrap(err))
+		case !cluster:
+			return c.errorf(hc, 7, "%s: %v (the server must allow CORS requests)", host, unwrap(err))
+		}
+		return c.errorf(hc, 56, "%v", unwrap(err))
+	}
+	defer resp.Body.Close()
+	proto := resp.Proto
+	if proto == "" {
+		proto = "HTTP/1.1"
+	}
+	status := fmt.Sprintf("%s %s", proto, resp.Status)
+	var head strings.Builder
+	fmt.Fprintf(&head, "%s\r\n", status)
+	for _, k := range slices.Sorted(maps.Keys(resp.Header)) {
+		for _, v := range resp.Header[k] {
+			fmt.Fprintf(&head, "%s: %s\r\n", k, v)
+		}
+	}
+	head.WriteString("\r\n")
+	if c.verbose {
+		for _, l := range strings.Split(strings.TrimRight(head.String(), "\r\n"), "\r\n") {
+			fmt.Fprintf(hc.Stderr, "< %s\n", l)
+		}
+		fmt.Fprintln(hc.Stderr, "<")
+	}
+	if c.fail && resp.StatusCode >= 400 {
+		return c.errorf(hc, 22, "The requested URL returned error: %d", resp.StatusCode)
+	}
+	w := hc.Stdout
+	if out != "-" {
+		name := out
+		if name == "" { // -O
+			if name = path.Base(u.Path); name == "/" || name == "." {
+				return c.errorf(hc, 23, "Remote file name has no length")
+			}
+		}
+		f, err := createOutput(ctx, hc, name)
+		if err != nil {
+			return c.errorf(hc, 23, "Failure writing output to destination: %v", unwrap(err))
+		}
+		defer f.Close()
+		w = f
+	}
+	if c.include || c.head {
+		io.WriteString(w, head.String())
+	}
+	var n int64
+	if !c.head {
+		n, err = io.Copy(w, resp.Body)
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return c.errorf(hc, 28, "Operation timed out after %d milliseconds with %d bytes received", time.Since(start).Milliseconds(), n)
+			}
+			return c.errorf(hc, 56, "Failure when receiving data from the peer")
+		}
+	}
+	if c.writeOut != "" {
+		io.WriteString(hc.Stdout, curlWriteOut(c.writeOut, map[string]string{
+			"http_code":     fmt.Sprintf("%03d", resp.StatusCode),
+			"response_code": strconv.Itoa(resp.StatusCode),
+			"url_effective": resp.Request.URL.String(),
+			"content_type":  resp.Header.Get("Content-Type"),
+			"size_download": strconv.FormatInt(n, 10),
+			"time_total":    fmt.Sprintf("%.6f", time.Since(start).Seconds()),
+			"num_redirects": strconv.Itoa(redirects),
+			"method":        method,
+			"remote_ip":     clusterHost(ctx, resp.Request.URL.Hostname()),
+			"scheme":        resp.Request.URL.Scheme,
+		}))
+	}
+	return 0
+}
+
+// curlWriteOut expands -w: %{variable}, \n, \t, \r and %%.
+func curlWriteOut(format string, vars map[string]string) string {
+	var b strings.Builder
+	for i := 0; i < len(format); i++ {
+		switch {
+		case format[i] == '\\' && i+1 < len(format):
+			switch format[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'r':
+				b.WriteByte('\r')
+			case '\\':
+				b.WriteByte('\\')
+			default:
+				b.WriteString(format[i : i+2])
+			}
+			i++
+		case strings.HasPrefix(format[i:], "%%"):
+			b.WriteByte('%')
+			i++
+		case strings.HasPrefix(format[i:], "%{"):
+			end := strings.IndexByte(format[i:], '}')
+			if end < 0 {
+				b.WriteString(format[i:])
+				return b.String()
+			}
+			b.WriteString(vars[format[i+2:i+end]])
+			i += end
+		default:
+			b.WriteByte(format[i])
+		}
+	}
+	return b.String()
+}
+
+// clusterNamespace is the namespace whose services short names find: the
+// one of the pod, default in the terminal.
+func clusterNamespace(ctx context.Context) string {
+	if pe := procOf(ctx); pe != nil {
+		return pe.w.namespace
+	}
+	return metav1.NamespaceDefault
+}
+
+// dnsLookup answers a name from the service proxy.
+func dnsLookup(ctx context.Context, name string) (a dnsAnswer, found bool) {
+	if theTabNode == nil || theTabNode.net == nil {
+		return a, false
+	}
+	return theTabNode.net.lookup(name, clusterNamespace(ctx))
+}
+
+// nslookup answers like the nslookup of busybox, from the cluster DNS of
+// the service proxy (tabnode_net.go): there is no CoreDNS on the tab node.
+func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	var names []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			names = append(names, a)
+		}
+	}
+	if len(names) == 0 {
+		return fail(hc, 1, "usage: nslookup [-type=a] host [dns server]")
+	}
+	server := "10.96.0.10"
+	if theTabNode != nil && theTabNode.net != nil {
+		server = theTabNode.net.dnsServer()
+	}
+	fmt.Fprintf(hc.Stdout, "Server:\t\t%s\nAddress:\t%s:53\n\n", server, server)
+	name := names[0]
+	if ip := net.ParseIP(name); ip != nil {
+		if theTabNode != nil && theTabNode.net != nil {
+			if fqdn, ok := theTabNode.net.reverse(name); ok {
+				fmt.Fprintf(hc.Stdout, "%s\tname = %s\n\n", reverseName(ip), fqdn)
+				return nil
+			}
+		}
+		fmt.Fprintf(hc.Stdout, "** server can't find %s: NXDOMAIN\n\n", reverseName(ip))
+		return interp.ExitStatus(1)
+	}
+	a, ok := dnsLookup(ctx, name)
+	if !ok {
+		fqdn := name
+		if !strings.Contains(name, ".") {
+			fqdn = name + "." + clusterNamespace(ctx) + ".svc.cluster.local"
+		}
+		fmt.Fprintf(hc.Stdout, "** server can't find %s: NXDOMAIN\n\n", strings.TrimSuffix(fqdn, "."))
+		return interp.ExitStatus(1)
+	}
+	if a.cname != "" {
+		fmt.Fprintf(hc.Stdout, "%s\tcanonical name = %s\n", a.name, a.cname)
+	}
+	for _, ip := range a.ips {
+		n := a.name
+		if a.cname != "" {
+			n = a.cname
+		}
+		fmt.Fprintf(hc.Stdout, "Name:\t%s\nAddress: %s\n", n, ip)
+	}
+	fmt.Fprintln(hc.Stdout)
+	return nil
+}
+
+// host answers like the host command of bind.
+func hostCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	var names []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			names = append(names, a)
+		}
+	}
+	if len(names) == 0 {
+		return fail(hc, 1, "Usage: host [-t type] name [server]")
+	}
+	name := names[0]
+	if ip := net.ParseIP(name); ip != nil {
+		if theTabNode != nil && theTabNode.net != nil {
+			if fqdn, ok := theTabNode.net.reverse(name); ok {
+				fmt.Fprintf(hc.Stdout, "%s domain name pointer %s.\n", reverseName(ip), fqdn)
+				return nil
+			}
+		}
+		fmt.Fprintf(hc.Stdout, "Host %s not found: 3(NXDOMAIN)\n", reverseName(ip))
+		return interp.ExitStatus(1)
+	}
+	a, ok := dnsLookup(ctx, name)
+	if !ok {
+		fmt.Fprintf(hc.Stdout, "Host %s not found: 3(NXDOMAIN)\n", name)
+		return interp.ExitStatus(1)
+	}
+	n := a.name
+	if a.cname != "" {
+		fmt.Fprintf(hc.Stdout, "%s is an alias for %s.\n", a.name, a.cname)
+		n = a.cname
+	}
+	for _, ip := range a.ips {
+		fmt.Fprintf(hc.Stdout, "%s has address %s\n", n, ip)
+	}
+	return nil
+}
+
+// reverseName is the in-addr.arpa name of an IPv4 address.
+func reverseName(ip net.IP) string {
+	v4 := ip.To4()
+	if v4 == nil {
+		return ip.String()
+	}
+	return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", v4[3], v4[2], v4[1], v4[0])
 }

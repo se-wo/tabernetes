@@ -98,6 +98,20 @@ export async function startTerminal(el, opts) {
   }));
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
+  // wasm_exec.js reads the wall clock from Date, in milliseconds. Kubernetes
+  // names an event <object>.<UnixNano in hex>, so two events of one object in
+  // the same millisecond got the same name and the second one overwrote the
+  // first ("Pulled" with the message of "Created"). A clock with the
+  // resolution of performance.now() that never repeats keeps them apart.
+  let lastWall = 0n;
+  go.importObject.gojs["runtime.walltime"] = (sp) => {
+    sp >>>= 0;
+    let ns = BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
+    if (ns <= lastWall) ns = lastWall + 1n;
+    lastWall = ns;
+    go.mem.setBigInt64(sp + 8, ns / 1000000000n, true);
+    go.mem.setInt32(sp + 16, Number(ns % 1000000000n), true);
+  };
   const instance = await instantiate(unpack(opts.wasmURL, counted, total, opts.workerURL), go.importObject);
   term.writeln("");
   globalThis.tabernetesStatus(cached ? "compiled WebAssembly from the browser cache" : "downloaded and compiled WebAssembly");
@@ -120,7 +134,7 @@ export async function startTerminal(el, opts) {
     return { term };
   }
   term.writeln("");
-  term.writeln(`Try ${"\x1b[1m"}k version${"\x1b[0m"}, ${"\x1b[1m"}join${"\x1b[0m"} or ${"\x1b[1m"}help${"\x1b[0m"}.`);
+  term.writeln(`Pods run right here on the node ${"\x1b[1m"}tab${"\x1b[0m"}: try ${"\x1b[1m"}k create deploy web --image=nginx${"\x1b[0m"}, ${"\x1b[1m"}join${"\x1b[0m"} or ${"\x1b[1m"}help${"\x1b[0m"}.`);
 
   // ---- shell ----
   globalThis.tabernetes.resize(term.cols, term.rows);
@@ -150,6 +164,14 @@ export async function startTerminal(el, opts) {
         "Kubernetes",
         "  kubectl, k               kubectl against the in-browser cluster",
         "  kubectl edit ...         opens vi: :wq applies, :q! cancels",
+        "",
+        "The tab node (pods run inside this tab, no Docker needed)",
+        "  k create deploy web --image=nginx --replicas=3",
+        "  k expose deploy web --port 80; wget -qO- web",
+        "  k run hi --image=busybox --restart=Never -- sh -c 'echo hi from $HOSTNAME'",
+        "  built-in images: nginx, httpd, busybox/alpine/..., whoami, http-echo, podinfo, agnhost, ...;",
+        "  any other image runs its command in the shell of the tab",
+        "  runtimeClassName: wasmtime runs WebAssembly (WASI) images in Web Workers",
         "",
         "Terminal",
         "  join                     connect a real node via WebRTC (needs docker)",
@@ -234,7 +256,7 @@ export async function startTerminal(el, opts) {
     if (search) return `(${search.failed ? "failed " : ""}reverse-i-search)\`${search.query}': `;
     if (pending) return "> ";
     const dir = globalThis.tabernetes.cwd().replace(/^\/root(?=\/|$)/, "~");
-    return `\x1b[1;34mjkroepke.de\x1b[0m:\x1b[1;32m${dir}\x1b[0m$ `;
+    return `\x1b[1;34m${location.hostname || "tabernetes"}\x1b[0m:\x1b[1;32m${dir}\x1b[0m$ `;
   };
   // redraw renders prompt and line, also when the line wraps over several rows.
   let row = 0; // row of the cursor, relative to the prompt
@@ -451,7 +473,7 @@ export async function startTerminal(el, opts) {
 const escape = (s) => /^\x1b(?:\[[0-9;?]*[@-~]|O.|[^]?)/.exec(s)[0];
 
 // download fetches the binary, from the Cache Storage when it is there. The
-// file name has a hash of the content (Hugo fingerprint), so a cached copy is
+// URL has a hash of the content (?v=, site/build.mjs), so a cached copy is
 // always current. GitHub Pages sends max-age=600 and nothing longer.
 async function download(url) {
   let cache = null;

@@ -1,0 +1,12 @@
+# WebAssembly pods: runtimeClassName: wasmtime runs the WASI module of the
+# image in a Web Worker on the tab node (tabnode_wasi.go), and with runwasi's
+# containerd-shim-wasmtime on a Docker node. Nodes that can run them carry the
+# label tabernetes.io/wasm=true.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: wasmtime
+handler: wasmtime
+scheduling:
+  nodeSelector:
+    tabernetes.io/wasm: "true"

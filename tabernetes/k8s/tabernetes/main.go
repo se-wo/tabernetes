@@ -193,6 +193,10 @@ func boot() (*cluster, error) {
 	if err := installAddons(context.Background(), c); err != nil {
 		return nil, fmt.Errorf("installing addons: %w", err)
 	}
+	status("starting the tab node")
+	if err := startTabNode(context.Background(), c); err != nil {
+		status("the tab node did not start: " + err.Error())
+	}
 	status("ready")
 	return c, nil
 }

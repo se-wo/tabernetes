@@ -59,23 +59,9 @@ func bundleDir(args []string) string {
 
 // readOnlySysfs adds "ro" to the sysfs mounts of the bundle's config.json.
 func readOnlySysfs(bundle string) error {
-	path := filepath.Join(bundle, "config.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber() // keep large numbers like memory limits exact
-	var spec map[string]any
-	if err := dec.Decode(&spec); err != nil {
-		return err
-	}
-	mounts, _ := spec["mounts"].([]any)
-	changed := false
-	for _, m := range mounts {
-		mount, _ := m.(map[string]any)
+	return editMounts(filepath.Join(bundle, "config.json"), func(mount map[string]any) bool {
 		if mount["type"] != "sysfs" {
-			continue
+			return false
 		}
 		opts, _ := mount["options"].([]any)
 		ro := false
@@ -92,7 +78,29 @@ func readOnlySysfs(bundle string) error {
 			opts = append(opts, "ro")
 		}
 		mount["options"] = opts
-		changed = true
+		return true
+	})
+}
+
+// editMounts calls edit for every mount of an OCI runtime spec and writes the
+// spec back if edit changed one.
+func editMounts(path string, edit func(mount map[string]any) bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber() // keep large numbers like memory limits exact
+	var spec map[string]any
+	if err := dec.Decode(&spec); err != nil {
+		return err
+	}
+	mounts, _ := spec["mounts"].([]any)
+	changed := false
+	for _, m := range mounts {
+		if mount, ok := m.(map[string]any); ok && edit(mount) {
+			changed = true
+		}
 	}
 	if !changed {
 		return nil
