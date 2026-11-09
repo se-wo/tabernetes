@@ -59,8 +59,8 @@ browser tab (single wasm binary)                     docker run tabernetes
   and report its size. On the tab node, a container with a TTY gets what the
   line discipline of a kernel tty does (`tabnode_tty.go`): echo, backspace,
   Ctrl-U, Ctrl-W, Ctrl-C ends the running command, Ctrl-D ends the input, and
-  "\n" becomes "\r\n". A shell on a TTY shows a prompt (`/ # `, or
-  `root@<pod>:/# ` for bash, or `PS1`).
+  "\n" becomes "\r\n". A shell on a TTY shows a prompt like `/ #` (BusyBox),
+  `root@<pod>:/#` (Bash) or its `PS1`.
 - `proxy svc/web` shows the service `web` in a panel next to the terminal
   (`-n <namespace>`, `svc/web:8080` or a port name for another port).
   Every request goes through the service proxy of the tab on a connection of
