@@ -313,9 +313,6 @@ func (s *tabStreamer) ExecInContainer(ctx context.Context, _, _, _ string, cmd [
 		}
 	}()
 
-	if in == nil {
-		in = strings.NewReader("")
-	}
 	var stdout, stderr io.Writer = io.Discard, io.Discard
 	if out != nil {
 		stdout = out
@@ -326,6 +323,14 @@ func (s *tabStreamer) ExecInContainer(ctx context.Context, _, _, _ string, cmd [
 		stderr = stdout // a terminal has one output
 	}
 	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources)}
+	if tty {
+		// kubectl exec -t: Ctrl-C ends the command, unless a shell prompt
+		// takes it (runShell).
+		pe.tty = newPty(ctx, in, stdout, cancel)
+		in, stdout, stderr = pe.tty, pe.tty, pe.tty
+	} else if in == nil {
+		in = strings.NewReader("")
+	}
 	code := runArgv(ctx, pe, cmd, env, dir, in, stdout, stderr)
 	if code != 0 {
 		return utilexec.CodeExitError{Err: fmt.Errorf("command terminated with exit code %d", code), Code: code}
@@ -340,7 +345,7 @@ func (s *tabStreamer) AttachContainer(ctx context.Context, _, _, _ string, in io
 	go drainResize(resize)
 	c := s.c
 	c.w.mu.Lock()
-	logs, hub, running := c.logs, c.stdin, c.state.Running != nil
+	logs, hub, running, ttyOut, proc := c.logs, c.stdin, c.state.Running != nil, c.ttyOut, c.proc
 	c.w.mu.Unlock()
 	if !running {
 		return fmt.Errorf("container %q is not running", c.spec.Name)
@@ -356,6 +361,11 @@ func (s *tabStreamer) AttachContainer(ctx context.Context, _, _, _ string, in io
 		stderr = errOut
 	} else if tty {
 		stderr = stdout
+	}
+	if ttyOut != nil && stdout != nil && proc != nil {
+		// A terminal shows its output as it comes, prompts included.
+		ttyOut.follow(ctx, stdout, proc.done)
+		return nil
 	}
 	err := logs.follow(ctx, stdout, stderr)
 	if errors.Is(err, context.Canceled) {

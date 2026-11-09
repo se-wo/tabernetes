@@ -38,6 +38,7 @@ type ctr struct {
 	delay     time.Duration // the next crash loop back-off
 	proc      *process
 	stdin     *stdinHub
+	ttyOut    *ttyOutput // the output of the current run, with tty: true
 
 	// set by prepare
 	image *builtinImage
@@ -350,8 +351,19 @@ func (c *ctr) startNative(ctx context.Context, logs *logBuf) (*process, error) {
 	if c.stdin != nil {
 		stdin = c.stdin.reader(ctx)
 	}
+	stdout, stderr := logs.writer("stdout"), logs.writer("stderr")
+	if c.spec.TTY {
+		// tty: true: one output, to the log and to kubectl attach as it comes.
+		// Ctrl-C ends the main process unless a shell prompt takes it.
+		out := newTTYOutput(stdout)
+		pe.tty = newPty(ctx, stdin, out, cancel)
+		stdin, stdout, stderr = pe.tty, pe.tty, pe.tty
+		c.w.mu.Lock()
+		c.ttyOut = out
+		c.w.mu.Unlock()
+	}
 	go func() {
-		code := runArgv(ctx, pe, argv, env, dir, stdin, logs.writer("stdout"), logs.writer("stderr"))
+		code := runArgv(ctx, pe, argv, env, dir, stdin, stdout, stderr)
 		p.exit(code)
 	}()
 	return p, nil

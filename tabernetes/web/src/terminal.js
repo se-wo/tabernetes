@@ -161,7 +161,7 @@ export async function startTerminal(el, opts) {
         "  any other image runs its command in the shell of the tab",
         "  runtimeClassName: wasmtime runs WebAssembly (WASI) images in Web Workers",
         "  addnode [n]              more nodes, each in a Web Worker: a thread of its own",
-        "  rmnode <name>...         stop and delete nodes in workers",
+        "  rmnode [--force] <name>  drain, stop and delete nodes in workers",
         "",
         "Terminal",
         "  join                     connect a real node via WebRTC (needs docker)",

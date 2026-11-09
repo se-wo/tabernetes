@@ -91,7 +91,7 @@ func (s *shell) run(src string, out js.Value, builtins js.Value) int {
 	hw := holdWriter{tty}
 	// Commands get writers bound to their own context in exec: a background
 	// job writes on after this line has ended.
-	interp.StdIO(strings.NewReader(""), hw, hw)(s.runner)
+	interp.StdIO(termStdin, hw, hw)(s.runner)
 
 	err = s.runner.Run(ctx, f)
 	code := 0
@@ -202,8 +202,17 @@ func (s *shell) kubectl(ctx context.Context, hc interp.HandlerContext, args []st
 		fmt.Fprintf(hc.Stderr, "kubectl: %v\n", err)
 		return interp.ExitStatus(1)
 	}
+	// In the foreground, without a redirection, stdin is the terminal: what
+	// kubectl exec -it, run -it and attach -it need. A job (&) has none.
+	stdin := hc.Stdin
+	if stdin == termStdin {
+		stdin = strings.NewReader("")
+		if !inJob(ctx) {
+			stdin = &ttyIn{ctx: ctx}
+		}
+	}
 	done := make(chan int, 1)
-	go func() { done <- runKubectl(ctx, args, hc.Stdin, hc.Stdout, hc.Stderr) }()
+	go func() { done <- runKubectl(ctx, args, stdin, hc.Stdout, hc.Stderr) }()
 	select {
 	case code := <-done:
 		return exitCode(code)

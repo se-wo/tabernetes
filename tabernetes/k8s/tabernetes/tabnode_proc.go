@@ -29,6 +29,7 @@ type procEnv struct {
 	root *rootFS
 	ip   string
 	cpu  *throttle
+	tty  *pty // the terminal of the process, if it has one
 }
 
 type procKey struct{}
@@ -324,21 +325,76 @@ func runShell(ctx context.Context, hc interp.HandlerContext, args []string) erro
 	if err != nil {
 		return err
 	}
+	// On a terminal (kubectl exec -it, run -it) the shell is interactive: it
+	// shows a prompt, and Ctrl-C ends the running command, not the shell.
+	t := ttyOf(ctx, hc.Stdin)
+	prompt := func() {}
+	if t != nil {
+		restore := t.setIntr(nil) // Ctrl-C at the prompt only drops the line
+		defer restore()
+		prompt = func() { io.WriteString(hc.Stdout, shellPrompt(ctx, args[0], r)) }
+	}
 	var runErr error
-	parseErr := syntax.NewParser().Interactive(stdinOf(hc), func(stmts []*syntax.Stmt) bool {
+	parser := syntax.NewParser()
+	prompt()
+	parseErr := parser.Interactive(stdinOf(hc), func(stmts []*syntax.Stmt) bool {
+		if parser.Incomplete() {
+			if t != nil {
+				io.WriteString(hc.Stdout, "> ")
+			}
+			return true
+		}
 		for _, st := range stmts {
-			runErr = r.Run(ctx, st)
+			sctx := ctx
+			if t != nil {
+				var cancel context.CancelFunc
+				sctx, cancel = context.WithCancel(ctx)
+				t.setIntr(cancel)
+				runErr = r.Run(sctx, st)
+				t.setIntr(nil)
+				cancel()
+				if sctx.Err() != nil && ctx.Err() == nil {
+					runErr = interp.ExitStatus(130) // interrupted: the shell goes on
+					continue
+				}
+			} else {
+				runErr = r.Run(sctx, st)
+			}
 			if r.Exited() || ctx.Err() != nil {
 				return false
 			}
 		}
+		prompt()
 		return true
 	})
+	if t != nil && parseErr == nil && !r.Exited() && ctx.Err() == nil {
+		io.WriteString(hc.Stdout, "exit\n") // Ctrl-D, like bash
+	}
 	if parseErr != nil && runErr == nil {
 		fmt.Fprintf(hc.Stderr, "%s: %v\n", args[0], parseErr)
 		return interp.ExitStatus(2)
 	}
 	return statusOf(runErr)
+}
+
+// shellPrompt is PS1 of an interactive shell: "/ # " like BusyBox ash, or
+// "root@web-1:/# " like bash in Debian. A PS1 of the container wins.
+func shellPrompt(ctx context.Context, shell string, r *interp.Runner) string {
+	if ps1 := r.Vars["PS1"]; ps1.IsSet() {
+		return ps1.String()
+	}
+	dir := r.Dir
+	if dir == "" {
+		dir = "/"
+	}
+	if path.Base(shell) == "bash" {
+		host := "localhost"
+		if pe := procOf(ctx); pe != nil && pe.w != nil {
+			host = pe.w.name
+		}
+		return "root@" + host + ":" + dir + "# "
+	}
+	return dir + " # "
 }
 
 func stdinOf(hc interp.HandlerContext) io.Reader {

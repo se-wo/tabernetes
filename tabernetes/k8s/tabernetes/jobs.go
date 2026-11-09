@@ -39,7 +39,7 @@ func init() { interp.BackgroundContext = jobs.start }
 func (t *jobTable) start(ctx context.Context, stmt *syntax.Stmt) (context.Context, func()) {
 	var cmd strings.Builder
 	syntax.NewPrinter(syntax.SingleLine(true)).Print(&cmd, stmt)
-	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	ctx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), jobKey{}, true))
 	t.mu.Lock()
 	j := &job{id: 1, cmd: cmd.String(), cancel: cancel}
 	if n := len(t.list); n > 0 {
@@ -50,6 +50,11 @@ func (t *jobTable) start(ctx context.Context, stmt *syntax.Stmt) (context.Contex
 	fmt.Fprintf(holdWriter{tty}, "[%d] %s\n", j.id, j.cmd)
 	return ctx, func() { t.stop(j) }
 }
+
+type jobKey struct{}
+
+// inJob reports whether ctx is the context of a background job.
+func inJob(ctx context.Context) bool { b, _ := ctx.Value(jobKey{}).(bool); return b }
 
 func (t *jobTable) stop(j *job) {
 	j.cancel()
