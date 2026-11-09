@@ -11,24 +11,27 @@ trap 'rm -rf "$tmp"' EXIT
 go build -o "$tmp/ocimirror" ./ocimirror
 
 while read -r kind ref src; do
-  case "$kind" in
-  "" | \#*) continue ;;
-  image | artifact)
-    [ -e "$tmp/$src.wasm" ] || GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags=-s -o "$tmp/$src.wasm" "./$src"
-    flags=()
-    [ "$kind" = image ] && flags=(-gzip)
-    "$tmp/ocimirror" "$kind" -out "$out" -ref "$ref" -wasm "$tmp/$src.wasm" "${flags[@]}"
-    ;;
-  mirror)
-    if "$tmp/ocimirror" pull -out "$out" -ref "$ref"; then continue; fi
-    if [ -n "$src" ] && [ -n "${RUNWASI_SRC:-}" ]; then
-      echo "building $src from $RUNWASI_SRC instead" >&2
-      cargo build --quiet --release --target wasm32-wasip1 --manifest-path "$RUNWASI_SRC/Cargo.toml" -p "$src"
-      "$tmp/ocimirror" image -out "$out" -ref "$ref" -wasm "$RUNWASI_SRC/target/wasm32-wasip1/release/$src.wasm"
-    else
-      echo "warning: $ref is not in the mirror" >&2
-    fi
-    ;;
-  *) echo "images.txt: unknown kind $kind" >&2; exit 1 ;;
-  esac
-done < images.txt
+	case "$kind" in
+	"" | \#*) continue ;;
+	image | artifact)
+		[ -e "$tmp/$src.wasm" ] || GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags=-s -o "$tmp/$src.wasm" "./$src"
+		flags=()
+		[ "$kind" = image ] && flags=(-gzip)
+		"$tmp/ocimirror" "$kind" -out "$out" -ref "$ref" -wasm "$tmp/$src.wasm" "${flags[@]}"
+		;;
+	mirror)
+		if "$tmp/ocimirror" pull -out "$out" -ref "$ref"; then continue; fi
+		if [ -n "$src" ] && [ -n "${RUNWASI_SRC:-}" ]; then
+			echo "building $src from $RUNWASI_SRC instead" >&2
+			cargo build --quiet --release --target wasm32-wasip1 --manifest-path "$RUNWASI_SRC/Cargo.toml" -p "$src"
+			"$tmp/ocimirror" image -out "$out" -ref "$ref" -wasm "$RUNWASI_SRC/target/wasm32-wasip1/release/$src.wasm"
+		else
+			echo "warning: $ref is not in the mirror" >&2
+		fi
+		;;
+	*)
+		echo "images.txt: unknown kind $kind" >&2
+		exit 1
+		;;
+	esac
+done <images.txt
