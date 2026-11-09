@@ -6,7 +6,8 @@ kube-controller-manager, kube-scheduler and kubectl are compiled with
 (original: [jkroepke.de/tabernetes](https://jkroepke.de/tabernetes/), this
 version: [se-wo.github.io/tabernetes](https://se-wo.github.io/tabernetes/))
 boots it in a terminal.
-A real node can join with Docker. The node talks to the browser over WebRTC.
+Pods run right away on the node `tab`, a kubelet inside the same binary. A
+real node can join with Docker. The node talks to the browser over WebRTC.
 
 ## How it works
 
@@ -71,6 +72,60 @@ browser tab (single wasm binary)                     docker run tabernetes
   also advertises `127.0.0.1` for the `-p 127.0.0.1:<port>:<port>/udp`
   mapping. That way it works on Docker Desktop, where the browser cannot
   reach container IPs.
+
+## The tab node
+
+`k8s/tabernetes/tabnode*.go` is a kubelet inside the tab. It registers the
+Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
+`tabernetes.io/tab=true`, `tabernetes.io/wasm=true`) as `system:node:tab`,
+keeps its Lease and runs the pods the scheduler binds to it. It has the taint
+`tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
+everything lands here; once a Docker node joins, the scheduler prefers that
+one. flannel, kube-proxy and CoreDNS stay off it (node affinity).
+
+A container is not a process:
+
+- **Native containers** run their command line in a shell of their own
+  (mvdan.cc/sh again) as goroutines, with the coreutils of the terminal,
+  kubectl (with the service account of the pod, through 10.96.0.1) and the
+  programs of the built-in images (`tabnode_images*.go`): nginx (it reads
+  nginx.conf and conf.d), httpd, pause, whoami, http-echo, echo-server,
+  agnhost, podinfo, hello-app, redis with redis-cli, the busybox/alpine/ubuntu
+  family, curlimages/curl, bitnami/kubectl. Any other image runs its command
+  in the shell; an unknown image without a command waits as
+  `UnsupportedImage`. Each container sees its own root directory with the
+  files of its image and its volume mounts.
+- **WebAssembly containers** (`runtimeClassName: wasmtime`, the RuntimeClass
+  of runwasi's wasmtime shim) run a WASI preview 1 module in a Web Worker of
+  their own (`tabnode_wasi.go`, `web/src/wasi*.js`, with
+  [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim)). Workers
+  are real threads: such a pod does not take CPU from the control plane. The
+  browser cannot pull from ghcr.io or Docker Hub (no CORS headers), so the
+  page ships an OCI mirror (`wasm-images/`, `images.txt`) next to it; other
+  registries are tried over HTTPS. On a Docker node the same manifest runs
+  with runwasi.
+
+What works like on a real node: init and sidecar containers, restart
+policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/
+downwardAPI/hostPath volumes (hostPath is the file system of the terminal),
+env from ConfigMaps, Secrets and the downward API, service links, probes,
+graceful deletion, events, `kubectl logs/exec/attach/port-forward`
+(`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
+streaming library of Kubernetes).
+
+Pods listen on their pod IP in the in-process network of the wasm. There is
+no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
+kube-proxy and DNS of the tab: it listens on every cluster IP and node port
+and forwards to ready endpoints (endpoints on a Docker node through the
+port-forward of the apiserver). wget, curl and nslookup resolve service names
+with the search path of the pod, in pods and in the terminal:
+`k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
+directly (`k8s/patch.go`), so its service and pod proxy work, too.
+
+wasm has no preemption: a busy loop in a goroutine would freeze the tab.
+Every command of a native container yields, and a container that runs 10ms
+without blocking sleeps as long, so it gets half of the thread at most (less
+with `limits.cpu` below 500m).
 
 ## Patches
 
@@ -197,8 +252,15 @@ still works, too. Real isolation from the host needs rootless Docker or Podman.
   one CPU core.
 - No persistence: a reload starts a new cluster.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
-  the kubelet. The apiserver cannot reach pod or service IPs, so service
-  proxy URLs do not work.
+  the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
+  Docker node, so service proxy URLs work only for pods on the tab node.
+- The tab node is not a sandbox: all its containers share the tab, its
+  memory and its in-memory file system. Native containers only look like
+  their images; nothing of a real image runs. `kubectl exec -it` and
+  `run -it` need a TTY the terminal does not pass on. UDP services,
+  WASI preview 2 components and sockets in WebAssembly pods are not
+  supported. A shell loop without any command (`for ((;;)); do x=1; done`)
+  still freezes the tab.
 - The printed `docker run` works when Docker runs on the same machine as the
   browser. For Docker on another machine in the LAN, publish the port on all
   interfaces (`-p 50001:50001/udp` for the first node) and pass

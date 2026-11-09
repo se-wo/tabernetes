@@ -25,7 +25,13 @@ theme, Hugo configuration) has been removed; only Tabernetes is kept.
 This is a modified version of Tabernetes. The changes to the original work:
 
 - A Kubernetes node inside the browser tab (node `tab`): a kubelet in the
-  WebAssembly binary runs pods without Docker.
+  WebAssembly binary runs pods without Docker, with built-in images (nginx,
+  busybox, whoami, podinfo, redis, ...), the kubelet API (`kubectl logs`,
+  `exec`, `attach`, `port-forward`), Services with cluster DNS names, and
+  `curl`/`nslookup` in the terminal.
+- The apiserver dials pods in the in-process network, so its service and pod
+  proxy work; a wall clock with sub-millisecond resolution so that events no
+  longer overwrite each other.
 - WebAssembly pods: a WASI runtime in Web Workers runs WebAssembly container
   images on the tab node, and runwasi runs them on the Docker node.
 - Publishing of only Tabernetes with GitHub Pages: a standalone page
