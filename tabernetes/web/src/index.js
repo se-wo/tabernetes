@@ -6,6 +6,13 @@ import { installWasi } from "./wasi.js";
 import { nodeBuiltins } from "./nodes.js";
 
 const el = document.getElementById("tabernetes");
+// The panel of "proxy" goes next to the terminal: both share a row.
+if (!el.parentElement.classList.contains("tabernetes-row")) {
+  const row = document.createElement("div");
+  row.className = "tabernetes-row";
+  el.before(row);
+  row.append(el);
+}
 // A data attribute of the page, else a file next to tabernetes.js. Absolute,
 // because the workers of nodes.js resolve them, too.
 const url = (attr, file) => new URL(attr || file, attr ? location.href : import.meta.url).href;
@@ -33,7 +40,7 @@ startTerminal(el, {
       status: status && nodes,
     }),
     ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes }),
-    ...proxyBuiltins({ status: status && ports }),
+    ...proxyBuiltins({ status: status && ports, terminal: el }),
   },
 }).then((t) => (globalThis.tabernetesTerminal = t)).catch((e) => {
   el.textContent = "Tabernetes failed to start: " + e;

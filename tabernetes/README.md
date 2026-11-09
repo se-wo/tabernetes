@@ -52,13 +52,20 @@ browser tab (single wasm binary)                     docker run tabernetes
   Ctrl-C stops the foreground command, `kubectl port-forward` and
   `kubectl proxy` included. On Windows and Linux, Ctrl-C copies instead while
   text is selected, and Ctrl-V pastes.
-- `proxy 8080` opens `localhost:8080` of the Wasm in a new browser tab. A
-  service worker under `tabernetes-proxy/` next to the page (`web/proxy-sw.js`) hands
-  every request of that tab to the terminal tab, which sends it to the
-  in-process network. The tab works as long as the terminal tab is open;
-  leaving the terminal page unregisters the worker. While
-  `kubectl port-forward` runs, the status line under the terminal links each
-  of its local ports the same way (`k8s/tabernetes/forwards.go`).
+- `proxy svc/web` shows the service `web` in a panel next to the terminal
+  (`-n <namespace>`, `svc/web:8080` or a port name for another port).
+  Every request goes through the service proxy of the tab on a connection of
+  its own, so each reload of the panel shows the next ready replica, wherever
+  it runs: on the tab node, a node in a Web Worker or a Docker node.
+  `proxy 8080` shows `localhost:8080` of the Wasm instead, typically
+  `kubectl port-forward`. `--tab` opens a new browser tab instead of the panel,
+  `proxy --close` closes the panel. A service worker under `tabernetes-proxy/`
+  next to the page (`web/proxy-sw.js`) hands every request of the panel to the
+  terminal tab, which sends it to the in-process network. It works as long as
+  the terminal tab is open; leaving the terminal page unregisters the worker.
+  While `kubectl port-forward` runs, the status line under the terminal links
+  each of its local ports the same way (`k8s/tabernetes/forwards.go`): a click
+  shows it in the panel, Ctrl-click in a new tab.
 - `free` shows the WebAssembly memory (wasm32 ends at 4 GiB, and the linear
   memory never shrinks), the Go heap and the number of goroutines.
 - `vi` (`k8s/tabernetes/vi.go`) is a small vi for manifests. It runs in raw mode:
