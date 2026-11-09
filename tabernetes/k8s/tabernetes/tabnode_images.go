@@ -441,6 +441,10 @@ func builtinImageList() []v1.ContainerImage {
 // imageID is the imageID of a container status.
 func imageID(ref string, img *builtinImage, wasm bool) string {
 	if wasm {
+		// repo@digest once the module is pulled (tabnode_wasi.go)
+		if id := wasmImageID(ref); id != "" {
+			return id
+		}
 		return "tabernetes://wasm/" + ref
 	}
 	if d, tag := findImage(ref); d != nil && img != nil {
