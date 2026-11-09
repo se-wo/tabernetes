@@ -194,7 +194,11 @@ func boot() (*cluster, error) {
 		return nil, fmt.Errorf("installing addons: %w", err)
 	}
 	status("starting the tab node")
-	if err := startTabNode(context.Background(), c); err != nil {
+	nc, err := c.issueNodeCreds(tabNodeName, tabNodeIP)
+	if err == nil {
+		err = startTabNode(context.Background(), nc)
+	}
+	if err != nil {
 		status("the tab node did not start: " + err.Error())
 	}
 	status("ready")
@@ -270,6 +274,18 @@ func main() {
 		status = func(s string) { cb.Invoke(s) }
 	}
 
+	// attachChannel(dc) for channels the other side opens: a Docker node
+	// agent (RTCDataChannel) or a node in a Web Worker (web/src/channel.js).
+	api.Set("attachChannel", js.FuncOf(func(this js.Value, a []js.Value) any {
+		attachChannel(a[0])
+		return nil
+	}))
+	// In a Web Worker this instance is a node, not a cluster (nodeworker.go).
+	if cfg := js.Global().Get("tabernetesNodeConfig"); cfg.Truthy() {
+		api.Set("ready", promise(func() (any, error) { return nil, runWorkerNode(cfg) }))
+		select {}
+	}
+
 	var c *cluster
 	ready := promise(func() (any, error) {
 		var err error
@@ -333,10 +349,32 @@ func main() {
 			return c.prepareJoin(open)
 		})
 	}))
-	// attachChannel(dc: RTCDataChannel) for channels opened by a node agent.
-	api.Set("attachChannel", js.FuncOf(func(this js.Value, a []js.Value) any {
-		attachChannel(a[0])
-		return nil
+	// prepareWorkerNode(open: (label: string) => Promise<channel>): Promise<config>
+	// for a node in a Web Worker (web/src/nodes.js, nodeworker.go).
+	api.Set("prepareWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
+		open := a[0]
+		return promise(func() (any, error) {
+			if c == nil {
+				return nil, fmt.Errorf("cluster is not ready yet")
+			}
+			return c.prepareWorkerNode(open)
+		})
+	}))
+	// removeWorkerNode(name): Promise, after its worker is gone. The node is
+	// gone for good, so its pods are deleted at once (the pod GC would wait
+	// for a while) and their controllers make new ones on other nodes.
+	api.Set("removeWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
+		name := a[0].String()
+		return promise(func() (any, error) {
+			removeWorkerNode(name)
+			ctx := context.Background()
+			if code := runKubectl(ctx, []string{"delete", "node", name, "--wait=false"}, nil, io.Discard, os.Stderr); code != 0 {
+				return nil, fmt.Errorf("deleting node %s failed (exit %d)", name, code)
+			}
+			runKubectl(ctx, []string{"delete", "pods", "--all-namespaces", "--field-selector", "spec.nodeName=" + name,
+				"--grace-period=0", "--force", "--wait=false"}, nil, io.Discard, io.Discard)
+			return nil, nil
+		})
 	}))
 
 	select {}

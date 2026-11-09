@@ -4,6 +4,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { installFS } from "./fs.js";
+import { patchWalltime } from "./clock.js";
 
 const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
 
@@ -98,20 +99,7 @@ export async function startTerminal(el, opts) {
   }));
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
-  // wasm_exec.js reads the wall clock from Date, in milliseconds. Kubernetes
-  // names an event <object>.<UnixNano in hex>, so two events of one object in
-  // the same millisecond got the same name and the second one overwrote the
-  // first ("Pulled" with the message of "Created"). A clock with the
-  // resolution of performance.now() that never repeats keeps them apart.
-  let lastWall = 0n;
-  go.importObject.gojs["runtime.walltime"] = (sp) => {
-    sp >>>= 0;
-    let ns = BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
-    if (ns <= lastWall) ns = lastWall + 1n;
-    lastWall = ns;
-    go.mem.setBigInt64(sp + 8, ns / 1000000000n, true);
-    go.mem.setInt32(sp + 16, Number(ns % 1000000000n), true);
-  };
+  patchWalltime(go);
   const instance = await instantiate(unpack(opts.wasmURL, counted, total, opts.workerURL), go.importObject);
   term.writeln("");
   globalThis.tabernetesStatus(cached ? "compiled WebAssembly from the browser cache" : "downloaded and compiled WebAssembly");
@@ -172,6 +160,8 @@ export async function startTerminal(el, opts) {
         "  built-in images: nginx, httpd, busybox/alpine/..., whoami, http-echo, podinfo, agnhost, ...;",
         "  any other image runs its command in the shell of the tab",
         "  runtimeClassName: wasmtime runs WebAssembly (WASI) images in Web Workers",
+        "  addnode [n]              more nodes, each in a Web Worker: a thread of its own",
+        "  rmnode <name>...         stop and delete nodes in workers",
         "",
         "Terminal",
         "  join                     connect a real node via WebRTC (needs docker)",
@@ -180,7 +170,7 @@ export async function startTerminal(el, opts) {
         "  logs [n]                 the last n lines of the control plane logs",
         "  history [n] | -c         the commands of this tab (Ctrl-R searches them)",
         "  clear                    clear the screen",
-        ...terminal.filter((n) => !["join", "accept", "proxy", "logs", "history", "clear"].includes(n)).map((n) => `  ${n}`),
+        ...terminal.filter((n) => !["join", "accept", "proxy", "logs", "history", "clear", "addnode", "rmnode"].includes(n)).map((n) => `  ${n}`),
         "",
         "Tools (small versions, the common flags)",
         ...list(tools),
@@ -465,7 +455,7 @@ export async function startTerminal(el, opts) {
     }
   }
   term.focus();
-  return { term, exec };
+  return { term, exec, builtins: shellBuiltins };
 }
 
 // escape returns the escape sequence at the start of s: CSI (ESC [ params
@@ -583,8 +573,12 @@ function frameEnd(b) {
 async function instantiate(stream, imports) {
   if (WebAssembly.instantiateStreaming) {
     const resp = new Response(stream, { headers: { "Content-Type": "application/wasm" } });
-    return (await WebAssembly.instantiateStreaming(resp, imports)).instance;
+    const { instance, module } = await WebAssembly.instantiateStreaming(resp, imports);
+    globalThis.tabernetesModule = module; // nodes in Web Workers start from it (nodes.js)
+    return instance;
   }
   const bytes = await new Response(stream).arrayBuffer();
-  return (await WebAssembly.instantiate(bytes, imports)).instance;
+  const { instance, module } = await WebAssembly.instantiate(bytes, imports);
+  globalThis.tabernetesModule = module;
+  return instance;
 }

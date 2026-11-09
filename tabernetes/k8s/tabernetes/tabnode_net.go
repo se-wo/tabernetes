@@ -229,20 +229,18 @@ type endpoint struct {
 	port   int32
 	node   string
 	pod    *v1.ObjectReference
-	remote bool // on a joined node, out of reach of the wasm
+	remote bool // on another node, out of reach of this instance
 }
 
-// forward connects c to an endpoint of t: round robin over the ready
-// endpoints on the tab, through the apiserver for endpoints on joined nodes.
+// forward connects c to an endpoint of t: round robin over all ready
+// endpoints like kube-proxy, the ones on this node directly, the ones on
+// other nodes (Docker, Web Workers) through the apiserver. If one cannot be
+// reached, the next one is tried.
 func (s *serviceProxy) forward(c net.Conn, t svcPort) {
 	eps := s.endpoints(t)
 	if len(eps) == 0 {
 		c.Close() // like a REJECT rule of kube-proxy: no endpoints
 		return
-	}
-	local := slices.DeleteFunc(slices.Clone(eps), func(e endpoint) bool { return e.remote })
-	if len(local) > 0 {
-		eps = local
 	}
 	key := t.namespace + "/" + t.name + ":" + t.portName
 	s.mu.Lock()
@@ -275,7 +273,7 @@ func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint) (io.ReadWri
 		return s.portForward(ctx, e.pod.Namespace, e.pod.Name, e.port)
 	}
 	ip := e.ip
-	if ip == tabNodeIP && e.port == 6443 {
+	if ip == advertiseIP && e.port == 6443 { // the apiserver, also from a node in a Web Worker
 		// The kubernetes service: the apiserver listens on 127.0.0.1 only.
 		ip = "127.0.0.1"
 	}

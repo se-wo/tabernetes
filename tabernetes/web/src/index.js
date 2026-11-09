@@ -3,15 +3,25 @@ import { startTerminal } from "./terminal.js";
 import { joinBuiltins } from "./join.js";
 import { proxyBuiltins } from "./proxy.js";
 import { installWasi } from "./wasi.js";
+import { nodeBuiltins } from "./nodes.js";
 
 const el = document.getElementById("tabernetes");
-// WebAssembly pods run in workers. Both default to files next to tabernetes.js.
-installWasi({ workerURL: el.dataset.wasiWorker, mirror: el.dataset.oci });
-// The status line under the terminal: the nodes, then the forwarded ports.
+// A data attribute of the page, else a file next to tabernetes.js. Absolute,
+// because the workers of nodes.js resolve them, too.
+const url = (attr, file) => new URL(attr || file, attr ? location.href : import.meta.url).href;
+// WebAssembly pods run in workers.
+const wasi = {
+  workerURL: url(el.dataset.wasiWorker, "wasi.worker.js"),
+  mirror: el.dataset.oci === "" ? "" : url(el.dataset.oci, "oci/"),
+};
+installWasi(wasi);
+// The status line under the terminal: the nodes (Docker, then Web Workers),
+// then the forwarded ports.
 const status = document.getElementById("tabernetes-status");
 const nodes = document.createElement("span");
+const workerNodes = document.createElement("span");
 const ports = document.createElement("span");
-status?.append(nodes, ports);
+status?.append(nodes, workerNodes, ports);
 startTerminal(el, {
   wasmURL: el.dataset.wasm,
   workerURL: el.dataset.worker,
@@ -22,6 +32,7 @@ startTerminal(el, {
       stun: el.dataset.stun ?? undefined,
       status: status && nodes,
     }),
+    ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes }),
     ...proxyBuiltins({ status: status && ports }),
   },
 }).then((t) => (globalThis.tabernetesTerminal = t)).catch((e) => {
