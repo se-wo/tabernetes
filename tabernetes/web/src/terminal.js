@@ -134,7 +134,7 @@ export async function startTerminal(el, opts) {
     return { term };
   }
   term.writeln("");
-  term.writeln(`Try ${"\x1b[1m"}k version${"\x1b[0m"}, ${"\x1b[1m"}join${"\x1b[0m"} or ${"\x1b[1m"}help${"\x1b[0m"}.`);
+  term.writeln(`Pods run right here on the node ${"\x1b[1m"}tab${"\x1b[0m"}: try ${"\x1b[1m"}k create deploy web --image=nginx${"\x1b[0m"}, ${"\x1b[1m"}join${"\x1b[0m"} or ${"\x1b[1m"}help${"\x1b[0m"}.`);
 
   // ---- shell ----
   globalThis.tabernetes.resize(term.cols, term.rows);
@@ -164,6 +164,14 @@ export async function startTerminal(el, opts) {
         "Kubernetes",
         "  kubectl, k               kubectl against the in-browser cluster",
         "  kubectl edit ...         opens vi: :wq applies, :q! cancels",
+        "",
+        "The tab node (pods run inside this tab, no Docker needed)",
+        "  k create deploy web --image=nginx --replicas=3",
+        "  k expose deploy web --port 80; wget -qO- web",
+        "  k run hi --image=busybox --restart=Never -- sh -c 'echo hi from $HOSTNAME'",
+        "  built-in images: nginx, httpd, busybox/alpine/..., whoami, http-echo, podinfo, agnhost, ...;",
+        "  any other image runs its command in the shell of the tab",
+        "  runtimeClassName: wasmtime runs WebAssembly (WASI) images in Web Workers",
         "",
         "Terminal",
         "  join                     connect a real node via WebRTC (needs docker)",
