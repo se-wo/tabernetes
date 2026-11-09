@@ -167,6 +167,17 @@ var imageDefs = []*imageDef{
 	},
 	{
 		img: builtinImage{
+			name:       "nginx-hello",
+			entrypoint: []string{"/docker-entrypoint.sh"},
+			cmd:        []string{"nginx", "-g", "daemon off;"},
+			env:        []string{"NGINX_VERSION=1.29.3", "NJS_VERSION=0.9.4", "NJS_RELEASE=1~trixie", "PKG_RELEASE=1~trixie", "DYNPKG_RELEASE=1~trixie"},
+			files:      nginxHelloFiles,
+		},
+		repos: []string{"nginxdemos/hello"}, tag: "latest", size: 72_400_112,
+		tune: nginxHelloTag,
+	},
+	{
+		img: builtinImage{
 			name:    "httpd",
 			cmd:     []string{"httpd-foreground"},
 			workdir: "/usr/local/apache2",
@@ -1063,7 +1074,7 @@ func echoserverProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 		w.Header().Set("Server", "echoserver")
 		w.Header().Set("Content-Type", "text/plain")
 		io.WriteString(sw, b.String())
-		logger.Printf("%s - - [%s] \"%s %s %s\" %d %d \"%s\" \"%s\"", remoteHost(r), time.Now().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, sw.code(), sw.size, orDash(r.Referer()), orDash(r.UserAgent()))
+		logger.Printf("%s - - [%s] \"%s %s %s\" %d %d \"%s\" \"%s\"", remoteHost(r), time.Now().UTC().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, sw.code(), sw.size, orDash(r.Referer()), orDash(r.UserAgent()))
 	})
 	fmt.Fprintln(hc.Stdout, "Generating self-signed cert")
 	return serveHTTP(ctx, hc, "echoserver", h, ":8080")
@@ -1177,7 +1188,7 @@ func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, e
 		gap := *dur / time.Duration(*total)
 		methods := []string{"GET", "POST", "PUT"}
 		for i := 0; i < *total; i++ {
-			fmt.Fprintf(hc.Stdout, "%s %d %s /api/v1/namespaces/default/pods/%d %d\n", time.Now().Format("I0102 15:04:05.000000"), i, methods[i%3], 1000+i*37%9000, 200+i*7%300)
+			fmt.Fprintf(hc.Stdout, "%s %d %s /api/v1/namespaces/default/pods/%d %d\n", time.Now().UTC().Format("I0102 15:04:05.000000"), i, methods[i%3], 1000+i*37%9000, 200+i*7%300)
 			if !sleepCtx(ctx, max(gap, time.Millisecond)) {
 				return nil
 			}
@@ -1213,7 +1224,7 @@ func agnhostNetexec(ctx context.Context, hc interp.HandlerContext, fs *pflag.Fla
 			http.NotFound(w, r)
 			return
 		}
-		fmt.Fprintf(w, "NOW: %v", time.Now())
+		fmt.Fprintf(w, "NOW: %v", time.Now().UTC())
 	})
 	mux.HandleFunc("/hostname", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, hostname) })
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
@@ -1596,7 +1607,7 @@ func hpaExampleProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 	}
 	ip := podIP(ctx)
 	fmt.Fprintf(hc.Stderr, "AH00558: apache2: Could not reliably determine the server's fully qualified domain name, using %s. Set the 'ServerName' directive globally to suppress this message\n", ip)
-	fmt.Fprintf(hc.Stderr, "[%s] [mpm_prefork:notice] [pid 1] AH00163: Apache/2.4.10 (Debian) PHP/5.6.14 configured -- resuming normal operations\n", apacheTime(time.Now()))
+	fmt.Fprintf(hc.Stderr, "[%s] [mpm_prefork:notice] [pid 1] AH00163: Apache/2.4.10 (Debian) PHP/5.6.14 configured -- resuming normal operations\n", apacheTime(time.Now().UTC()))
 	logger := newLogger(hc.Stdout, 0)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The real page computes square roots for a while; a short sleep
@@ -1606,7 +1617,7 @@ func hpaExampleProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 		w.Header().Set("X-Powered-By", "PHP/5.6.14")
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, "OK!")
-		logger.Printf("%s - - [%s] \"%s %s %s\" 200 3 \"%s\" \"%s\"", remoteHost(r), time.Now().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, orDash(r.Referer()), orDash(r.UserAgent()))
+		logger.Printf("%s - - [%s] \"%s %s %s\" 200 3 \"%s\" \"%s\"", remoteHost(r), time.Now().UTC().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, orDash(r.Referer()), orDash(r.UserAgent()))
 	})
 	return serveHTTP(ctx, hc, "apache2", h, ":80")
 }

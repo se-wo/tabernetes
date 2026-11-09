@@ -11,7 +11,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -1192,7 +1194,7 @@ func nginxProg(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	}
 	real := containerFS(ctx)
 	errlog := func(level, format string, a ...any) {
-		fmt.Fprintf(hc.Stderr, "%s [%s] 1#1: %s\n", time.Now().Format("2006/01/02 15:04:05"), level, fmt.Sprintf(format, a...))
+		fmt.Fprintf(hc.Stderr, "%s [%s] 1#1: %s\n", time.Now().UTC().Format("2006/01/02 15:04:05"), level, fmt.Sprintf(format, a...))
 	}
 	cfg, err := ngxLoad(real, file, globals)
 	if signal != "" {
@@ -1213,7 +1215,7 @@ func nginxProg(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 		return nil
 	}
 	if err != nil {
-		fmt.Fprintf(hc.Stderr, "%s [emerg] 1#1: %v\nnginx: [emerg] %v\n", time.Now().Format("2006/01/02 15:04:05"), err, err)
+		fmt.Fprintf(hc.Stderr, "%s [emerg] 1#1: %v\nnginx: [emerg] %v\n", time.Now().UTC().Format("2006/01/02 15:04:05"), err, err)
 		return interp.ExitStatus(1)
 	}
 	// daemon on (without -g "daemon off;") would fork into the background;
@@ -1260,18 +1262,18 @@ func nginxSignal(ctx context.Context, hc interp.HandlerContext, signal string) e
 		fmt.Fprintf(hc.Stderr, "nginx: [error] open() \"/run/nginx.pid\" failed (2: No such file or directory)\n")
 		return interp.ExitStatus(1)
 	}
-	fmt.Fprintf(hc.Stderr, "%s [notice] 42#42: signal process started\n", time.Now().Format("2006/01/02 15:04:05"))
+	fmt.Fprintf(hc.Stderr, "%s [notice] 42#42: signal process started\n", time.Now().UTC().Format("2006/01/02 15:04:05"))
 	inst.signal(signal)
 	return nil
 }
 
 func (n *nginxInst) errlog(level, format string, a ...any) {
-	fmt.Fprintf(n.errw, "%s [%s] 29#29: %s\n", time.Now().Format("2006/01/02 15:04:05"), level, fmt.Sprintf(format, a...))
+	fmt.Fprintf(n.errw, "%s [%s] 29#29: %s\n", time.Now().UTC().Format("2006/01/02 15:04:05"), level, fmt.Sprintf(format, a...))
 }
 
 func (n *nginxInst) signal(sig string) {
 	master := func(format string, a ...any) {
-		fmt.Fprintf(n.errw, "%s [notice] 1#1: %s\n", time.Now().Format("2006/01/02 15:04:05"), fmt.Sprintf(format, a...))
+		fmt.Fprintf(n.errw, "%s [notice] 1#1: %s\n", time.Now().UTC().Format("2006/01/02 15:04:05"), fmt.Sprintf(format, a...))
 	}
 	switch sig {
 	case "stop":
@@ -1289,7 +1291,7 @@ func (n *nginxInst) signal(sig string) {
 		master("reconfiguring")
 		cfg, err := ngxLoad(n.real, n.file, n.globals)
 		if err != nil {
-			fmt.Fprintf(n.errw, "%s [emerg] 1#1: %v\n", time.Now().Format("2006/01/02 15:04:05"), err)
+			fmt.Fprintf(n.errw, "%s [emerg] 1#1: %v\n", time.Now().UTC().Format("2006/01/02 15:04:05"), err)
 			return
 		}
 		if err := n.listen(cfg); err != nil {
@@ -1369,6 +1371,7 @@ type ngxReq struct {
 	loc    *ngxLoc
 	c      *ngxCommon
 	caps   []string // captures of the regex location or rewrite
+	reqID  string   // $request_id, made on first use
 	file   string   // $request_filename
 }
 
@@ -1983,9 +1986,9 @@ func (q *ngxReq) variable(name string) (string, bool) {
 		}
 		return "", false
 	case "time_local":
-		return time.Now().Format("02/Jan/2006:15:04:05 -0700"), true
+		return time.Now().UTC().Format("02/Jan/2006:15:04:05 -0700"), true
 	case "time_iso8601":
-		return time.Now().Format("2006-01-02T15:04:05-07:00"), true
+		return time.Now().UTC().Format("2006-01-02T15:04:05-07:00"), true
 	case "msec":
 		return fmt.Sprintf("%.3f", float64(time.Now().UnixMilli())/1000), true
 	case "request":
@@ -2033,6 +2036,13 @@ func (q *ngxReq) variable(name string) (string, bool) {
 		return strings.ToLower(h), true
 	case "hostname":
 		return podHostname(r.Context()), true
+	case "request_id":
+		if q.reqID == "" {
+			b := make([]byte, 16)
+			rand.Read(b)
+			q.reqID = hex.EncodeToString(b)
+		}
+		return q.reqID, true
 	case "server_name":
 		return q.serverName(), true
 	case "server_port":
@@ -2212,15 +2222,15 @@ func httpdProg(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 		if u, _, ok := r.BasicAuth(); ok {
 			user = u
 		}
-		fmt.Fprintf(out, "%s - %s [%s] \"%s %s %s\" %d %s\n", remoteHost(r), user, time.Now().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, sw.code(), size)
+		fmt.Fprintf(out, "%s - %s [%s] \"%s %s %s\" %d %s\n", remoteHost(r), user, time.Now().UTC().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.RequestURI(), r.Proto, sw.code(), size)
 	})
 	fmt.Fprintf(hc.Stderr, "AH00558: httpd: Could not reliably determine the server's fully qualified domain name, using %s. Set the 'ServerName' directive globally to suppress this message\n", ip)
 	fmt.Fprintf(hc.Stderr, "AH00558: httpd: Could not reliably determine the server's fully qualified domain name, using %s. Set the 'ServerName' directive globally to suppress this message\n", ip)
-	fmt.Fprintf(hc.Stderr, "[%s] [mpm_event:notice] [pid 1:tid 1] AH00489: Apache/%s (Unix) configured -- resuming normal operations\n", apacheTime(time.Now()), version)
-	fmt.Fprintf(hc.Stderr, "[%s] [core:notice] [pid 1:tid 1] AH00094: Command line: 'httpd -D FOREGROUND'\n", apacheTime(time.Now()))
+	fmt.Fprintf(hc.Stderr, "[%s] [mpm_event:notice] [pid 1:tid 1] AH00489: Apache/%s (Unix) configured -- resuming normal operations\n", apacheTime(time.Now().UTC()), version)
+	fmt.Fprintf(hc.Stderr, "[%s] [core:notice] [pid 1:tid 1] AH00094: Command line: 'httpd -D FOREGROUND'\n", apacheTime(time.Now().UTC()))
 	err := serveHTTP(ctx, hc, "httpd", h, addrs...)
 	if err == nil {
-		fmt.Fprintf(hc.Stderr, "[%s] [mpm_event:notice] [pid 1:tid 1] AH00491: caught SIGTERM, shutting down\n", apacheTime(time.Now()))
+		fmt.Fprintf(hc.Stderr, "[%s] [mpm_event:notice] [pid 1:tid 1] AH00491: caught SIGTERM, shutting down\n", apacheTime(time.Now().UTC()))
 	}
 	return err
 }
@@ -2316,4 +2326,68 @@ func httpdIndex(w http.ResponseWriter, r *http.Request, uri, real string) {
 	if r.Method != http.MethodHead {
 		w.Write(b.Bytes())
 	}
+}
+
+// nginxdemos/hello is nginx with a page that names the server that answered:
+// with several replicas behind a Service, every request can show another
+// pod. The plain-text tag answers in plain text.
+const nginxHelloPlain = `server {
+    listen 80;
+    listen [::]:80;
+
+    location / {
+        default_type text/plain;
+        expires -1;
+        return 200 'Server address: $server_addr:$server_port\nServer name: $hostname\nDate: $time_local\nURI: $request_uri\nRequest ID: $request_id\n';
+    }
+}
+`
+
+const nginxHelloHTML = `server {
+    listen 80;
+    listen [::]:80;
+
+    location / {
+        default_type text/html;
+        expires -1;
+        return 200 '<!DOCTYPE html>
+<html>
+<head>
+<title>Hello World</title>
+<style>
+body { margin: 0; padding: 0; font-family: Tahoma, Verdana, Arial, sans-serif; }
+#center { width: 420px; margin: 80px auto; }
+h1 { color: #009639; }
+td { padding: 2px 12px 2px 0; }
+td:first-child { font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="center">
+<h1>Hello World</h1>
+<table>
+<tr><td>Server&nbsp;address:</td><td>$server_addr:$server_port</td></tr>
+<tr><td>Server&nbsp;name:</td><td>$hostname</td></tr>
+<tr><td>Date:</td><td>$time_local</td></tr>
+<tr><td>URI:</td><td>$request_uri</td></tr>
+<tr><td>Request&nbsp;ID:</td><td>$request_id</td></tr>
+</table>
+</div>
+</body>
+</html>
+';
+    }
+}
+`
+
+var nginxHelloFiles = mergeFiles(nginxFiles, map[string]string{
+	"/etc/nginx/conf.d/default.conf": nginxHelloHTML,
+})
+
+// nginxHelloTag picks the plain-text page for the plain-text tag.
+func nginxHelloTag(img *builtinImage, tag string) {
+	if !strings.HasPrefix(tag, "plain-text") {
+		return
+	}
+	img.files = mergeFiles(img.files, map[string]string{"/etc/nginx/conf.d/default.conf": nginxHelloPlain})
 }

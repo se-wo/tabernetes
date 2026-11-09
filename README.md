@@ -98,7 +98,9 @@ One-time setup in the repository settings:
 1. Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 2. Actions → "tabernetes image" → Run workflow (on `main`), once, so that the
    node image exists.
-3. The package `tabernetes` on the owner's profile (Packages) → Package
-   settings → Change visibility → **Public**, so that `docker run` can pull
-   it without a login.
-4. Actions → "Pages" → Run workflow, or push to `main`.
+3. Actions → "Pages" → Run workflow, or push to `main`.
+
+The package `tabernetes` inherits the visibility of a public repository, so
+`docker run` pulls it without a login. If it shows as private on the owner's
+profile (Packages), change it there: Package settings → Change visibility →
+**Public**.

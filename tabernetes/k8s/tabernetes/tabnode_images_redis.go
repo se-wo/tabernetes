@@ -80,7 +80,7 @@ func redisServerProg(ctx context.Context, hc interp.HandlerContext, args []strin
 		}
 	}
 	now := func(role string) string {
-		return "1:" + role + " " + time.Now().Format("02 Jan 2006 15:04:05.000")
+		return "1:" + role + " " + time.Now().UTC().Format("02 Jan 2006 15:04:05.000")
 	}
 	out := &syncWriter{w: hc.Stdout}
 	fmt.Fprintf(out, "%s * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo\n", now("C"))
