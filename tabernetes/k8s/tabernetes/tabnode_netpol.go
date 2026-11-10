@@ -8,9 +8,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"sync"
+	"syscall"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -24,8 +29,28 @@ import (
 
 // netPolicy decides whether a connection may open.
 type netPolicy struct {
-	engine *networkpolicy.PolicyEngine
+	engine   *networkpolicy.PolicyEngine
+	provider api.PodInfoProvider
+
+	mu       sync.Mutex
+	admitted map[admitKey]*admission
 }
+
+// admitKey is a connection that a dial has decided already: the source IP
+// and the destination ip:port. The source port is not known before the dial.
+type admitKey struct{ src, dst string }
+
+type admission struct {
+	n     int // dials that have not reached the listener yet
+	until time.Time
+}
+
+// admitTTL is how long a decision waits for its connection to be accepted.
+const admitTTL = 30 * time.Second
+
+// synTimeout is how long a dropped connection takes to fail when the dial
+// has no deadline: the SYN retries of Linux.
+const synTimeout = 127 * time.Second
 
 // newNetPolicy starts the informers of the engine: all pods, namespaces,
 // nodes and NetworkPolicies of the cluster. Pods of other nodes are needed
@@ -54,7 +79,11 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName str
 		return nil, err
 	}
 	standard := networkpolicy.NewStandardNetworkPolicy(nodeName, namespaces, pods, policies)
-	p := &netPolicy{engine: networkpolicy.NewPolicyEngine(provider, []api.PolicyEvaluator{standard})}
+	p := &netPolicy{
+		engine:   networkpolicy.NewPolicyEngine(provider, []api.PolicyEvaluator{standard}),
+		provider: provider,
+		admitted: map[admitKey]*admission{},
+	}
 	factory.Start(ctx.Done())
 	return p, nil
 }
@@ -82,4 +111,182 @@ func (p *netPolicy) allowed(ctx context.Context, src, dst *net.TCPAddr) bool {
 		fmt.Fprintf(os.Stderr, "network policy: %s -> %s: %v\n", src, dst, err)
 	}
 	return ok
+}
+
+// podByIP is the pod with the IP ip, from the informers of the engine.
+func (p *netPolicy) podByIP(ip string) *api.PodInfo {
+	if p == nil {
+		return nil
+	}
+	pod, _ := p.provider.GetPodInfoByIP(ip)
+	return pod
+}
+
+// admit notes that a dial from src to dst was allowed, so the listener of
+// dst does not decide the same connection again.
+func (p *netPolicy) admit(src net.IP, dst *net.TCPAddr) {
+	if p == nil {
+		return
+	}
+	now := time.Now()
+	k := admitKey{src.String(), dst.String()}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key, a := range p.admitted {
+		if now.After(a.until) {
+			delete(p.admitted, key)
+		}
+	}
+	a := p.admitted[k]
+	if a == nil {
+		a = &admission{}
+		p.admitted[k] = a
+	}
+	a.n++
+	a.until = now.Add(admitTTL)
+}
+
+// consume takes one admission of src to dst, if there is one.
+func (p *netPolicy) consume(src net.IP, dst *net.TCPAddr) bool {
+	if p == nil {
+		return false
+	}
+	k := admitKey{src.String(), dst.String()}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.admitted[k]
+	if a == nil || time.Now().After(a.until) {
+		delete(p.admitted, k)
+		return false
+	}
+	if a.n--; a.n <= 0 {
+		delete(p.admitted, k)
+	}
+	return true
+}
+
+// dialFromPod dials addr (an ip:port) for the pod with IP srcIP. A cluster IP
+// or node port goes to one endpoint, like the DNAT of kube-proxy, so the
+// policy sees the pod behind it. A denied connection is dropped: the dial
+// fails with a timeout, as NetworkPolicy drops the SYN on a real node.
+func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn, error) {
+	src := &net.TCPAddr{IP: net.ParseIP(srcIP)}
+	dst, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil || src.IP == nil || dst.IP == nil {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", addr) // fails like before
+	}
+	if dst.IP.Equal(src.IP) {
+		// The pod itself, also its localhost: loopback on a real node,
+		// which NetworkPolicy never sees.
+		return (&net.Dialer{LocalAddr: src}).DialContext(ctx, "tcp", addr)
+	}
+	ep := endpoint{ip: dst.IP.String(), port: int32(dst.Port)}
+	if n.net != nil {
+		e, ok, err := n.net.endpointFor(addr)
+		switch {
+		case ok && err != nil:
+			return nil, refusedError(dst)
+		case ok:
+			ep = e
+			dst = &net.TCPAddr{IP: net.ParseIP(e.ip), Port: int(e.port)}
+		case !n.isTabPodIP(ep.ip):
+			// A pod IP of another node: through the apiserver.
+			if pod := n.policy.podByIP(ep.ip); pod != nil {
+				ep.remote = true
+				ep.pod = &v1.ObjectReference{Kind: "Pod", Namespace: pod.GetNamespace().GetName(), Name: pod.GetName()}
+			}
+		}
+	}
+	if !n.policy.allowed(ctx, src, dst) {
+		return nil, dropped(ctx, dst)
+	}
+	n.policy.admit(src.IP, dst)
+	c, err := n.net.dialEndpoint(ctx, ep, src)
+	if err != nil {
+		return nil, err
+	}
+	if conn, ok := c.(net.Conn); ok {
+		return conn, nil
+	}
+	// A pod on another node, through the apiserver's port-forward.
+	return &streamConn{ReadWriteCloser: c, local: src, remote: dst}, nil
+}
+
+// dropped waits like a client whose SYN is dropped: until its context ends,
+// at most synTimeout, then the dial fails with a timeout.
+func dropped(ctx context.Context, dst net.Addr) error {
+	t := time.NewTimer(synTimeout)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return &net.OpError{Op: "dial", Net: "tcp", Addr: dst, Err: ctx.Err()}
+		}
+	case <-t.C:
+	}
+	return &net.OpError{Op: "dial", Net: "tcp", Addr: dst, Err: os.ErrDeadlineExceeded}
+}
+
+// refusedError is the answer to a connection nobody accepts, a service without
+// endpoints included (kube-proxy rejects those).
+func refusedError(dst net.Addr) error {
+	return &net.OpError{Op: "dial", Net: "tcp", Addr: dst, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+}
+
+// policyListener decides the ingress of connections that no dial of this
+// node has decided: dials that do not go through dialCluster. A denied one
+// is closed right away; the dialer already has its connection.
+type policyListener struct {
+	net.Listener
+	n *tabNode
+}
+
+func (l *policyListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if l.n.admitIngress(c) {
+			return c, nil
+		}
+		c.Close()
+	}
+}
+
+// admitIngress allows the host of the node (loopback, the node IP), the pod
+// itself, connections a dial has decided, and what the policy allows.
+func (n *tabNode) admitIngress(c net.Conn) bool {
+	src, ok1 := c.RemoteAddr().(*net.TCPAddr)
+	dst, ok2 := c.LocalAddr().(*net.TCPAddr)
+	if !ok1 || !ok2 {
+		return true
+	}
+	switch {
+	case src.IP.IsLoopback(), src.IP.Equal(net.ParseIP(tabNodeIP)), src.IP.Equal(dst.IP):
+		return true
+	case n.policy.consume(src.IP, dst):
+		return true
+	}
+	return n.policy.allowed(context.Background(), src, dst)
+}
+
+// streamConn is a byte stream to a pod on another node as a net.Conn. It has
+// no deadlines; the callers on the tab node use contexts.
+type streamConn struct {
+	io.ReadWriteCloser
+	local, remote net.Addr
+}
+
+func (c *streamConn) LocalAddr() net.Addr              { return c.local }
+func (c *streamConn) RemoteAddr() net.Addr             { return c.remote }
+func (c *streamConn) SetDeadline(time.Time) error      { return nil }
+func (c *streamConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *streamConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *streamConn) CloseWrite() error {
+	if cw, ok := c.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Close()
 }

@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -242,18 +243,14 @@ func (s *serviceProxy) forward(c net.Conn, t svcPort) {
 		c.Close() // like a REJECT rule of kube-proxy: no endpoints
 		return
 	}
-	key := t.namespace + "/" + t.name + ":" + t.portName
-	s.mu.Lock()
-	start := s.next[key]
-	s.next[key]++
-	s.mu.Unlock()
+	start := s.rotate(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var lastErr error
 	for i := range eps {
 		e := eps[(int(start)+i)%len(eps)]
-		up, err := s.dialEndpoint(ctx, e)
+		up, err := s.dialEndpoint(ctx, e, nil)
 		if err != nil {
 			lastErr = err
 			continue
@@ -265,7 +262,40 @@ func (s *serviceProxy) forward(c net.Conn, t svcPort) {
 	c.Close()
 }
 
-func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint) (io.ReadWriteCloser, error) {
+// rotate is the round robin of a service port, like kube-proxy's.
+func (s *serviceProxy) rotate(t svcPort) uint32 {
+	key := t.namespace + "/" + t.name + ":" + t.portName
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start := s.next[key]
+	s.next[key]++
+	return start
+}
+
+var errNoEndpoints = errors.New("service has no ready endpoints")
+
+// endpointFor is the DNAT of kube-proxy for a pod (tabnode_netpol.go): the
+// endpoint that a connection to addr, a cluster IP or node port, goes to.
+// ok is false when addr is not a service; err is errNoEndpoints when the
+// service has no endpoint (kube-proxy rejects those connections).
+func (s *serviceProxy) endpointFor(addr string) (e endpoint, ok bool, err error) {
+	s.mu.Lock()
+	l := s.listeners[addr]
+	s.mu.Unlock()
+	if l == nil {
+		return endpoint{}, false, nil
+	}
+	t := *l.target.Load()
+	eps := s.endpoints(t)
+	if len(eps) == 0 {
+		return endpoint{}, true, errNoEndpoints
+	}
+	return eps[int(s.rotate(t))%len(eps)], true, nil
+}
+
+// dialEndpoint connects to an endpoint: on this node directly, from src if
+// it is set, on other nodes through the apiserver.
+func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint, src *net.TCPAddr) (io.ReadWriteCloser, error) {
 	if e.remote {
 		if e.pod == nil {
 			return nil, fmt.Errorf("endpoint %s on node %s is not a pod, it cannot be reached from the tab", e.ip, e.node)
@@ -277,7 +307,11 @@ func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint) (io.ReadWri
 		// The kubernetes service: the apiserver listens on 127.0.0.1 only.
 		ip = "127.0.0.1"
 	}
-	return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(int(e.port))))
+	d := &net.Dialer{}
+	if src != nil {
+		d.LocalAddr = src
+	}
+	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(int(e.port))))
 }
 
 // endpoints lists the ready endpoints of a service port; if there are none,
