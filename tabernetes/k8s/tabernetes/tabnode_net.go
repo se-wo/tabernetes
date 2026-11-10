@@ -416,7 +416,7 @@ func pipeConns(a, b io.ReadWriteCloser) {
 // wasm cannot dial pod IPs of other nodes.
 func (s *serviceProxy) portForward(ctx context.Context, namespace, pod string, port int32) (io.ReadWriteCloser, error) {
 	s.restOnce.Do(func() {
-		s.rest, s.restErr = clientcmd.BuildConfigFromFlags("", p("admin.kubeconfig"))
+		s.rest, s.restErr = clientcmd.BuildConfigFromFlags("", kubeconfigPath("admin"))
 	})
 	if s.restErr != nil {
 		return nil, s.restErr
