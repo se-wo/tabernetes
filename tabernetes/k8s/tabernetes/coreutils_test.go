@@ -23,7 +23,7 @@ func sh(t *testing.T, script string) (string, int) {
 	handler := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		self = func(ctx context.Context, args []string) error {
 			if u := coreutils[args[0]]; u != nil {
-				return u(ctx, interp.HandlerCtx(ctx), args[1:], self)
+				return sigpipe(u(ctx, interp.HandlerCtx(ctx), args[1:], self))
 			}
 			return next(ctx, args)
 		}

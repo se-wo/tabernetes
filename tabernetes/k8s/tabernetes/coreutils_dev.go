@@ -277,12 +277,16 @@ func ddNum(v float64) string {
 	return strconv.FormatFloat(v, 'f', 0, 64)
 }
 
-// drain reads r to the end, so the writer of a pipe does not block forever.
-// The endless devices are left alone.
-func drain(r io.Reader) {
-	switch r.(type) {
-	case devZero, devRandom, devFull:
-		return
+// sigpipe turns a write to a pipe whose reader has ended into exit status
+// 141, what SIGPIPE does to a process: cat /dev/zero | head -c 4 ends
+// quietly instead of with an error of the shell.
+func sigpipe(err error) error {
+	if closedPipe(err) {
+		return interp.ExitStatus(141)
 	}
-	io.Copy(io.Discard, r)
+	return err
+}
+
+func closedPipe(err error) bool {
+	return err != nil && (errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), io.ErrClosedPipe.Error()))
 }

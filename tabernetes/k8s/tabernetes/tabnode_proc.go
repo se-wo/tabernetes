@@ -260,7 +260,7 @@ func podExec(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		case podTools[name] != nil:
 			return podTools[name](ctx, hc, args[1:], self)
 		case coreutils[name] != nil:
-			return coreutils[name](ctx, hc, args[1:], self)
+			return sigpipe(coreutils[name](ctx, hc, args[1:], self))
 		case interp.IsBuiltin(name):
 			err := hc.Builtin(ctx, append([]string{name}, args[1:]...))
 			if err != nil {

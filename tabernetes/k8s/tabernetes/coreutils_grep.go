@@ -309,8 +309,6 @@ func grepFile(hc interp.HandlerContext, re *regexp.Regexp, o map[string]string, 
 		}
 		left = after
 	}
-	// keep draining, so the writer of a pipe does not block forever
-	io.Copy(io.Discard, r)
 	return n
 }
 

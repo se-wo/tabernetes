@@ -192,8 +192,9 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
 		}
 		return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
+			// No draining: the shell closes the pipe when head ends, which
+			// stops the writer, like SIGPIPE (cat /dev/zero | head -c 4).
 			io.CopyN(hc.Stdout, r, c)
-			drain(r)
 			return nil
 		})
 	}
@@ -207,7 +208,6 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		for i := 0; i < n && sc.Scan(); i++ {
 			fmt.Fprintln(hc.Stdout, sc.Text())
 		}
-		drain(r)
 		return nil
 	})
 }

@@ -189,7 +189,7 @@ func (s *shell) exec(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			}
 			return nil
 		case coreutils[name] != nil:
-			return coreutils[name](ctx, hc, args[1:], self)
+			return sigpipe(coreutils[name](ctx, hc, args[1:], self))
 		case s.jsBuiltins.Type() == js.TypeObject && s.jsBuiltins.Get(name).Type() == js.TypeFunction:
 			return s.callJS(ctx, hc, name, args[1:])
 		}

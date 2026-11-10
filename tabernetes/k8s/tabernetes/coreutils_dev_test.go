@@ -12,6 +12,9 @@ func TestDevAndDd(t *testing.T) {
 	}{
 		{"head -c 1K /dev/zero | wc -c", "1024\n", 0},
 		{"head -c 3 /dev/urandom | wc -c", "3\n", 0},
+		{"cat /dev/zero | head -c 4 | wc -c", "4\n", 0},
+		{"seq 100000 | head -1", "1\n", 0},
+		{"seq 100000 | grep -m1 5", "5\n", 0},
 		{"head -c 2M /dev/zero > f; stat -c %s f", "2097152\n", 0},
 		{"head -c 1KB /dev/zero | wc -c", "1000\n", 0},
 		{"head -c 1x /dev/zero", "head: invalid number of bytes: '1x'\n", 2},

@@ -119,6 +119,9 @@ func awkCmd(ctx context.Context, hc shinterp.HandlerContext, args []string, _ sh
 		return fail(hc, 2, "awk: %v", err)
 	}
 	code, err := ip.ExecuteContext(ctx, cfg)
+	if closedPipe(err) {
+		return shinterp.ExitStatus(141)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return shinterp.ExitStatus(130)
