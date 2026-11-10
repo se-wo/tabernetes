@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -161,8 +162,14 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 	return nil
 }
 
+// HTTPS probes do not verify the certificate, like the kubelet's: pods serve
+// self-signed ones (metrics-server).
 var probeClient = &http.Client{
-	Transport:     &http.Transport{DialContext: (&net.Dialer{}).DialContext, DisableKeepAlives: true},
+	Transport: &http.Transport{
+		DialContext:       (&net.Dialer{}).DialContext,
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 

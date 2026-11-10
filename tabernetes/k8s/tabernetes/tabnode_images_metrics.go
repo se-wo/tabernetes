@@ -194,12 +194,21 @@ users:
 		return interp.ExitStatus(1)
 	}
 
-	ln, err := listenPod(ctx, fmt.Sprintf(":%d", o.securePort))
+	// Only the shutdown of the apiserver may close the listener: RunServer
+	// panics (and takes the tab with it) when the listener fails while the
+	// server is not stopping. listenPod would close it when ctx ends.
+	ln, err := listenPod(context.WithoutCancel(ctx), fmt.Sprintf(":%d", o.securePort))
 	if err != nil {
 		log.error("server.go:92", "\"Failed to run\" err=\"failed to create listener: failed to listen on 0.0.0.0:%d: %v\"", o.securePort, unwrap(err))
 		return interp.ExitStatus(1)
 	}
-	defer ln.Close()
+	// Once the apiserver runs, its shutdown closes the listener.
+	var run *msRun
+	defer func() {
+		if run == nil || !run.started {
+			ln.Close()
+		}
+	}()
 
 	certDir := pe.root.real(o.certDir)
 	if !filepath.IsAbs(o.certDir) {
@@ -222,7 +231,7 @@ users:
 	dial := func(c context.Context, network, addr string) (net.Conn, error) {
 		return dialCluster(withProc(c, pe), network, addr)
 	}
-	run := &msRun{
+	run = &msRun{
 		log: log, ln: ln, version: version, cert: cert, key: key, kubeconfig: kubeconfig, tokenFile: tokenFile, caFile: pe.root.real(saDir + "/ca.crt"),
 		dial: dial, opts: o, selector: selector,
 	}
@@ -246,6 +255,7 @@ type msRun struct {
 	dial       func(ctx context.Context, network, addr string) (net.Conn, error)
 	opts       *msOptions
 	selector   labels.Selector
+	started    bool // the apiserver serves on ln
 }
 
 func (r *msRun) run(ctx context.Context) error {
@@ -344,6 +354,7 @@ func (r *msRun) run(ctx context.Context) error {
 
 	go scraper.run(ctx, r.opts.resolution)
 	done := make(chan error, 1)
+	r.started = true
 	go func() { done <- srv.PrepareRun().RunWithContext(ctx) }()
 	select {
 	case err := <-done:
