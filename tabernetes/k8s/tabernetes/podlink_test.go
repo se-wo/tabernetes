@@ -35,7 +35,8 @@ func TestParsePodLinkHeader(t *testing.T) {
 	if err != nil || src.String() != "10.244.1.3:0" || dst.String() != "10.244.0.2:80" {
 		t.Errorf("got %v %v %v", src, dst, err)
 	}
-	for _, bad := range []string{"", "TABP/2 tcp 1.2.3.4:0 1.2.3.5:80", "TABP/1 udp 1.2.3.4:0 1.2.3.5:80", "TABP/1 tcp x 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0"} {
+	for _, bad := range []string{"", "TABP/2 tcp 1.2.3.4:0 1.2.3.5:80", "TABP/1 udp 1.2.3.4:0 1.2.3.5:80", "TABP/1 tcp x 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0",
+		"TABP/1 tcp localhost:0 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0 example.com:80", "TABP/1 tcp 1.2.3.4:0 1.2.3.5:0"} {
 		if _, _, err := parsePodLinkHeader(bad); err == nil {
 			t.Errorf("parsePodLinkHeader(%q) did not fail", bad)
 		}
@@ -70,5 +71,33 @@ func TestNodeOwns(t *testing.T) {
 		if got := p.nodeOwns(c.node, net.ParseIP(c.ip)); got != c.want {
 			t.Errorf("nodeOwns(%s, %s) = %v, want %v", c.node, c.ip, got, c.want)
 		}
+	}
+	// A pod channel serves the pod IPs of a node that takes them, not its
+	// node IP (hostNetwork pods) and not a node without the label.
+	idx.Add(&v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "docker-1", Labels: map[string]string{podLinkNodeLabel: "v1"}},
+		Spec:       v1.NodeSpec{PodCIDRs: []string{"10.244.2.0/24"}},
+		Status:     v1.NodeStatus{Addresses: []v1.NodeAddress{{Type: v1.NodeInternalIP, Address: "10.0.0.3"}}},
+	})
+	n := &tabNode{policy: p}
+	for _, c := range []struct {
+		node, ip string
+		want     bool
+	}{
+		{"docker-1", "10.244.2.4", true},
+		{"docker-1", "10.0.0.3", false},
+		{"docker-1", "10.244.1.7", false},
+		{"tab-worker-1", "10.244.1.7", false}, // no label
+		{"gone", "10.244.2.4", false},
+	} {
+		if got := n.podLinkTarget(c.node, c.ip); got != c.want {
+			t.Errorf("podLinkTarget(%s, %s) = %v, want %v", c.node, c.ip, got, c.want)
+		}
+	}
+	if got := p.nodeOf(net.ParseIP("10.244.1.9")); got != "tab-worker-1" {
+		t.Errorf("nodeOf(10.244.1.9) = %q, want tab-worker-1", got)
+	}
+	if got := p.nodeOf(net.ParseIP("10.244.9.9")); got != "" {
+		t.Errorf("nodeOf(10.244.9.9) = %q, want none", got)
 	}
 }
