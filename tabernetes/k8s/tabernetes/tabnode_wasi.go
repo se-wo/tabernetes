@@ -186,6 +186,8 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 	stdout, stderr := logs.writer("stdout"), logs.writer("stderr")
 	h.Call("onStdout", cb(func(a []js.Value) { stdout.Write(jsBytes(a[0])) }))
 	h.Call("onStderr", cb(func(a []js.Value) { stderr.Write(jsBytes(a[0])) }))
+	// The linear memory of the module counts for limits.memory.
+	h.Call("onMem", cb(func(a []js.Value) { go c.chargeMem(p, "wasm", int64(a[0].Int())) }))
 	h.Call("onExit", cb(func(a []js.Value) {
 		if len(a) > 1 && a[1].Type() == js.TypeString {
 			stderr.Write([]byte(a[1].String() + "\n"))

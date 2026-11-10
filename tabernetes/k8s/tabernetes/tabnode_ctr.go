@@ -250,6 +250,7 @@ func (c *ctr) runOnce() (code int, ok bool) {
 	c.proc = proc
 	c.runStart = time.Now()
 	c.w.mu.Unlock()
+	go c.watchTmpfs(runCtx, proc)
 
 	// Like the kubelet, the container counts as running only once its
 	// postStart hook returned. A hook that fails kills the run.
@@ -283,10 +284,7 @@ func (c *ctr) runOnce() (code int, ok bool) {
 		// with the tab only, but the container counts as stopped.
 	}
 	code = proc.exitCode()
-	reason := "Completed"
-	if code != 0 {
-		reason = "Error"
-	}
+	reason := terminatedReason(code, proc.oom.Load())
 	msg := proc.killReason()
 	c.w.mu.Lock()
 	c.proc = nil
@@ -338,6 +336,7 @@ type process struct {
 	reason   atomic.Value // why it was killed
 	killed   atomic.Bool
 	stopping atomic.Bool // a stop (preStop hook, kill) is under way
+	oom      atomic.Bool // killed for passing limits.memory (tabnode_oom.go)
 }
 
 func newProcess(cancel context.CancelFunc) *process {
@@ -383,7 +382,7 @@ func (c *ctr) startNative(ctx context.Context, logs *logBuf) (*process, error) {
 	_, ip := c.w.podInfo()
 	ctx, cancel := context.WithCancel(ctx)
 	p := newProcess(cancel)
-	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources)}
+	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources), proc: p}
 	var stdin io.Reader = strings.NewReader("")
 	if c.stdin != nil {
 		stdin = c.stdin.reader(ctx)
