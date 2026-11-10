@@ -141,6 +141,12 @@ func boot() (*cluster, error) {
 		"--service-account-signing-key-file=" + p("sa.key"),
 		"--token-auth-file=" + p("tokens.csv"),
 		"--authorization-mode=Node,RBAC",
+		// The Node authorizer lets every kubelet write Nodes, Leases,
+		// ResourceSlices and pod status; NodeRestriction limits each one to
+		// its own. NodeRestriction is not one of the apiserver's default
+		// plugins: without it, a joined node could change other nodes, for
+		// example drop their taints or publish devices on their behalf.
+		"--enable-admission-plugins=NodeRestriction",
 		"--enable-bootstrap-token-auth=true",
 		"--allow-privileged=true",
 		// Priority and fairness protects a shared apiserver from noisy

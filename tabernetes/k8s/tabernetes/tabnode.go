@@ -95,7 +95,9 @@ type nodeCreds struct {
 
 // issueNodeCreds issues the credentials of the node name with IP ip. The
 // kubelet authenticates as system:node:<name>, so the Node authorizer and
-// NodeRestriction treat it like any other kubelet.
+// NodeRestriction (--enable-admission-plugins in main.go) treat it like any
+// other kubelet: it may only write its own Node, Lease and ResourceSlices,
+// the status of its own pods, and tokens bound to them.
 func (c *cluster) issueNodeCreds(name, ip string) (nodeCreds, error) {
 	c.ca.issue("node-"+name, "system:node:"+name, []string{"system:nodes"}, false, nil, nil)
 	c.ca.issue("node-"+name+"-serving", name, nil, true, []string{name}, []net.IP{net.ParseIP(ip)})
