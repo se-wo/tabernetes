@@ -49,9 +49,9 @@ const (
 	vmDefaultBytes = 256 << 20
 )
 
-// parseSize parses a number with an optional suffix of units (the letters of
+// parseStressSize parses a number with an optional suffix of units (the letters of
 // units, any case, 1024-based: "b" is 1, "k" is 1<<10, ...).
-func parseSize(s, units string) (int64, error) {
+func parseStressSize(s, units string) (int64, error) {
 	n := s
 	mult := int64(1)
 	if s != "" {
@@ -154,13 +154,13 @@ func parseStress(args []string) (*stressArgs, error) {
 		case "hdd":
 			count(&a.hdd)
 		case "vm-bytes":
-			a.vmBytes, err = parseSize(val, "bkmg")
+			a.vmBytes, err = parseStressSize(val, "bkmg")
 		case "vm-hang":
 			var d time.Duration
 			d, err = parseSeconds(val)
 			a.vmHang = d
 		case "vm-stride", "hdd-bytes":
-			_, err = parseSize(val, "bkmg")
+			_, err = parseStressSize(val, "bkmg")
 		}
 		if err != nil {
 			return fmt.Errorf("invalid argument for --%s: %q", name, val)
@@ -471,7 +471,7 @@ func stressNgProg(ctx context.Context, hc interp.HandlerContext, args []string, 
 				}
 			} else {
 				vmPercent = 0
-				h.vmBytes, err = parseSize(val, "bkmgt")
+				h.vmBytes, err = parseStressSize(val, "bkmgt")
 			}
 		}
 		if err != nil {
