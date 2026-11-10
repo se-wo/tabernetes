@@ -280,10 +280,15 @@ func main() {
 		status = func(s string) { cb.Invoke(s) }
 	}
 
-	// attachChannel(dc) for channels the other side opens: a Docker node
-	// agent (RTCDataChannel) or a node in a Web Worker (web/src/channel.js).
+	// attachChannel(dc, node?) for channels the other side opens: a Docker
+	// node agent (RTCDataChannel) or a node in a Web Worker
+	// (web/src/channel.js). The page names the node they come from.
 	api.Set("attachChannel", js.FuncOf(func(this js.Value, a []js.Value) any {
-		attachChannel(a[0])
+		from := ""
+		if len(a) > 1 && a[1].Type() == js.TypeString {
+			from = a[1].String()
+		}
+		attachChannel(a[0], from)
 		return nil
 	}))
 	// In a Web Worker this instance is a node, not a cluster (nodeworker.go).

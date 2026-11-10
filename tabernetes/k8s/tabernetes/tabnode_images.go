@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1086,7 +1087,7 @@ func echoserverProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 // subcommands.
 func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error {
 	if len(args) == 0 {
-		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  entrypoint-tester\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
+		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  connect\n  entrypoint-tester\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
 		return nil
 	}
 	sub, rest := args[0], args[1:]
@@ -1196,8 +1197,48 @@ func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, e
 		return nil
 	case "netexec":
 		return agnhostNetexec(ctx, hc, fs, rest, exec)
+	case "connect":
+		return agnhostConnect(ctx, hc, fs, rest)
 	}
 	fmt.Fprintf(hc.Stderr, "Error: unknown command %q for \"agnhost\"\nRun 'agnhost --help' for usage.\n", sub)
+	return interp.ExitStatus(1)
+}
+
+// agnhostConnect is "agnhost connect <host:port>", the probe of the
+// NetworkPolicy e2e tests: exit 0 if the connection opens, else TIMEOUT,
+// REFUSED or OTHER on stderr and exit 1.
+func agnhostConnect(ctx context.Context, hc interp.HandlerContext, fs *pflag.FlagSet, args []string) error {
+	timeout := fs.Duration("timeout", 0, "Maximum time before returning an error")
+	protocol := fs.String("protocol", "tcp", "The protocol to use to perform the connection, can be tcp, udp or sctp")
+	if err := fs.Parse(args); err != nil {
+		return interp.ExitStatus(2)
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(hc.Stderr, "Usage: agnhost connect <host:port> [--timeout=<duration>] [--protocol=<tcp|udp|sctp>]")
+		return interp.ExitStatus(1)
+	}
+	if *protocol != "tcp" {
+		fmt.Fprintf(hc.Stderr, "OTHER: protocol %s is not supported on the tab node\n", *protocol)
+		return interp.ExitStatus(1)
+	}
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
+	conn, err := dialCluster(ctx, "tcp", fs.Arg(0))
+	if err == nil {
+		conn.Close()
+		return nil
+	}
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
+		fmt.Fprintln(hc.Stderr, "TIMEOUT")
+	case refused(err):
+		fmt.Fprintln(hc.Stderr, "REFUSED")
+	default:
+		fmt.Fprintf(hc.Stderr, "OTHER: %v\n", err)
+	}
 	return interp.ExitStatus(1)
 }
 

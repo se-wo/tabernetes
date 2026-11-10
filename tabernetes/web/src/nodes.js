@@ -34,7 +34,8 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
     const set = (state) => { entry.state = state; render(); };
     worker.onmessage = (e) => {
       const m = e.data;
-      if (m.type === "channel") globalThis.tabernetes.attachChannel(portChannel(m.port, m.label));
+      // The page names the node a channel comes from (pod channels trust it).
+      if (m.type === "channel") globalThis.tabernetes.attachChannel(portChannel(m.port, m.label), config.name);
       else if (m.type === "ready") set("running");
       else if (m.type === "crash") console.error(`${config.name}:`, m.text);
       else if (m.type === "error" || m.type === "exit") {
