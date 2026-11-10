@@ -422,16 +422,6 @@ func lookupImage(ref string) *builtinImage {
 	return &img
 }
 
-// builtinImageNames lists the short names of the built-in images, for messages.
-func builtinImageNames() []string {
-	var names []string
-	for _, d := range imageDefs {
-		names = append(names, d.img.name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 func imageDigest(canonical, tag string) string {
 	sum := sha256.Sum256([]byte("tabernetes builtin image " + canonical + ":" + tag))
 	return "sha256:" + hex.EncodeToString(sum[:])
