@@ -776,7 +776,18 @@ func xargs(ctx context.Context, hc interp.HandlerContext, args []string, exec in
 // names and cluster IPs of services, pod and node IPs (tabnode_dial.go).
 func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	flags, urls := splitWgetArgs(args)
-	o, _, err := opts("wget", flags, "qvsO:T:", map[string]string{
+	var headers, rest []string
+	for i := 0; i < len(flags); i++ {
+		if h, ok := strings.CutPrefix(flags[i], "--header="); ok {
+			headers = append(headers, h)
+		} else if flags[i] == "--header" && i+1 < len(flags) {
+			i++
+			headers = append(headers, flags[i])
+		} else {
+			rest = append(rest, flags[i])
+		}
+	}
+	o, _, err := opts("wget", rest, "qvsO:T:", map[string]string{
 		"quiet": "q", "verbose": "v", "output-document": "O", "timeout": "T", "spider": "s",
 	})
 	if err != nil {
@@ -812,7 +823,7 @@ func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		if has(o, "s") {
 			name = ""
 		}
-		if err := download(ctx, hc, u.String(), name, has(o, "q")); err != nil {
+		if err := download(ctx, hc, u.String(), name, has(o, "q"), headers...); err != nil {
 			return err
 		}
 	}
@@ -827,7 +838,7 @@ func splitWgetArgs(args []string) (flags, urls []string) {
 		switch {
 		case a == "--":
 			return flags, append(urls, args[i+1:]...)
-		case a == "-O" || a == "--output-document" || a == "-T" || a == "--timeout":
+		case a == "-O" || a == "--output-document" || a == "-T" || a == "--timeout" || a == "--header":
 			flags = append(flags, a)
 			if i+1 < len(args) {
 				i++
@@ -906,29 +917,63 @@ func dialLocal(ctx context.Context, network, addr string) (net.Conn, error) {
 // network for the cluster, to fetch() for the rest. A redirect may cross
 // from one to the other.
 type cmdTransport struct {
-	tlsConfig *tls.Config // for the cluster only, fetch() has its own
+	tlsConfig *tls.Config       // for the cluster only, fetch() has its own
+	resolve   map[string]string // curl --resolve: host:port -> address
+}
+
+// resolved is the address of curl --resolve for the host and port of u.
+func (t cmdTransport) resolved(u *url.URL) (string, bool) {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	a, ok := t.resolve[strings.ToLower(u.Hostname())+":"+port]
+	return a, ok
 }
 
 func (t cmdTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	c := httpClientFor(req.Context(), req.URL.Hostname())
+	addr, resolved := t.resolved(req.URL)
+	host := req.URL.Hostname()
+	if resolved {
+		host = addr
+	}
+	c := httpClientFor(req.Context(), host)
 	rt := c.Transport
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
-	if c != http.DefaultClient && t.tlsConfig != nil {
+	if c != http.DefaultClient && (t.tlsConfig != nil || resolved) {
 		if tr, ok := rt.(*http.Transport); ok {
 			tr = tr.Clone()
-			tr.TLSClientConfig = t.tlsConfig
+			if t.tlsConfig != nil {
+				tr.TLSClientConfig = t.tlsConfig
+			}
+			if resolved {
+				// The URL keeps the name, for Host and SNI.
+				dial := tr.DialContext
+				tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+					_, port, _ := net.SplitHostPort(a)
+					return dial(ctx, network, net.JoinHostPort(addr, port))
+				}
+			}
 			rt = tr
 		}
 	}
 	return rt.RoundTrip(req)
 }
 
-func download(ctx context.Context, hc interp.HandlerContext, u, name string, quiet bool) error {
+func download(ctx context.Context, hc interp.HandlerContext, u, name string, quiet bool, headers ...string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fail(hc, 1, "wget: %v", err)
+	}
+	for _, h := range headers {
+		k, v, _ := strings.Cut(h, ":")
+		if k, v = strings.TrimSpace(k), strings.TrimSpace(v); strings.EqualFold(k, "Host") {
+			req.Host = v
+		} else {
+			req.Header.Add(k, v)
+		}
 	}
 	if noSuchHost(ctx, req.URL.Hostname()) {
 		return fail(hc, 4, "wget: bad address '%s'", req.URL.Host)
@@ -1007,6 +1052,7 @@ type curlArgs struct {
 	silent, showErr, fail, include, head, location, verbose, insecure, get bool
 	outputs                                                                []string // -o file, or "" for -O, in the order of the urls
 	method, writeOut, user, cacert                                         string
+	resolve                                                                []string // --resolve host:port:addr
 	data                                                                   []string
 	dataSet                                                                bool
 	headers                                                                []string
@@ -1020,13 +1066,13 @@ var curlLong = map[string]string{
 	"verbose": "v", "insecure": "k", "output": "o", "remote-name": "O", "request": "X", "data": "d",
 	"data-ascii": "d", "data-raw": "d+", "data-binary": "d+", "header": "H", "max-time": "m",
 	"write-out": "w", "user": "u", "user-agent": "A", "get": "G", "url": "url", "cacert": "cacert",
-	"connect-timeout": "connect-timeout", "compressed": "", "no-progress-meter": "", "progress-bar": "", "http1.1": "",
+	"connect-timeout": "connect-timeout", "resolve": "resolve", "compressed": "", "no-progress-meter": "", "progress-bar": "", "http1.1": "",
 }
 
 // curlValue lists the options that take a value.
 var curlValue = map[string]bool{
 	"o": true, "X": true, "d": true, "d+": true, "H": true, "m": true, "w": true, "u": true, "A": true,
-	"url": true, "cacert": true, "connect-timeout": true, "e": true,
+	"url": true, "cacert": true, "connect-timeout": true, "e": true, "resolve": true,
 }
 
 func parseCurl(ctx context.Context, hc interp.HandlerContext, args []string) (*curlArgs, error) {
@@ -1096,6 +1142,8 @@ func parseCurl(ctx context.Context, hc interp.HandlerContext, args []string) (*c
 			c.urls = append(c.urls, v)
 		case "cacert":
 			c.cacert = v
+		case "resolve":
+			c.resolve = append(c.resolve, v)
 		}
 		return nil
 	}
@@ -1165,7 +1213,18 @@ func curl(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		fmt.Fprintln(hc.Stderr, "curl: no URL specified\ncurl: try 'curl --help' for more information")
 		return interp.ExitStatus(2)
 	}
-	tr := cmdTransport{}
+	tr := cmdTransport{resolve: map[string]string{}}
+	for _, r := range c.resolve {
+		hp := strings.SplitN(r, ":", 3)
+		if len(hp) != 3 {
+			fmt.Fprintf(hc.Stderr, "curl: (49) Couldn't parse CURLOPT_RESOLVE entry '%s'\n", r)
+			return interp.ExitStatus(49)
+		}
+		tr.resolve[strings.ToLower(hp[0])+":"+hp[1]] = strings.Trim(strings.Split(hp[2], ",")[0], "[]")
+		if c.verbose {
+			fmt.Fprintf(hc.Stderr, "* Added %s to DNS cache\n", r)
+		}
+	}
 	if c.insecure || c.cacert != "" {
 		tr.tlsConfig = &tls.Config{InsecureSkipVerify: c.insecure}
 		if c.cacert != "" {
@@ -1262,6 +1321,9 @@ func (c *curlArgs) do(ctx context.Context, hc interp.HandlerContext, tr cmdTrans
 		req.SetBasicAuth(user, pass)
 	}
 	host := req.URL.Hostname()
+	if a, ok := tr.resolved(req.URL); ok {
+		host = a
+	}
 	if noSuchHost(ctx, host) {
 		return c.errorf(hc, 6, "Could not resolve host: %s", host)
 	}
@@ -1287,7 +1349,7 @@ func (c *curlArgs) do(ctx context.Context, hc interp.HandlerContext, tr cmdTrans
 		} else {
 			fmt.Fprintf(hc.Stderr, "* Using fetch() of the browser for %s\n", host)
 		}
-		fmt.Fprintf(hc.Stderr, "> %s %s HTTP/1.1\n> Host: %s\n", method, req.URL.RequestURI(), req.URL.Host)
+		fmt.Fprintf(hc.Stderr, "> %s %s HTTP/1.1\n> Host: %s\n", method, req.URL.RequestURI(), req.Host)
 		for _, k := range slices.Sorted(maps.Keys(req.Header)) {
 			for _, v := range req.Header[k] {
 				fmt.Fprintf(hc.Stderr, "> %s: %s\n", k, v)

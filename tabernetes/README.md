@@ -118,7 +118,8 @@ A container is not a process:
   kubectl (with the service account of the pod, through 10.96.0.1) and the
   programs of the built-in images (`tabnode_images*.go`): nginx (it reads
   nginx.conf and conf.d), httpd, pause, whoami, http-echo, echo-server,
-  agnhost, podinfo, hello-app, redis with redis-cli, the `busybox`/`alpine`/`ubuntu`
+  agnhost, podinfo, hello-app, redis with redis-cli, the ingress-nginx
+  controller, the `busybox`/`alpine`/`ubuntu`
   family, `curlimages/curl`, `bitnami/kubectl`. Any other image runs its command
   in the shell; an unknown image without a command waits as
   `UnsupportedImage`. Each container sees its own root directory with the
@@ -392,6 +393,37 @@ k exec client -- /agnhost connect web:80 --timeout=2s   # TIMEOUT
 Not covered: UDP (the tab nodes have none), rules on domain names (egress
 to the internet goes through `fetch()`, without an IP), and an exact
 `except` of `ipBlock` for internet egress.
+
+## Ingress
+
+The addons install ingress-nginx (`k8s/tabernetes/addons/ingress-nginx.yaml`):
+the upstream bare-metal manifest without the admission webhook. It has the
+namespace `ingress-nginx`, the IngressClass `nginx`, and the NodePort service
+`ingress-nginx-controller` on 30080 (http) and 30443 (https). Unlike the
+upstream manifest, the class is the default class, so an Ingress without
+`ingressClassName` works, and the node ports are fixed. On the tab node the controller is a built-in image
+(`tabnode_images_ingress.go`). It watches Ingresses with the service account
+of its pod, renders `/etc/nginx/nginx.conf` like ingress-nginx and reloads
+the built-in nginx. On a Docker node the same manifest runs the real image.
+
+What works: hosts and wildcard hosts, the path types `Exact`, `Prefix` and
+`ImplementationSpecific`, `defaultBackend`, TLS with a Secret of type
+`kubernetes.io/tls` (SNI, redirect to https), the status address, events, and
+the annotations `rewrite-target`, `use-regex`, `ssl-redirect`,
+`force-ssl-redirect`, `backend-protocol` and `service-upstream`. A service
+without ready endpoints answers 503, an unknown host 404.
+
+```bash
+k create deploy web --image=nginxdemos/hello:plain-text --replicas=2; k expose deploy web --port 80
+k create ingress web --rule="demo.local/*=web:80"
+k get ingress                                # ADDRESS 10.0.0.1
+curl -H 'Host: demo.local' 10.0.0.1:30080    # also from pods
+k -n ingress-nginx logs deploy/ingress-nginx-controller   # access log
+```
+
+Not covered: the admission webhook, most other annotations and the ConfigMap
+options, and TCP/UDP services. Gateway API is not provided, although
+ingress-nginx is retired upstream: the CKAD material still uses it.
 
 ## Patches
 
