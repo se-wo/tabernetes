@@ -121,6 +121,27 @@ func main() {
 		"\t\"os/signal\"\n\t\"sync\"\n",
 	)
 
+	// All components share one klog. The text logger writes to a stream that
+	// tabernetes sets before they start (tabernetes/complogs.go): it sorts
+	// the lines by component for kubectl logs of the control plane pods.
+	// The options cannot come from outside, ReapplyHandlingIgnoreUnchanged
+	// compares them.
+	edit("staging/src/k8s.io/component-base/logs/api/v1/options.go",
+		"\t\t\t\tErrorStream: os.Stderr,\n",
+		"\t\t\t\tErrorStream: DefaultErrorStream, // tabernetes\n",
+	)
+	write("staging/src/k8s.io/component-base/logs/api/v1/tabernetes.go", `package v1
+
+import (
+	"io"
+	"os"
+)
+
+// DefaultErrorStream is where the logger writes when no LoggingOptions are
+// given. Added by tabernetes (k8s/patch.go).
+var DefaultErrorStream io.Writer = os.Stderr
+`)
+
 	// js has no fsnotify. The certificate and CA file watchers retry every
 	// minute and log an error each time. The periodic check before the watch
 	// still reloads the files, so skip the watch quietly.

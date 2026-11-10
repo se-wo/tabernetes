@@ -420,7 +420,7 @@ func redisExec(db *redisDB, argv []string, version, port string) any {
 		db.keys = map[string]*redisVal{}
 		return "OK"
 	case "INFO":
-		return bulk(fmt.Sprintf("# Server\r\nredis_version:%s\r\nredis_mode:standalone\r\nos:Linux 6.0.0-tabernetes wasm\r\narch_bits:64\r\nprocess_id:1\r\ntcp_port:%s\r\n\r\n# Clients\r\nconnected_clients:1\r\n\r\n# Keyspace\r\ndb0:keys=%d,expires=0,avg_ttl=0\r\n", version, port, len(db.keys)))
+		return bulk(fmt.Sprintf("# Server\r\nredis_version:%s\r\nredis_mode:standalone\r\nos:Linux %s wasm\r\narch_bits:64\r\nprocess_id:1\r\ntcp_port:%s\r\n\r\n# Clients\r\nconnected_clients:1\r\n\r\n# Keyspace\r\ndb0:keys=%d,expires=0,avg_ttl=0\r\n", version, kernelVersion, port, len(db.keys)))
 	case "GET":
 		v, e := str(key)
 		if e != "" {

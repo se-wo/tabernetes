@@ -26,6 +26,10 @@ type pki struct {
 
 func p(name string) string { return filepath.Join(dataDir, name) }
 
+// kubeconfigPath is where the kubeconfig of name lives, like kubeadm's
+// /etc/kubernetes/admin.conf.
+func kubeconfigPath(name string) string { return filepath.Join(filepath.Dir(dataDir), name+".conf") }
+
 func newKey() *ecdsa.PrivateKey {
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	must(err)
@@ -124,7 +128,7 @@ users:
   user:
     token: %s
 `, p("ca.crt"), name, name, token)
-	must(os.WriteFile(p(name+".kubeconfig"), []byte(cfg), 0o600))
+	must(os.WriteFile(kubeconfigPath(name), []byte(cfg), 0o600))
 }
 
 func pemBlock(typ string, der []byte) []byte {
