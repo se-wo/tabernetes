@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/kube-network-policies/pkg/api"
 	"sigs.k8s.io/kube-network-policies/pkg/network"
 	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
@@ -31,6 +32,7 @@ import (
 type netPolicy struct {
 	engine   *networkpolicy.PolicyEngine
 	provider api.PodInfoProvider
+	nodes    corelisters.NodeLister
 
 	mu       sync.Mutex
 	admitted map[admitKey]*admission
@@ -82,6 +84,7 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName str
 	p := &netPolicy{
 		engine:   networkpolicy.NewPolicyEngine(provider, []api.PolicyEvaluator{standard}),
 		provider: provider,
+		nodes:    nodes.Lister(),
 		admitted: map[admitKey]*admission{},
 	}
 	factory.Start(ctx.Done())
@@ -193,6 +196,7 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 			// A pod IP of another node: through the apiserver.
 			if pod := n.policy.podByIP(ep.ip); pod != nil {
 				ep.remote = true
+				ep.node = pod.GetNode().GetName()
 				ep.pod = &v1.ObjectReference{Kind: "Pod", Namespace: pod.GetNamespace().GetName(), Name: pod.GetName()}
 			}
 		}

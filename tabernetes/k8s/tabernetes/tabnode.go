@@ -200,6 +200,7 @@ func (n *tabNode) nodeLabels() map[string]string {
 		"node.kubernetes.io/instance-type": "browser-tab",
 		tabTaintKey:                        "true",
 		"tabernetes.io/wasm":               "true", // WebAssembly pods (runtimeclass.yaml)
+		podLinkNodeLabel:                   "v1",   // pods of other nodes reach it (podlink.go)
 	}
 }
 

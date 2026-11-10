@@ -120,10 +120,16 @@ func splice(a, b io.ReadWriteCloser) {
 // attachChannel is called from JS for every data channel the other side
 // opens. Label "api" tunnels to the kube-apiserver (from a Docker node or a
 // node in a Web Worker), "kubelet:10250" to the kubelet API of this
-// instance's node (in a Web Worker, from the apiserver of the page).
-func attachChannel(dc js.Value) {
+// instance's node (in a Web Worker, from the apiserver of the page), "pod..."
+// is a connection to a pod (podlink.go). from is the node the channel comes
+// from, as the page knows it ("" in a Web Worker).
+func attachChannel(dc js.Value, from string) {
 	label := dc.Get("label").String()
 	conn := newDCConn(dc)
+	if _, _, ok := podLinkNode(label); ok {
+		go attachPodLink(conn, label, from)
+		return
+	}
 	go func() {
 		var target string
 		switch label {
