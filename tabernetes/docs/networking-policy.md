@@ -516,7 +516,7 @@ Each phase is one small PR.
 | 1 engine in the binary | #10 | build |
 | 2 tab node hooks, `agnhost connect` | #12 | unit tests, browser |
 | 3 pod channel between tab nodes | #13 | unit tests, browser with `addnode 2` |
-| 4 Docker nodes | #14 | agent tests in a user and network namespace; no Docker node |
+| 4 Docker nodes | #14 | agent tests in a network namespace (TPROXY, DNAT, transparent dials); no Docker node |
 | 5 ClusterNetworkPolicy | #15 | unit tests, browser |
 | 6 strict mode | #16 | unit tests, browser regression |
 
@@ -536,6 +536,14 @@ Where the code differs from the design above:
   takes the owner of a socket from there, and `meta skuid` sees it.
 - The TPROXY rule of the agent needs no set of tab pod CIDRs: it catches
   TCP to 10.244.0.0/16 whose route is not cni0, flannel.1 or lo (`fib`).
+- Its chain has the priority `dstnat + 10`, not `mangle`: `mangle` runs
+  before the DNAT of kube-proxy, so a cluster IP whose endpoint is a tab pod
+  would pass the rule as a cluster IP and never reach the agent.
+- A second rule (`socket transparent 1`) delivers the answers to transparent
+  dials whose source is outside the pod network: host traffic of a tab node
+  in a Web Worker, which comes from its node IP.
+- An endpoint that is not in the pod CIDR of its node (a hostNetwork pod)
+  keeps the port-forward of the apiserver: no pod channel serves a node IP.
 - A Docker pod whose connection a tab node denies sees it open, then end:
   TPROXY answers the SYN before the tab node decides.
 - Strict mode closes a connection that a policy change denies. On a real

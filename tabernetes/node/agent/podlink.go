@@ -28,6 +28,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
@@ -62,15 +63,32 @@ const (
 // the pod network that flannel does not route (no cni0, no flannel.1), and
 // the answers to the agent's transparent dials. The established socket wins
 // over the listener in TPROXY's lookup.
-var podLinkRules = fmt.Sprintf(`table inet tabernetes_podlink
+//
+// The chain runs after the DNAT of kube-proxy (dstnat + 10), so a cluster IP
+// whose endpoint is a tab pod is caught as well: mangle would still see the
+// cluster IP.
+//
+// With socketRule, the first rule also delivers the answers to transparent
+// dials from an address outside the pod network: the node IP of a tab node
+// in a Web Worker (host traffic of that node). It needs nft_socket in the
+// kernel.
+const podLinkRulesFormat = `table inet tabernetes_podlink
 delete table inet tabernetes_podlink
 table inet tabernetes_podlink {
 	chain prerouting {
-		type filter hook prerouting priority mangle; policy accept;
-		meta l4proto tcp ip daddr %s fib daddr oifname != { "cni0", "flannel.1", "lo" } tproxy ip to :%d meta mark set %#x accept
+		type filter hook prerouting priority dstnat + 10; policy accept;
+%[4]s		meta l4proto tcp ip daddr %[1]s fib daddr oifname != { "cni0", "flannel.1", "lo" } tproxy ip to :%[2]d meta mark set %#[3]x accept
 	}
 }
-`, podNetwork, tproxyPort, tproxyMark)
+`
+
+func podLinkRules(socketRule bool) string {
+	rule := ""
+	if socketRule {
+		rule = fmt.Sprintf("\t\tmeta l4proto tcp socket transparent 1 meta mark set %#x accept\n", tproxyMark)
+	}
+	return fmt.Sprintf(podLinkRulesFormat, podNetwork, tproxyPort, tproxyMark, rule)
+}
 
 // setupPodLinkNet installs the TPROXY rule, its routing and the bridge
 // sysctl that lets nftables see the packets between pods of this node.
@@ -79,10 +97,12 @@ func setupPodLinkNet() error {
 	if err := os.WriteFile(bridge, []byte("1"), 0o644); err != nil {
 		log.Printf("NetworkPolicy between pods of this node needs br_netfilter in the host kernel: %v", err)
 	}
-	nft := exec.Command("nft", "-f", "-")
-	nft.Stdin = strings.NewReader(podLinkRules)
-	if out, err := nft.CombinedOutput(); err != nil {
-		return fmt.Errorf("nft: %v: %s", err, out)
+	if err := nft(podLinkRules(true)); err != nil {
+		// Without nft_socket: everything but host traffic of worker tab nodes.
+		log.Printf("pod channel: no socket match (%v), the host of a tab node in a Web Worker cannot reach pods of this node", err)
+		if err := nft(podLinkRules(false)); err != nil {
+			return err
+		}
 	}
 	rule := netlink.NewRule()
 	rule.Mark = tproxyMark
@@ -98,6 +118,16 @@ func setupPodLinkNet() error {
 	route := &netlink.Route{LinkIndex: lo.Attrs().Index, Dst: all, Table: tproxyTable, Type: syscall.RTN_LOCAL, Scope: netlink.SCOPE_HOST}
 	if err := netlink.RouteReplace(route); err != nil {
 		return fmt.Errorf("ip route: %w", err)
+	}
+	return nil
+}
+
+// nft loads a ruleset.
+func nft(rules string) error {
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
 }
@@ -205,7 +235,7 @@ func servePodLink(raw io.ReadWriteCloser) {
 	defer cancel()
 	c, err := dialTransparent(ctx, src.IP, dst)
 	switch {
-	case errors.Is(err, os.ErrDeadlineExceeded):
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, syscall.ETIMEDOUT):
 		// Dropped (by NetworkPolicy): no answer, the tab side times out.
 		raw.Close()
 		return
@@ -250,9 +280,7 @@ func dialTransparent(ctx context.Context, src net.IP, dst *net.TCPAddr) (net.Con
 	}
 	to := &syscall.SockaddrInet4{Port: dst.Port}
 	copy(to.Addr[:], dst4)
-	err = syscall.Connect(fd, to)
-	pending := errors.Is(err, syscall.EINPROGRESS)
-	if err != nil && !pending {
+	if err := syscall.Connect(fd, to); err != nil && !errors.Is(err, syscall.EINPROGRESS) {
 		return fail(err)
 	}
 	f := os.NewFile(uintptr(fd), "podlink")
@@ -266,14 +294,16 @@ func dialTransparent(ctx context.Context, src net.IP, dst *net.TCPAddr) (net.Con
 	if err != nil {
 		return nil, err
 	}
+	// Ask the socket every time, also before the first wait: the answer can
+	// arrive before the poller watches the socket, and then no event follows.
 	var soerr int
 	if err := rc.Write(func(fd uintptr) bool {
-		if pending {
-			pending = false
-			return false // wait until the socket is writable
-		}
 		soerr, _ = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_ERROR)
-		return true
+		if soerr != 0 {
+			return true
+		}
+		_, err := syscall.Getpeername(int(fd))
+		return err == nil // else still connecting: wait until the socket is writable
 	}); err != nil {
 		return nil, err
 	}
@@ -354,17 +384,20 @@ func readPodLinkLine(r io.Reader, max int) (string, error) {
 	return string(b), errors.New("line too long")
 }
 
-// parsePodLinkHeader parses "TABP/1 tcp <src> <dst>".
+// parsePodLinkHeader parses "TABP/1 tcp <src> <dst>". The addresses are IP
+// literals: a name is refused, not resolved.
 func parsePodLinkHeader(line string) (src, dst *net.TCPAddr, err error) {
 	f := strings.Fields(line)
 	if len(f) != 4 || f[0] != podLinkVersion || f[1] != "tcp" {
 		return nil, nil, fmt.Errorf("bad header %q", line)
 	}
-	if src, err = net.ResolveTCPAddr("tcp", f[2]); err != nil || src.IP == nil {
+	s, err := netip.ParseAddrPort(f[2])
+	if err != nil {
 		return nil, nil, fmt.Errorf("bad source in %q", line)
 	}
-	if dst, err = net.ResolveTCPAddr("tcp", f[3]); err != nil || dst.IP == nil {
+	d, err := netip.ParseAddrPort(f[3])
+	if err != nil || d.Port() == 0 {
 		return nil, nil, fmt.Errorf("bad destination in %q", line)
 	}
-	return src, dst, nil
+	return net.TCPAddrFromAddrPort(s), net.TCPAddrFromAddrPort(d), nil
 }

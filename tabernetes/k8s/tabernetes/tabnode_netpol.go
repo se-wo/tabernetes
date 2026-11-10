@@ -230,9 +230,16 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 	if !n.policy.allowed(ctx, src, dst) {
 		return nil, dropped(ctx, dst)
 	}
-	n.policy.admit(src.IP, dst)
+	if !ep.remote {
+		// The listener of a pod on this node does not decide again.
+		n.policy.admit(src.IP, dst)
+	}
 	c, err := n.net.dialEndpoint(ctx, ep, src)
 	if err != nil {
+		if !ep.remote {
+			// No connection reached the listener: nothing took the admission.
+			n.policy.consume(src.IP, dst)
+		}
 		return nil, err
 	}
 	conn, ok := c.(net.Conn)
