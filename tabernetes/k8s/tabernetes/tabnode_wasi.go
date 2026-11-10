@@ -38,7 +38,6 @@ import (
 	"strings"
 	"sync"
 	"syscall/js"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 )
@@ -231,38 +230,19 @@ func (c *ctr) runtimeClass() string {
 // pullWasm resolves the image and loads its module. Pull errors are
 // retried with a back-off like the kubelet does (ErrImagePull,
 // ImagePullBackOff), so the error is a non-pull error or the end of ctx.
-func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (*wasmImage, js.Value, error) {
-	delay := 10 * time.Second
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			c.w.ctrEvent(c, v1.EventTypeNormal, "Pulling", "Pulling image %q", c.spec.Image)
-		}
-		img, mod, err := c.pullWasmOnce(ctx, rt)
-		if err == nil || ctx.Err() != nil {
-			return img, mod, err
-		}
+func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (img *wasmImage, mod js.Value, err error) {
+	err = c.pullWithBackOff(ctx, func() error {
+		var err error
+		img, mod, err = c.pullWasmOnce(ctx, rt)
+		return err
+	}, func(err error) bool {
 		var unsupported unsupportedError
-		if errors.As(err, &unsupported) {
-			return nil, js.Undefined(), err
-		}
-		msg := err.Error()
-		c.setWaiting("ErrImagePull", msg)
-		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Failed to pull image %q: %s", c.spec.Image, msg)
-		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: ErrImagePull")
-		select {
-		case <-ctx.Done():
-			return nil, js.Undefined(), ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-		c.setWaiting("ImagePullBackOff", fmt.Sprintf("Back-off pulling image %q: ErrImagePull: %s", c.spec.Image, msg))
-		c.w.ctrEvent(c, v1.EventTypeNormal, "BackOff", "Back-off pulling image %q", c.spec.Image)
-		select {
-		case <-ctx.Done():
-			return nil, js.Undefined(), ctx.Err()
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, 5*time.Minute)
+		return !errors.As(err, &unsupported)
+	})
+	if err != nil {
+		return nil, js.Undefined(), err
 	}
+	return img, mod, nil
 }
 
 type unsupportedError struct{ msg string }

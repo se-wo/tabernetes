@@ -120,8 +120,13 @@ A container is not a process:
   nginx.conf and conf.d), httpd, pause, whoami, http-echo, echo-server,
   agnhost, podinfo, hello-app, redis with redis-cli, the `busybox`/`alpine`/`ubuntu`
   family, `curlimages/curl`, `bitnami/kubectl`. Any other image runs its command
-  in the shell; an unknown image without a command waits as
-  `UnsupportedImage`. Each container sees its own root directory with the
+  in the shell. A wrong image fails like on a real node: an unknown Docker Hub
+  name such as `ngnix` or a tag such as `nginx:doesnotexist` waits in
+  `ErrImagePull` and `ImagePullBackOff` (`tabnode_pull.go`). The tab cannot
+  ask a registry, so it knows the official images of Docker Hub and the tags
+  of the built-in images; other images pull, unless their name is a typo of a
+  built-in one (`curlimages/crul`). Such an image without a command fails with
+  `CreateContainerError`. Each container sees its own root directory with the
   files of its image and its volume mounts.
 - **WebAssembly containers** (`runtimeClassName: wasmtime`, the RuntimeClass
   of runwasi's wasmtime shim) run a WASI preview 1 module in a Web Worker of

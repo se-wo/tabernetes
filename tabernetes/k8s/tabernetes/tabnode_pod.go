@@ -316,6 +316,7 @@ func (w *podWorker) update(pod *v1.Pod) {
 	w.mu.Lock()
 	w.pod = pod.DeepCopy()
 	w.addEphemeralLocked(w.pod)
+	w.imagesChangedLocked(w.pod)
 	start := pod.DeletionTimestamp != nil && !w.terminating
 	if start {
 		w.terminating = true
