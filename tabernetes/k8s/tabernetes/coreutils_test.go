@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -210,5 +212,19 @@ func TestClusterURLs(t *testing.T) {
 		if got := noSuchHost(context.Background(), host); got != want {
 			t.Errorf("noSuchHost(%q) = %v, want %v", host, got, want)
 		}
+	}
+}
+
+func TestLsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
+	os.Symlink("f", filepath.Join(dir, "l"))
+	out, code := sh(t, "ls -l "+dir)
+	if code != 0 || !strings.Contains("\n"+out, "\nlrwx") || !strings.Contains(out, " l -> f") {
+		t.Errorf("ls -l: %q (exit %d)", out, code)
+	}
+	out, _ = sh(t, "ls -lL "+dir)
+	if strings.Contains(out, "->") || strings.Contains(out, "lrwx") {
+		t.Errorf("ls -lL: %q", out)
 	}
 }

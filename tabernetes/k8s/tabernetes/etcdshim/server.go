@@ -30,6 +30,11 @@ type Server struct {
 	url string
 }
 
+// Logf, when set, gets what the shim logs, with key/value pairs like the
+// zap logger of etcd. Call it only at the place that logs: the caller of
+// Logf is the source location of the entry.
+var Logf func(level, msg string, kv ...any)
+
 // Serve starts the shim on the given listener.
 func Serve(l net.Listener) error {
 	srv := &Server{s: newStore(), url: "http://" + l.Addr().String()}
@@ -44,6 +49,9 @@ func Serve(l net.Listener) error {
 	pb.RegisterLeaseServer(g, srv)
 	pb.RegisterMaintenanceServer(g, srv)
 	pb.RegisterClusterServer(g, srv)
+	if Logf != nil {
+		Logf("warn", "serving client traffic insecurely; this is strongly discouraged!", "traffic", "grpc", "address", l.Addr().String())
+	}
 	return g.Serve(l)
 }
 
@@ -316,8 +324,12 @@ func (srv *Server) Compact(ctx context.Context, r *pb.CompactionRequest) (*pb.Co
 	if r.Revision <= s.compactRev {
 		return nil, rpctypes.ErrGRPCCompacted
 	}
+	start := time.Now()
 	s.compact(r.Revision)
 	s.wake()
+	if Logf != nil {
+		Logf("info", "finished scheduled compaction", "compact-revision", r.Revision, "took", time.Since(start).String())
+	}
 	return &pb.CompactionResponse{Header: srv.header()}, nil
 }
 

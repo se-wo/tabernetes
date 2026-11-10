@@ -480,31 +480,32 @@ func owner(fi fs.FileInfo) (uid, gid int64, ok bool) {
 // again.
 func (w *podWorker) chownVolumes() {
 	pod, _ := w.podInfo()
-	var fsGroup *int64
-	if pod.Spec.SecurityContext != nil {
-		fsGroup = pod.Spec.SecurityContext.FSGroup
-	}
 	for _, v := range pod.Spec.Volumes {
-		if v.HostPath != nil {
-			continue
-		}
-		dir, ok := w.volumeDir(v.Name)
-		if !ok {
-			continue
-		}
-		fi, err := os.Stat(dir)
-		if err != nil {
-			continue
-		}
-		if v.EmptyDir != nil || v.ConfigMap != nil || v.Secret != nil || v.Projected != nil || v.DownwardAPI != nil {
-			os.Chmod(dir, fi.Mode()&(os.ModePerm|os.ModeSetgid|os.ModeSetuid|os.ModeSticky)|0o777)
-		}
-		if fsGroup == nil {
-			continue
-		}
-		readOnly := v.ConfigMap != nil || v.Secret != nil || v.Projected != nil || v.DownwardAPI != nil
-		setVolumeOwnership(dir, *fsGroup, readOnly)
+		w.chownVolume(pod, v)
 	}
+}
+
+// chownVolume does it for one volume: after the setup, and after every
+// refresh of its files.
+func (w *podWorker) chownVolume(pod *v1.Pod, v v1.Volume) {
+	if v.HostPath != nil {
+		return
+	}
+	dir, ok := w.volumeDir(v.Name)
+	if !ok {
+		return
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return
+	}
+	if v.EmptyDir != nil || isFileVolume(&v) {
+		os.Chmod(dir, fi.Mode()&(os.ModePerm|os.ModeSetgid|os.ModeSetuid|os.ModeSticky)|0o777)
+	}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		return
+	}
+	setVolumeOwnership(dir, *pod.Spec.SecurityContext.FSGroup, isFileVolume(&v))
 }
 
 func setVolumeOwnership(dir string, fsGroup int64, readOnly bool) {

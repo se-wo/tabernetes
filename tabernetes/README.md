@@ -48,6 +48,16 @@ browser tab (single wasm binary)                     docker run tabernetes
   servers that allow CORS, for example `raw.githubusercontent.com`.
   `localhost` and `127.0.0.1` stay in the in-process network of the Wasm, so
   `k port-forward deploy/web 8080:80 &` and `wget -qO- localhost:8080` work.
+- `helm` (Helm v4, `HELM_VERSION`) runs in-process like kubectl
+  (`k8s/tabernetes/helm.go`). Releases are Secrets in the cluster, repositories
+  and the cache are files of the terminal. Helm downloads chart repositories with
+  `fetch()`, so a repository must send CORS headers: repositories on GitHub
+  Pages work directly. `https://charts.bitnami.com/bitnami` and
+  `oci://registry-1.docker.io/bitnamicharts/<chart>` come from `charts/bitnami/`
+  next to the page instead: small charts in the style of Bitnami's
+  (`tabernetes/charts/`, nginx, apache and redis) that run the official images on
+  the tab node, so `helm repo add bitnami https://charts.bitnami.com/bitnami` and
+  `helm install web bitnami/nginx` work.
 - The shell tools are small Go versions with the common flags: `cp`, `mv`,
   `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
   ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
@@ -118,12 +128,31 @@ browser tab (single wasm binary)                     docker run tabernetes
 `k8s/tabernetes/tabnode*.go` is a kubelet inside the tab. It registers the
 Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
 `tabernetes.io/tab=true`, `tabernetes.io/wasm=true`) as `system:node:tab`,
-keeps its Lease and runs the pods the scheduler binds to it. It has the taint
-`tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
-everything lands here; once a Docker node joins, the scheduler prefers that
-one. flannel and kube-proxy stay off it (the tab has a kube-proxy of its
-own). CoreDNS runs here as a built-in image until a Docker node is Ready,
-then moves there.
+keeps its Lease and runs the pods the scheduler binds to it. Like the first
+node of kubeadm, `tab` is the control plane node: it has the role label
+`node-role.kubernetes.io/control-plane` (set with the admin credentials, as
+NodeRestriction forbids a kubelet to set it) and two taints,
+`node-role.kubernetes.io/control-plane:PreferNoSchedule` and
+`tabernetes.io/tab=true:PreferNoSchedule`. Both are soft, not NoSchedule:
+while `tab` is the only node, everything lands here. With two taints, the
+scheduler prefers a node in a Web Worker (one taint) over `tab`, and a Docker
+node (none) over both. flannel and kube-proxy stay off it (the tab has a
+kube-proxy of its own). CoreDNS runs here as a built-in image until a Docker
+node is Ready, then moves there.
+
+`kubectl get pods -n kube-system` shows the control plane as static pods, as
+on a kubeadm node: `kube-apiserver-tab`, `kube-controller-manager-tab`,
+`kube-scheduler-tab` and `etcd-tab` (`tabnode_static.go`). They are mirror
+pods of the kubelet, with the manifests in `/etc/kubernetes/manifests`, the
+certificates in `/etc/kubernetes/pki` and the kubeconfigs in
+`/etc/kubernetes/*.conf`. The command of a pod is the real command line of
+its component. `kubectl logs` shows the lines of that component only: a hook
+in the shared logger sorts them by the pprof labels of the goroutine
+(`complogs.go`). Ready comes from the health endpoints of the components.
+`kubectl delete pod` creates the mirror pod again, with the start time of
+the running component. `kubectl exec` is refused, like on a distroless image.
+The node info shows Tabernetes as the OS and `6.0.0-tabernetes` as the
+kernel, as `uname -r` does in a container.
 
 A container is not a process:
 
@@ -157,10 +186,19 @@ A container is not a process:
 What works like on a real node: init and sidecar containers, restart
 policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/
 downwardAPI/hostPath volumes (hostPath is the file system of the terminal),
+persistentVolumeClaim and generic ephemeral volumes (see below),
 env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+configMap, secret, projected and downwardAPI volumes look like on a real
+node (`tabnode_volwriter.go`): the files sit in a `..<timestamp>` directory,
+`..data` links to it and every key links into `..data`. They get `defaultMode`
+or `items[].mode`, so `ls -lL` shows `-r--------` for `defaultMode: 0400`.
+Every minute the node writes them again (`tabnode_volrefresh.go`), so
+`kubectl edit cm` reaches a running pod within about a minute. `subPath`
+mounts and immutable objects keep their content, like on a real node.
+Projected service account tokens are renewed at 80 % of their lifetime.
 - `grpc` probes call `grpc.health.v1.Health/Check` with the gRPC prober of
   the kubelet, so a closed port or `NOT_SERVING` fails with the same
   `Unhealthy` event. `agnhost grpc-health-checking` (`--port`, `--http-port`,
@@ -243,6 +281,26 @@ names of the tab at once. `forward` and the other plugins are ignored: the
 browser has no DNS. Pods on a Docker node need UDP, so once a Docker node is
 Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
 two minutes) and the real CoreDNS runs there.
+
+### Persistent volumes
+
+kube-controller-manager binds claims to PersistentVolumes, and the scheduler
+places a pod with a claim on a node that fits the node affinity of the volume.
+The kubelet then follows the claim to its volume (`tabnode_pvc.go`):
+
+- A `hostPath` or `local` volume is a directory in the file system of the
+  node. The data outlives the pod, and pods on the same node share it. A node
+  in a Web Worker has a file system of its own, so give a volume there node
+  affinity for that node.
+- `hostPath` creates its directory unless its type is `Directory`. A `local`
+  path must exist, as on a real node.
+- `readOnly: true` in the claim source makes every mount of the volume
+  read-only.
+- A claim that is not bound keeps the pod in `ContainerCreating`, with the
+  `FailedMount` event of a real kubelet. Other volume sources (NFS, CSI) fail
+  with an event.
+- `persistentVolumeReclaimPolicy` is handled by the controller-manager, as on a
+  real cluster.
 
 ### More nodes in Web Workers
 
@@ -529,6 +587,9 @@ same on macOS and Linux:
 - A sleep in the APF bootstrap ensurer. It busy-loops until the informer
   catches up, and Wasm has no preemption, so the informer never gets the CPU.
 - An idempotent `SetupSignalContext`, because all components share one process.
+- A settable default stream for the text logger of `component-base/logs`.
+  All components share one klog; the stream sorts the lines into the logs of
+  the control plane pods.
 - mvdan.cc/sh is vendored into the checkout at `MVDAN_SH_VERSION` from
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
@@ -540,6 +601,12 @@ same on macOS and Linux:
   (`KUBE_NETWORK_POLICIES_VERSION`, `NETWORK_POLICY_API_VERSION`), without
   the nftables dataplane. Their `packet.go` gets the IANA numbers of five
   `syscall.IPPROTO_*` constants that js lacks.
+- Helm is vendored at `HELM_VERSION` with its whole module graph
+  (`vendorGraph`): modules Kubernetes vendors stay at its version, only the
+  missing modules and packages are added. Hooks give each helm the settings of
+  its shell, its context and a `log.Fatal` that does not end the tab, send
+  chart repositories without CORS headers to `charts/` next to the page, and
+  replace flock with locks in the process.
 - `kubectl port-forward` and `kubectl proxy` stop with their command
   context. Otherwise their listeners would stay until the tab closes.
 
@@ -564,10 +631,11 @@ works under any base path, such as `/tabernetes/` on GitHub Pages
 (`.github/workflows/pages.yaml`). It also writes `THIRD_PARTY_LICENSES.txt`:
 the Go modules in the binary (`go list -deps`, collected by the `wasm` task
 while the Kubernetes checkout is there) and the npm packages in the bundles,
-each with its license text. `join` prints `TABERNETES_IMAGE` if set at build
-time, else `$NODE_IMAGE:latest`.
+each with its license text. `site/charts.mjs` packages the charts of
+`charts/` into chart repositories under `charts/` of the site. `join` prints
+`TABERNETES_IMAGE` if set at build time, else `$NODE_IMAGE:latest`.
 
-The binary is around 290 MB, or 28 MB with zstd (gzip: 45 MB). GitHub Pages
+The binary is around 310 MB, or 30 MB with zstd (gzip: 47 MB). GitHub Pages
 does not send `Content-Encoding` for it, and `DecompressionStream` has no
 zstd. The page fetches the `.zst` file and unpacks it with
 [fzstd](https://github.com/101arrowz/fzstd) in a Web Worker, block by block
@@ -660,6 +728,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
+- The static pod manifests in `/etc/kubernetes/manifests` are not watched:
+  an edit changes nothing. A component that exits stays down, its pod shows
+  `CrashLoopBackOff`. The `etcd-tab` pod is the etcd shim.
 - `yq` runs jq expressions on YAML with gojq: the yq v4 commands and flags
   work, its own functions mostly do not (`strenv` and `env` do). `jq` and
   `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes), and

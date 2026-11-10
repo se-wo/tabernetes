@@ -1,0 +1,130 @@
+{{- if ne .Values.architecture "standalone" }}
+{{- fail "architecture: only \"standalone\" is supported by this chart" }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "redis.fullname" . }}-master
+  labels:
+    {{- include "redis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.master.count }}
+  serviceName: {{ include "redis.fullname" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "redis.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: master
+  template:
+    metadata:
+      labels:
+        {{- include "redis.labels" . | nindent 8 }}
+        app.kubernetes.io/component: master
+        {{- with .Values.master.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.master.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.master.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.master.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.master.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: {{ include "redis.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - redis-server
+          args:
+            - --port
+            - {{ .Values.master.containerPorts.redis | quote }}
+            {{- if .Values.auth.enabled }}
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            {{- end }}
+            {{- range .Values.master.extraFlags }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: REDIS_PORT
+              value: {{ .Values.master.containerPorts.redis | quote }}
+            {{- if .Values.auth.enabled }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "redis.secretName" . }}
+                  key: {{ include "redis.secretPasswordKey" . }}
+            - name: REDISCLI_AUTH
+              value: $(REDIS_PASSWORD)
+            {{- end }}
+            {{- with .Values.master.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: redis
+              containerPort: {{ .Values.master.containerPorts.redis }}
+          {{- if .Values.master.livenessProbe.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            {{- toYaml (omit .Values.master.livenessProbe "enabled") | nindent 12 }}
+          {{- end }}
+          {{- if .Values.master.readinessProbe.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p "$REDIS_PORT" ping | grep -q PONG
+            {{- toYaml (omit .Values.master.readinessProbe "enabled") | nindent 12 }}
+          {{- end }}
+          {{- with .Values.master.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      {{- if not .Values.master.persistence.enabled }}
+      volumes:
+        - name: redis-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.master.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          {{- include "redis.selectorLabels" . | nindent 10 }}
+          app.kubernetes.io/component: master
+      spec:
+        accessModes:
+          {{- toYaml .Values.master.persistence.accessModes | nindent 10 }}
+        {{- with .Values.master.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.master.persistence.size | quote }}
+  {{- end }}

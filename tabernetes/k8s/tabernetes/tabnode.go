@@ -11,18 +11,25 @@ package main
 //
 // The node has the taint tabernetes.io/tab=true:PreferNoSchedule: as long as
 // it is the only node, everything lands here. Once a Docker node joins, the
-// scheduler prefers that one.
+// scheduler prefers that one. The node "tab" next to the control plane is
+// also the control plane node, like the first node of kubeadm: it has the
+// role label node-role.kubernetes.io/control-plane, a second soft taint
+// node-role.kubernetes.io/control-plane:PreferNoSchedule (so the scheduler
+// prefers a node in a Web Worker over it), and the static pods of
+// kube-apiserver, kube-controller-manager, kube-scheduler and etcd as
+// mirror pods (tabnode_static.go). The node info names Tabernetes as the
+// OS, not the browser.
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall/js"
@@ -36,6 +43,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -60,6 +68,12 @@ const (
 	tabPodsDir   = "/var/lib/tabnode/pods"
 	kubeletPort  = 10250
 	leaseSeconds = 40
+
+	// kernelVersion is the kernel of every tab node: the node info and
+	// uname -r in its containers (tabnode_proc.go) say the same.
+	kernelVersion = "6.0.0-tabernetes"
+
+	controlPlaneRole = "node-role.kubernetes.io/control-plane"
 )
 
 type tabNode struct {
@@ -83,6 +97,8 @@ type tabNode struct {
 	gpu          *gpuAdapter         // the WebGPU adapter it offers (tabnode_gpu.go), nil for none
 	gpuSync      sync.Mutex          // one syncGPU at a time
 	gpuPublished *resourceapi.Device // the device in the slice, nil without a slice; under gpuSync
+
+	static *staticPods // the control plane pods, nil but on the control plane node (tabnode_static.go)
 }
 
 var theTabNode *tabNode
@@ -155,6 +171,9 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 	}
 
 	n := &tabNode{client: client, admin: admin, caPEM: nc.ca, usedIPs: map[string]bool{}, workers: map[types.UID]*podWorker{}}
+	if comps := controlPlaneComponents(); len(comps) > 0 {
+		n.static = newStaticPods(n, comps)
+	}
 	broadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
 	n.recorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "kubelet", Host: tabNodeName})
@@ -167,6 +186,11 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 		return fmt.Errorf("kubelet server: %w", err)
 	}
 	go n.heartbeat(ctx)
+	if n.static != nil {
+		if err := n.static.start(ctx); err != nil {
+			return fmt.Errorf("control plane pods: %w", err)
+		}
+	}
 	go n.sampleStats(ctx)
 	// The WebGPU adapter of the browser as a DRA device (tabnode_gpu.go).
 	// Nothing of the node waits for the probe.
@@ -203,6 +227,9 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 				obj = t.Obj
 			}
 			if pod, ok := obj.(*v1.Pod); ok {
+				if n.static.observeGone(pod) { // a mirror pod
+					return
+				}
 				n.podGone(pod.UID)
 			}
 		},
@@ -213,22 +240,38 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 
 func (n *tabNode) nodeLabels() map[string]string {
 	return map[string]string{
-		"kubernetes.io/hostname":           tabNodeName,
-		"kubernetes.io/os":                 "linux",
-		"kubernetes.io/arch":               "wasm",
-		"node.kubernetes.io/instance-type": "browser-tab",
-		tabTaintKey:                        "true",
-		"tabernetes.io/wasm":               "true", // WebAssembly pods (runtimeclass.yaml)
-		podLinkNodeLabel:                   "v1",   // pods of other nodes reach it (podlink.go)
+		"kubernetes.io/hostname": tabNodeName,
+		"kubernetes.io/os":       "linux",
+		"kubernetes.io/arch":     "wasm",
+		tabTaintKey:              "true",
+		"tabernetes.io/wasm":     "true", // WebAssembly pods (runtimeclass.yaml)
+		podLinkNodeLabel:         "v1",   // pods of other nodes reach it (podlink.go)
 	}
 }
 
+// register creates the Node and writes its first status. A failure may be
+// transient (the apiserver is busy while several nodes start), and a node
+// that gives up stays NotReady for good, so it tries for two minutes.
 func (n *tabNode) register(ctx context.Context) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for wait := 500 * time.Millisecond; ; wait = min(2*wait, 5*time.Second) {
+		err := n.registerOnce(ctx)
+		if err == nil || ctx.Err() != nil || time.Now().After(deadline) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "tab node: registering node %s: %v; trying again\n", tabNodeName, err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (n *tabNode) registerOnce(ctx context.Context) error {
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: tabNodeName, Labels: n.nodeLabels()},
-		Spec: v1.NodeSpec{Taints: []v1.Taint{{
-			Key: tabTaintKey, Value: "true", Effect: v1.TaintEffectPreferNoSchedule,
-		}}},
+		Spec:       v1.NodeSpec{Taints: tabNodeTaints(n.static != nil)},
 	}
 	created, err := n.client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
@@ -241,7 +284,45 @@ func (n *tabNode) register(ctx context.Context) error {
 	return n.updateStatus(ctx)
 }
 
-// browserInfo describes the browser for the node info: "Chrome/131" or so.
+// tabNodeTaints are the taints of a new tab node. Both are soft: alone, the
+// control plane node takes every pod. With two of them, the scheduler
+// prefers a node in a Web Worker (one) over the control plane node, and a
+// Docker node (none) over both.
+func tabNodeTaints(controlPlane bool) []v1.Taint {
+	taints := []v1.Taint{{Key: tabTaintKey, Value: "true", Effect: v1.TaintEffectPreferNoSchedule}}
+	if controlPlane {
+		taints = append([]v1.Taint{{Key: controlPlaneRole, Effect: v1.TaintEffectPreferNoSchedule}}, taints...)
+	}
+	return taints
+}
+
+// The identity of this node while it runs: a machine ID of 32 hex
+// characters like /etc/machine-id, and a system UUID and boot ID like the
+// ones of a real machine.
+var (
+	machineID  = strings.ReplaceAll(string(uuid.NewUUID()), "-", "")
+	systemUUID = string(uuid.NewUUID())
+	bootID     = string(uuid.NewUUID())
+)
+
+// tabNodeInfo is the system info of a tab node. It names Tabernetes as the
+// OS, like a distribution such as Talos, not the browser.
+func tabNodeInfo() v1.NodeSystemInfo {
+	return v1.NodeSystemInfo{
+		MachineID:               machineID,
+		SystemUUID:              systemUUID,
+		BootID:                  bootID,
+		KernelVersion:           kernelVersion,
+		OSImage:                 "Tabernetes " + version.Get().GitVersion,
+		ContainerRuntimeVersion: "tabernetes://" + version.Get().GitVersion,
+		KubeletVersion:          version.Get().GitVersion,
+		OperatingSystem:         "linux",
+		Architecture:            "wasm",
+	}
+}
+
+// browserInfo describes the browser: "Chrome 131" or so (the WebGPU device
+// of tabnode_gpu.go names it), and its CPUs and memory for the capacity.
 func browserInfo() (ua string, cpus int, memGiB int) {
 	cpus, memGiB = 1, 4
 	nav := js.Global().Get("navigator")
@@ -271,12 +352,28 @@ func browserInfo() (ua string, cpus int, memGiB int) {
 	return ua, cpus, memGiB
 }
 
+// updateStatus writes the node status as a patch of the status fields the
+// kubelet owns, like the kubelet does. An update of the whole object would
+// also carry the spec as it was read: when the node lifecycle controller
+// adds a taint in between, NodeRestriction sees the node remove that taint
+// and refuses the write ("not allowed to modify taints").
 func (n *tabNode) updateStatus(ctx context.Context) error {
 	node, err := n.client.CoreV1().Nodes().Get(ctx, tabNodeName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	ua, cpus, mem := browserInfo()
+	patch, err := json.Marshal(map[string]any{"status": n.nodeStatus(node.Status.Conditions)})
+	if err != nil {
+		return err
+	}
+	_, err = n.client.CoreV1().Nodes().Patch(ctx, tabNodeName, types.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
+	return err
+}
+
+// nodeStatus is the status this kubelet reports. old are the conditions of
+// the node as it is, for their transition times.
+func (n *tabNode) nodeStatus(old []v1.NodeCondition) v1.NodeStatus {
+	_, cpus, mem := browserInfo()
 	now := metav1.Now()
 	capacity := v1.ResourceList{
 		v1.ResourceCPU:              *resource.NewQuantity(int64(cpus), resource.DecimalSI),
@@ -286,43 +383,31 @@ func (n *tabNode) updateStatus(ctx context.Context) error {
 	}
 	cond := func(t v1.NodeConditionType, s v1.ConditionStatus, reason, msg string) v1.NodeCondition {
 		c := v1.NodeCondition{Type: t, Status: s, Reason: reason, Message: msg, LastHeartbeatTime: now, LastTransitionTime: now}
-		for _, old := range node.Status.Conditions {
-			if old.Type == t && old.Status == s {
-				c.LastTransitionTime = old.LastTransitionTime
+		for _, o := range old {
+			if o.Type == t && o.Status == s {
+				c.LastTransitionTime = o.LastTransitionTime
 			}
 		}
 		return c
 	}
-	node.Status.Capacity = capacity
-	node.Status.Allocatable = capacity
-	node.Status.Conditions = []v1.NodeCondition{
-		cond(v1.NodeMemoryPressure, v1.ConditionFalse, "KubeletHasSufficientMemory", "kubelet has sufficient memory available"),
-		cond(v1.NodeDiskPressure, v1.ConditionFalse, "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
-		cond(v1.NodePIDPressure, v1.ConditionFalse, "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
-		cond(v1.NodeReady, v1.ConditionTrue, "KubeletReady", "kubelet is posting ready status from a browser tab"),
+	return v1.NodeStatus{
+		Capacity:    capacity,
+		Allocatable: capacity,
+		Conditions: []v1.NodeCondition{
+			cond(v1.NodeMemoryPressure, v1.ConditionFalse, "KubeletHasSufficientMemory", "kubelet has sufficient memory available"),
+			cond(v1.NodeDiskPressure, v1.ConditionFalse, "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
+			cond(v1.NodePIDPressure, v1.ConditionFalse, "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
+			cond(v1.NodeReady, v1.ConditionTrue, "KubeletReady", "kubelet is posting ready status"),
+		},
+		Addresses: []v1.NodeAddress{
+			{Type: v1.NodeInternalIP, Address: tabNodeIP},
+			{Type: v1.NodeHostName, Address: tabNodeName},
+		},
+		DaemonEndpoints: v1.NodeDaemonEndpoints{KubeletEndpoint: v1.DaemonEndpoint{Port: kubeletPort}},
+		NodeInfo:        tabNodeInfo(),
+		Images:          append(builtinImageList(), n.static.images()...),
 	}
-	node.Status.Addresses = []v1.NodeAddress{
-		{Type: v1.NodeInternalIP, Address: tabNodeIP},
-		{Type: v1.NodeHostName, Address: tabNodeName},
-	}
-	node.Status.DaemonEndpoints.KubeletEndpoint.Port = kubeletPort
-	node.Status.NodeInfo = v1.NodeSystemInfo{
-		MachineID:               "tabernetes",
-		SystemUUID:              string(n.nodeUID),
-		BootID:                  bootID,
-		KernelVersion:           "WebAssembly (" + runtime.Version() + ")",
-		OSImage:                 ua + " (browser tab)",
-		ContainerRuntimeVersion: "tabernetes://" + version.Get().GitVersion,
-		KubeletVersion:          version.Get().GitVersion,
-		OperatingSystem:         "linux",
-		Architecture:            "wasm",
-	}
-	node.Status.Images = builtinImageList()
-	_, err = n.client.CoreV1().Nodes().UpdateStatus(ctx, node, metav1.UpdateOptions{})
-	return err
 }
-
-var bootID = randToken(16)
 
 // heartbeat renews the node lease every 10 seconds and the node status every
 // minute, like a kubelet.
@@ -424,6 +509,9 @@ func (n *tabNode) isTabPodIP(ip string) bool {
 }
 
 func (n *tabNode) podChanged(pod *v1.Pod) {
+	if n.static.observe(pod) { // a mirror pod
+		return
+	}
 	n.mu.Lock()
 	w := n.workers[pod.UID]
 	if w == nil {

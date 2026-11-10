@@ -1,0 +1,81 @@
+# A small chart with the values of Bitnami's redis chart that tutorials use:
+# a standalone master. Tabernetes runs the official redis image
+# (docker.io/library/redis).
+
+## @param nameOverride String to partially override redis.fullname
+nameOverride: ""
+## @param fullnameOverride String to fully override redis.fullname
+fullnameOverride: ""
+## @param commonLabels Labels to add to all deployed objects
+commonLabels: {}
+## @param commonAnnotations Annotations to add to all deployed objects
+commonAnnotations: {}
+
+## Redis(R) image
+image:
+  registry: docker.io
+  repository: library/redis
+  tag: 8.2.2
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+## @param architecture Redis(R) architecture: only "standalone" here
+architecture: standalone
+
+auth:
+  ## @param auth.enabled Enable password authentication
+  enabled: true
+  ## @param auth.password Redis(R) password (empty: a random one, kept on upgrades)
+  password: ""
+  ## @param auth.existingSecret The name of an existing secret with the password
+  existingSecret: ""
+  ## @param auth.existingSecretPasswordKey The key of the password in auth.existingSecret
+  existingSecretPasswordKey: ""
+
+master:
+  ## @param master.count Number of Redis(R) master instances to deploy
+  count: 1
+  containerPorts:
+    redis: 6379
+  ## @param master.extraFlags Extra flags for redis-server, e.g. ["--maxmemory-policy allkeys-lru"]
+  extraFlags: []
+  ## @param master.extraEnvVars Array with extra environment variables to add to the Redis(R) master pods
+  extraEnvVars: []
+  podLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  ## @param master.resources Set container requests and limits for different resources like CPU or memory
+  resources: {}
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 20
+    periodSeconds: 5
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 5
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 1
+    successThreshold: 1
+    failureThreshold: 5
+  persistence:
+    ## @param master.persistence.enabled Enable persistence with a PersistentVolumeClaim
+    ## (off: Tabernetes has no storage provisioner, the data lives in an emptyDir)
+    enabled: false
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 8Gi
+  service:
+    ## @param master.service.type Redis(R) master service type
+    type: ClusterIP
+    ports:
+      redis: 6379
+    nodePorts:
+      redis: ""
+    annotations: {}

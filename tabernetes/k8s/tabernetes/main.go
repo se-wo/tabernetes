@@ -26,11 +26,10 @@ import (
 	"k8s.io/kubernetes/cmd/kube-apiserver/app"
 	cmapp "k8s.io/kubernetes/cmd/kube-controller-manager/app"
 	schedapp "k8s.io/kubernetes/cmd/kube-scheduler/app"
-	"k8s.io/kubernetes/cmd/tabernetes/etcdshim"
 )
 
 const (
-	dataDir      = "/tmp/tabernetes"
+	dataDir      = "/etc/kubernetes/pki"
 	advertiseIP  = "10.0.0.1"
 	serviceCIDR  = "10.96.0.0/16"
 	clusterCIDR  = "10.244.0.0/16"
@@ -55,6 +54,9 @@ func run(name string, cmd *cobra.Command, args []string) <-chan error {
 	cmd.SetArgs(args)
 	exited := make(chan error, 1)
 	go func() {
+		// Everything the component starts from here logs to its static
+		// pod (complogs.go).
+		labelGoroutine(name)
 		err := cmd.Execute()
 		if err == nil {
 			err = fmt.Errorf("%s exited", name)
@@ -75,6 +77,8 @@ type cluster struct {
 func boot() (*cluster, error) {
 	// All components share one process and therefore one klog instance.
 	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
+	// The shared logger sorts its lines by component (complogs.go).
+	logsapi.DefaultErrorStream = logSplitter{fallback: os.Stderr}
 	// Deprecation warnings of the in-process controllers are only noise.
 	rest.SetDefaultWarningHandler(rest.NoWarnings{})
 	must(os.MkdirAll(p("certs"), 0o755))
@@ -107,18 +111,18 @@ func boot() (*cluster, error) {
 	writeKubeconfig("controller-manager", cmToken)
 	writeKubeconfig("scheduler", schedToken)
 	must(os.MkdirAll("/root/.kube", 0o755))
-	cfg, err := os.ReadFile(p("admin.kubeconfig"))
+	cfg, err := os.ReadFile(kubeconfigPath("admin"))
 	must(err)
 	must(os.WriteFile("/root/.kube/config", cfg, 0o600))
 
 	status("starting etcd")
-	l, err := net.Listen("tcp", "127.0.0.1:2379")
+	l, err := net.Listen("tcp", etcdListen)
 	must(err)
-	go func() { must(etcdshim.Serve(l)) }()
+	startEtcd(l)
 
 	status("starting kube-apiserver")
-	apiserver := run("kube-apiserver", app.NewAPIServerCommand(), []string{
-		"--etcd-servers=http://127.0.0.1:2379",
+	apiserver := startComponent("kube-apiserver", app.NewAPIServerCommand(), []string{
+		"--etcd-servers=" + etcdClientURL,
 		"--bind-address=127.0.0.1",
 		"--advertise-address=" + advertiseIP,
 		"--secure-port=6443",
@@ -162,10 +166,10 @@ func boot() (*cluster, error) {
 	}
 
 	status("starting kube-controller-manager")
-	run("kube-controller-manager", cmapp.NewControllerManagerCommand(), []string{
-		"--kubeconfig=" + p("controller-manager.kubeconfig"),
-		"--authentication-kubeconfig=" + p("controller-manager.kubeconfig"),
-		"--authorization-kubeconfig=" + p("controller-manager.kubeconfig"),
+	startComponent("kube-controller-manager", cmapp.NewControllerManagerCommand(), []string{
+		"--kubeconfig=" + kubeconfigPath("controller-manager"),
+		"--authentication-kubeconfig=" + kubeconfigPath("controller-manager"),
+		"--authorization-kubeconfig=" + kubeconfigPath("controller-manager"),
 		"--bind-address=127.0.0.1",
 		"--secure-port=10257",
 		"--cert-dir=" + p("certs"),
@@ -184,10 +188,10 @@ func boot() (*cluster, error) {
 	})
 
 	status("starting kube-scheduler")
-	run("kube-scheduler", schedapp.NewSchedulerCommand(), []string{
-		"--kubeconfig=" + p("scheduler.kubeconfig"),
-		"--authentication-kubeconfig=" + p("scheduler.kubeconfig"),
-		"--authorization-kubeconfig=" + p("scheduler.kubeconfig"),
+	startComponent("kube-scheduler", schedapp.NewSchedulerCommand(), []string{
+		"--kubeconfig=" + kubeconfigPath("scheduler"),
+		"--authentication-kubeconfig=" + kubeconfigPath("scheduler"),
+		"--authorization-kubeconfig=" + kubeconfigPath("scheduler"),
 		"--bind-address=127.0.0.1",
 		"--secure-port=10259",
 		"--leader-elect=false",

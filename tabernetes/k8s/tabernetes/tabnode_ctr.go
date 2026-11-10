@@ -489,9 +489,13 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 			return nil, fmt.Errorf("volume %q of mount %s not found", m.Name, m.MountPath)
 		}
 		if m.SubPath != "" {
+			// Resolved once, like a bind mount: a refresh of the volume does not move it.
 			real = filepath.Join(real, m.SubPath)
+			if r, err := filepath.EvalSymlinks(real); err == nil {
+				real = r
+			}
 		}
-		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly || readOnlyVolume(pod, m.Name)})
+		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly || readOnlyVolume(pod, m.Name) || w.claimReadOnly(m.Name)})
 	}
 	// longest first, so /a/b wins over /a
 	for i := 1; i < len(root.mounts); i++ {
