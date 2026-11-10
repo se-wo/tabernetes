@@ -370,7 +370,9 @@ the NetworkPolicy implementation of SIG Network. The design is in
 - Docker nodes run the upstream DaemonSet with nftables and nfqueue,
   next to flannel and kube-proxy. The agent dials pods for the tab from the
   tab pod's IP as uid 65534, so those rules decide it. Pods of a Docker node
-  reach tab pods: TPROXY hands their connections to the agent.
+  reach tab pods: a route into a veth pair and TPROXY hand their connections
+  to the agent. The DaemonSet needs `nft_queue` in the kernel of the Docker
+  host; without it, it restarts and the Docker node enforces nothing.
 - A policy change also applies to open connections (strict mode): a denied
   one is closed.
 - Never blocked, like on a real node: a pod to itself, and the host of a

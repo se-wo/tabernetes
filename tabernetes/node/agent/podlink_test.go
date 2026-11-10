@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -16,7 +18,8 @@ func TestParsePodLinkHeader(t *testing.T) {
 	if err != nil || src.String() != "10.244.0.3:0" || dst.String() != "10.244.1.5:80" {
 		t.Errorf("got %v %v %v", src, dst, err)
 	}
-	for _, bad := range []string{"", "TABP/2 tcp 1.2.3.4:0 1.2.3.5:80", "TABP/1 udp 1.2.3.4:0 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0"} {
+	for _, bad := range []string{"", "TABP/2 tcp 1.2.3.4:0 1.2.3.5:80", "TABP/1 udp 1.2.3.4:0 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0",
+		"TABP/1 tcp localhost:0 1.2.3.5:80", "TABP/1 tcp 1.2.3.4:0 example.com:80", "TABP/1 tcp 1.2.3.4:0 1.2.3.5:0"} {
 		if _, _, err := parsePodLinkHeader(bad); err == nil {
 			t.Errorf("parsePodLinkHeader(%q) did not fail", bad)
 		}
@@ -42,7 +45,9 @@ func TestParseFlannelSubnet(t *testing.T) {
 //	TABERNETES_NETNS_TEST=1 unshare -Unm --map-users=0:0:65536 --map-groups=0:0:65536 \
 //	  --setuid 0 --setgid 0 --propagation private go test -run Netns .
 //
-// It needs ip, nft, python3 and TPROXY in the kernel.
+// As root without user namespaces, "unshare -nm --propagation private" does.
+// It needs ip, nft, python3 and TPROXY, nft_socket and br_netfilter in the
+// kernel.
 func TestPodLinkNetns(t *testing.T) {
 	if os.Getenv("TABERNETES_NETNS_TEST") == "" {
 		t.Skip("set TABERNETES_NETNS_TEST=1 and run in unshare, see above")
@@ -53,13 +58,27 @@ func TestPodLinkNetns(t *testing.T) {
 			t.Fatalf("%s: %v\n%s", cmd, err, out)
 		}
 	}
-	// The node: cni0 to a pod 10.244.1.5 of this node, a default route
-	// elsewhere (eth0). A tab pod is 10.244.0.7.
-	sh("mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up")
-	sh("ip link add cni0 type veth peer name eth0p && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up")
+	// The node: the bridge cni0 with a pod 10.244.1.5 behind it, as the
+	// bridge plugin of CNI builds it, and a default route elsewhere (eth0).
+	// A tab pod is 10.244.0.7. With bridge-nf-call-iptables the packets of
+	// the pod pass prerouting inside the bridge, where TPROXY does not work.
+	sh("mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up && sysctl -qw net.ipv4.ip_forward=1")
+	sh("ip link add cni0 type bridge && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up")
+	sh("ip link add veth0 type veth peer name eth0p && ip link set veth0 master cni0 && ip link set veth0 up")
 	sh("ip link add eth0 type veth peer name eth0up && ip addr add 192.168.65.3/24 dev eth0 && ip link set eth0 up && ip link set eth0up up && ip route add default via 192.168.65.1")
 	sh("ip netns add pod && ip link set eth0p netns pod")
 	sh("ip netns exec pod sh -c 'ip link set lo up; ip addr add 10.244.1.5/24 dev eth0p; ip link set eth0p up; ip route add default via 10.244.1.1'")
+	// The rules for a kernel without nft_socket load too.
+	if err := nft(podLinkRules(false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupPodLinkNet(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile("/proc/sys/net/bridge/bridge-nf-call-iptables"); strings.TrimSpace(string(b)) != "1" {
+		t.Fatal("no bridge-nf-call-iptables: the test would not see what a node does")
+	}
+	// A second time, as after a restart of the agent.
 	if err := setupPodLinkNet(); err != nil {
 		t.Fatal(err)
 	}
@@ -77,59 +96,116 @@ func TestPodLinkNetns(t *testing.T) {
 	}
 	defer tl.Close()
 	go func() {
-		if c, err := tl.Accept(); err == nil {
+		for {
+			c, err := tl.Accept()
+			if err != nil {
+				return
+			}
 			got <- [2]string{c.RemoteAddr().String(), c.LocalAddr().String()}
 			c.Close()
 		}
 	}()
-	out, err := exec.Command("ip", "netns", "exec", "pod", "python3", "-I", "-c", "import socket; socket.create_connection(('10.244.0.7', 80), 2)").CombinedOutput()
-	if err != nil {
-		t.Fatalf("pod -> tab pod: %v %s", err, out)
-	}
-	select {
-	case a := <-got:
-		if !strings.HasPrefix(a[0], "10.244.1.5:") || a[1] != "10.244.0.7:80" {
-			t.Errorf("TPROXY: from %s to %s, want from 10.244.1.5 to 10.244.0.7:80", a[0], a[1])
+	// A cluster IP whose endpoint is a tab pod: the rule runs after the DNAT
+	// of kube-proxy.
+	sh("nft add table ip testnat && nft 'add chain ip testnat pre { type nat hook prerouting priority dstnat; }' && nft add rule ip testnat pre ip daddr 10.96.0.50 tcp dport 80 dnat to 10.244.0.7:8080")
+	for _, c := range []struct{ dial, want string }{
+		{"('10.244.0.7', 80)", "10.244.0.7:80"},
+		{"('10.96.0.50', 80)", "10.244.0.7:8080"},
+	} {
+		out, err := exec.Command("ip", "netns", "exec", "pod", "python3", "-I", "-c", "import socket; socket.create_connection("+c.dial+", 2)").CombinedOutput()
+		if err != nil {
+			t.Fatalf("pod -> %s: %v %s", c.dial, err, out)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("TPROXY listener got nothing")
+		select {
+		case a := <-got:
+			if !strings.HasPrefix(a[0], "10.244.1.5:") || a[1] != c.want {
+				t.Errorf("TPROXY: from %s to %s, want from 10.244.1.5 to %s", a[0], a[1], c.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("pod -> %s: the TPROXY listener got nothing", c.dial)
+		}
 	}
 
-	// Tab pod -> pod here: the pod sees the tab pod as the source.
-	srv := exec.Command("ip", "netns", "exec", "pod", "python3", "-I", "-c",
-		"import socket; s=socket.socket(); s.bind(('10.244.1.5', 8080)); s.listen(); c,a=s.accept(); print(a[0], flush=True)")
-	srvOut := &strings.Builder{}
-	srv.Stdout = srvOut
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	var c net.Conn
-	for i := 0; i < 50; i++ {
-		dctx, dcancel := context.WithTimeout(ctx, 2*time.Second)
-		c, err = dialTransparent(dctx, net.ParseIP("10.244.0.7"), &net.TCPAddr{IP: net.ParseIP("10.244.1.5"), Port: 8080})
-		dcancel()
-		if err == nil {
-			break
+	// Tab pod -> pod here: the pod sees the tab pod as the source. Also the
+	// node IP of a tab node, which is outside the pod network.
+	for _, from := range []string{"10.244.0.7", "10.0.0.2"} {
+		srv := exec.Command("ip", "netns", "exec", "pod", "python3", "-I", "-c",
+			"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('10.244.1.5', 8080)); s.listen(); c,a=s.accept(); print(a[0], flush=True)")
+		srvOut := &strings.Builder{}
+		srv.Stdout = srvOut
+		if err := srv.Start(); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(100 * time.Millisecond) // the server starts
-	}
-	if err != nil {
-		t.Fatalf("transparent dial: %v", err)
-	}
-	c.Close()
-	srv.Wait()
-	if s := strings.TrimSpace(srvOut.String()); s != "10.244.0.7" {
-		t.Errorf("the pod sees %q, want 10.244.0.7", s)
+		var c net.Conn
+		for i := 0; i < 50; i++ {
+			dctx, dcancel := context.WithTimeout(ctx, 2*time.Second)
+			c, err = dialTransparent(dctx, net.ParseIP(from), &net.TCPAddr{IP: net.ParseIP("10.244.1.5"), Port: 8080})
+			dcancel()
+			if err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond) // the server starts
+		}
+		if err != nil {
+			srv.Process.Kill()
+			t.Fatalf("transparent dial from %s: %v", from, err)
+		}
+		c.Close()
+		srv.Wait()
+		if s := strings.TrimSpace(srvOut.String()); s != from {
+			t.Errorf("the pod sees %q, want %s", s, from)
+		}
 	}
 	counter, _ := exec.Command("nft", "list", "chain", "inet", "test", "out").CombinedOutput()
 	if strings.Contains(string(counter), "packets 0 ") {
 		t.Errorf("no packet of uid %d:\n%s", podLinkUID, counter)
 	}
 
-	// A port without listener: refused, not a timeout.
-	dctx, dcancel := context.WithTimeout(ctx, 2*time.Second)
-	defer dcancel()
-	if _, err := dialTransparent(dctx, net.ParseIP("10.244.0.7"), &net.TCPAddr{IP: net.ParseIP("10.244.1.5"), Port: 8081}); err == nil || strings.Contains(err.Error(), "timeout") {
-		t.Errorf("dial to a closed port: %v, want refused", err)
+	// A port without listener: refused, not a timeout, every time (the
+	// answer can arrive before the dial waits for it).
+	for i := 0; i < 50; i++ {
+		dctx, dcancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := dialTransparent(dctx, net.ParseIP("10.244.0.7"), &net.TCPAddr{IP: net.ParseIP("10.244.1.5"), Port: 8081})
+		dcancel()
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Fatalf("dial %d to a closed port: %v, want refused", i, err)
+		}
+	}
+}
+
+// messages is a detached data channel: a read takes one whole message and
+// fails when the buffer is smaller.
+type messages struct {
+	io.Writer
+	io.Closer
+	msgs [][]byte
+}
+
+func (m *messages) Read(p []byte) (int, error) {
+	if len(m.msgs) == 0 {
+		return 0, io.EOF
+	}
+	msg := m.msgs[0]
+	if len(p) < len(msg) {
+		return 0, io.ErrShortBuffer
+	}
+	m.msgs = m.msgs[1:]
+	return copy(p, msg), nil
+}
+
+// The header line and the bytes after it, read from messages.
+func TestDCStream(t *testing.T) {
+	raw := &messages{msgs: [][]byte{[]byte("TABP/1 tcp 10.244.0.3:0 10.244.1.5:80\nGET"), []byte(" / HTTP/1.1\r\n")}}
+	if _, err := readPodLinkLine(raw, 256); !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("a data channel read byte by byte: %v, want a short buffer", err)
+	}
+	s := newDCStream(raw)
+	line, err := readPodLinkLine(s, 256)
+	if err != nil || line != "TABP/1 tcp 10.244.0.3:0 10.244.1.5:80" {
+		t.Fatalf("header = %q, %v", line, err)
+	}
+	rest, err := io.ReadAll(s)
+	if err != nil || string(rest) != "GET / HTTP/1.1\r\n" {
+		t.Errorf("rest = %q, %v", rest, err)
 	}
 }
