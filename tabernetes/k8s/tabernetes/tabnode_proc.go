@@ -455,6 +455,9 @@ func statusOf(err error) error {
 // apiserver through the kubernetes service.
 func podKubectl(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	pe := procOf(ctx)
+	acct := acctFrom(ctx)
+	acct.AddMemory(25 << 20) // kubectl is a Go program with a client
+	defer acct.AddMemory(-25 << 20)
 	const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 	token := pe.root.real(saDir + "/token")
 	if _, err := os.Stat(token); err != nil {

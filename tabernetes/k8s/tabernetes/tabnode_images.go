@@ -565,7 +565,7 @@ func serveHTTP(ctx context.Context, hc interp.HandlerContext, prog string, h htt
 
 func serveListeners(ctx context.Context, hc interp.HandlerContext, prog string, h http.Handler, lns ...net.Listener) error {
 	srv := &http.Server{
-		Handler:     h,
+		Handler:     chargeRequests(ctx, h),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		ErrorLog:    log.New(io.Discard, "", 0),
 	}
@@ -1651,9 +1651,9 @@ func hpaExampleProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 	fmt.Fprintf(hc.Stderr, "[%s] [mpm_prefork:notice] [pid 1] AH00163: Apache/2.4.10 (Debian) PHP/5.6.14 configured -- resuming normal operations\n", apacheTime(time.Now().UTC()))
 	logger := newLogger(hc.Stdout, 0)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The real page computes square roots for a while; a short sleep
-		// keeps the tab responsive instead.
-		sleepCtx(r.Context(), 20*time.Millisecond)
+		// The real page computes square roots for a while: 20ms of CPU of
+		// the container, throttled by limits.cpu (tabnode_acct.go).
+		acctFrom(r.Context()).Work(r.Context(), 20*time.Millisecond)
 		w.Header().Set("Server", "Apache/2.4.10 (Debian)")
 		w.Header().Set("X-Powered-By", "PHP/5.6.14")
 		w.Header().Set("Content-Type", "text/html")
