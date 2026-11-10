@@ -6,4 +6,5 @@
 #                                   checkout, the crate is built from it with cargo (target wasm32-wasip1) and packed instead
 image     ghcr.io/se-wo/tabernetes/wasi-hello:latest    hello
 artifact  ghcr.io/se-wo/tabernetes/wasi-hello:artifact  hello
+image     ghcr.io/se-wo/tabernetes/wasi-webgpu:latest   webgpu
 mirror    ghcr.io/containerd/runwasi/wasi-demo-app:latest  wasi-demo-app

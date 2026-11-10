@@ -34,6 +34,11 @@
   .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { position: fixed; inset: 0; z-index: 9999; background: #0d1117; }
   .tabernetes-wrap:fullscreen, .tabernetes-wrap.tabernetes-fs { border-radius: 0; }
   .tabernetes-wrap:fullscreen .tabernetes-row, .tabernetes-wrap.tabernetes-fs .tabernetes-row { flex: 1; height: auto; min-height: 0; }
+  /* vnc and doom (web/src/vnc.js): the screen covers the terminal. */
+  .tabernetes-vnc { position: absolute; inset: 0; z-index: 4; display: flex; background: #000; }
+  .tabernetes-vnc-screen { flex: 1; min-width: 0; min-height: 0; }
+  .tabernetes-vnc-close { position: absolute; top: 8px; left: 16px; z-index: 5; padding: .2rem .5rem; font-size: .8rem; color: #c9d1d9; background: #21262d; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; opacity: .7; }
+  .tabernetes-vnc-close:hover { opacity: 1; }
 </style>
 <div class="tabernetes-wrap" id="tabernetes-wrap" hidden>
   <div class="tabernetes-terminal" id="tabernetes" data-wasm="%WASM%" data-worker="%WORKER%" data-size="%SIZE%"></div>
@@ -67,7 +72,8 @@
       label();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && wrap.classList.contains("tabernetes-fs")) { wrap.classList.remove("tabernetes-fs"); label(); }
+      // In the VNC screen, Escape belongs to the remote side (the Doom menu).
+      if (e.key === "Escape" && wrap.classList.contains("tabernetes-fs") && !e.target.closest?.(".tabernetes-vnc")) { wrap.classList.remove("tabernetes-fs"); label(); }
     });
     // The binary is large: download it only on request. #boot in the URL
     // starts it right away.
