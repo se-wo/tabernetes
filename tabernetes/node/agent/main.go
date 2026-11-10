@@ -174,6 +174,7 @@ func main() {
 		if err := runNode(ctx, tok); err != nil {
 			log.Fatal(err)
 		}
+		go t.servePodLinks(ctx)
 	}
 	<-ctx.Done()
 }
@@ -278,6 +279,15 @@ func init() {
 		label := dc.Label()
 		if label == "ctl" {
 			// The browser only opens "ctl" so the offer carries an SCTP section; nothing to do.
+			return
+		}
+		if strings.HasPrefix(label, podLinkLabel+";from=") {
+			// A connection from a tab pod to a pod here (podlink.go).
+			dc.OnOpen(func() {
+				if raw, err := dc.Detach(); err == nil {
+					go servePodLink(dataChannelRW{raw})
+				}
+			})
 			return
 		}
 		target, ok := strings.CutPrefix(label, "kubelet:")
@@ -477,9 +487,12 @@ failCgroupV1: false
 		"--node-ip=" + tok.IP,
 		"--v=1",
 	}
+	// Tab pods reach the pods of this node over pod channels (podlink.go).
+	nodeLabels := []string{podLinkNodeLabel}
 	if wasm {
-		kubeletArgs = append(kubeletArgs, "--node-labels="+wasmNodeLabel)
+		nodeLabels = append(nodeLabels, wasmNodeLabel)
 	}
+	kubeletArgs = append(kubeletArgs, "--node-labels="+strings.Join(nodeLabels, ","))
 	go supervise(ctx, "kubelet", "kubelet", kubeletArgs...)
 	return nil
 }

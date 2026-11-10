@@ -71,4 +71,10 @@ func TestNodeOwns(t *testing.T) {
 			t.Errorf("nodeOwns(%s, %s) = %v, want %v", c.node, c.ip, got, c.want)
 		}
 	}
+	if got := p.nodeOf(net.ParseIP("10.244.1.9")); got != "tab-worker-1" {
+		t.Errorf("nodeOf(10.244.1.9) = %q, want tab-worker-1", got)
+	}
+	if got := p.nodeOf(net.ParseIP("10.244.9.9")); got != "" {
+		t.Errorf("nodeOf(10.244.9.9) = %q, want none", got)
+	}
 }
