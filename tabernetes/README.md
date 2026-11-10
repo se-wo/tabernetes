@@ -233,6 +233,21 @@ kubelet with its service account token. Unlike upstream, the Deployment stays
 on the node `tab`: only its network reaches the kubelets of all nodes. HTTPS
 probes skip the certificate check, like the ones of the kubelet.
 
+A claim binds without a PersistentVolume that you make first. The addon
+`k8s/tabernetes/addons/local-path-storage.yaml` installs
+[rancher/local-path-provisioner](https://github.com/rancher/local-path-provisioner)
+as in k3s: the Deployment `local-path-provisioner` in the namespace
+`local-path-storage`, the StorageClass `local-path` (default,
+`WaitForFirstConsumer`, `Delete`) and `local-path-retain` (`Retain`). Once a pod
+uses the claim, the scheduler picks the node, the provisioner starts a
+`helper-pod-create-pvc-...` there that makes the directory
+`/opt/local-path-provisioner/<pv>_<namespace>_<claim>`, and it creates a
+hostPath volume with node affinity. Deleting the claim removes volume and
+directory. On the tab node and in Web Workers the image is built-in
+(`tabnode_localpath.go`); a Docker node runs the real one. A pod with
+`nodeName` skips the scheduler, so its claim stays `Pending`, as on a real
+cluster; use a `nodeSelector`.
+
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port
