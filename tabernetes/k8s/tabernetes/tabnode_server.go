@@ -54,6 +54,9 @@ func (n *tabNode) serve(ctx context.Context) error {
 		mux.HandleFunc("/"+verb+"/{ns}/{pod}/{ctr}", n.authorized(n.getStream(verb)))
 		mux.HandleFunc("/"+verb+"/{ns}/{pod}/{uid}/{ctr}", n.authorized(n.getStream(verb)))
 	}
+	mux.HandleFunc("GET /stats/summary", n.statsAuthorized("stats", n.getSummary))
+	mux.HandleFunc("GET /stats/summary/", n.statsAuthorized("stats", n.getSummary))
+	mux.HandleFunc("GET /metrics/resource", n.statsAuthorized("metrics", n.getResourceMetrics))
 	mux.HandleFunc("/portForward/{ns}/{pod}", n.authorized(n.getPortForward))
 	mux.HandleFunc("/portForward/{ns}/{pod}/{uid}", n.authorized(n.getPortForward))
 

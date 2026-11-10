@@ -23,7 +23,7 @@ func sh(t *testing.T, script string) (string, int) {
 	handler := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		self = func(ctx context.Context, args []string) error {
 			if u := coreutils[args[0]]; u != nil {
-				return u(ctx, interp.HandlerCtx(ctx), args[1:], self)
+				return sigpipe(u(ctx, interp.HandlerCtx(ctx), args[1:], self))
 			}
 			return next(ctx, args)
 		}
@@ -50,6 +50,10 @@ func sh(t *testing.T, script string) (string, int) {
 func TestCoreutils(t *testing.T) {
 	for _, tc := range []struct{ script, want string }{
 		{"seq 3", "1\n2\n3\n"},
+		{"seq 3 | tr -d '\\n'", "123"},
+		{"echo Hello | tr '[:lower:]' '[:upper:]'", "HELLO\n"},
+		{"echo abcdef | head -c 3", "abc"},
+		{"echo abcdef | cut -c 2-4", "bcd\n"},
 		{"seq 3 | wc -l", "3\n"},
 		{"seq 10 | head -3", "1\n2\n3\n"},
 		{"seq 10 | head -n 2", "1\n2\n"},

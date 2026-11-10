@@ -422,16 +422,6 @@ func lookupImage(ref string) *builtinImage {
 	return &img
 }
 
-// builtinImageNames lists the short names of the built-in images, for messages.
-func builtinImageNames() []string {
-	var names []string
-	for _, d := range imageDefs {
-		names = append(names, d.img.name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 func imageDigest(canonical, tag string) string {
 	sum := sha256.Sum256([]byte("tabernetes builtin image " + canonical + ":" + tag))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -565,7 +555,7 @@ func serveHTTP(ctx context.Context, hc interp.HandlerContext, prog string, h htt
 
 func serveListeners(ctx context.Context, hc interp.HandlerContext, prog string, h http.Handler, lns ...net.Listener) error {
 	srv := &http.Server{
-		Handler:     h,
+		Handler:     chargeRequests(ctx, h),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		ErrorLog:    log.New(io.Discard, "", 0),
 	}
@@ -1087,7 +1077,7 @@ func echoserverProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 // subcommands.
 func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error {
 	if len(args) == 0 {
-		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  connect\n  entrypoint-tester\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
+		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  connect\n  entrypoint-tester\n  grpc-health-checking\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
 		return nil
 	}
 	sub, rest := args[0], args[1:]
@@ -1199,6 +1189,8 @@ func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, e
 		return agnhostNetexec(ctx, hc, fs, rest, exec)
 	case "connect":
 		return agnhostConnect(ctx, hc, fs, rest)
+	case "grpc-health-checking":
+		return agnhostGRPCHealth(ctx, hc, fs, rest, logger)
 	}
 	fmt.Fprintf(hc.Stderr, "Error: unknown command %q for \"agnhost\"\nRun 'agnhost --help' for usage.\n", sub)
 	return interp.ExitStatus(1)
@@ -1417,7 +1409,7 @@ func podinfoProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 	port := fs.String("port", envDef("port", "9898"), "HTTP port")
 	metricsPort := fs.Int("port-metrics", 0, "metrics port")
 	fs.String("host", envDef("host", ""), "host to bind service to")
-	fs.Int("grpc-port", 0, "gRPC port")
+	grpcPort := fs.Int("grpc-port", 0, "gRPC port")
 	fs.String("level", envDef("level", "info"), "log level")
 	fs.Bool("random-delay", false, "between 0 and 5 seconds random delay by default")
 	fs.Bool("random-error", false, "1/3 chances of a random response error")
@@ -1550,6 +1542,14 @@ func podinfoProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 		mux.ServeHTTP(w, r)
 	})
 	zap("Starting podinfo", "version", version, "revision", revision, "port", *port)
+	if *grpcPort > 0 {
+		// podinfo serves grpc.health.v1 next to its own API.
+		if _, err := serveGRPCHealth(ctx, fmt.Sprintf(":%d", *grpcPort), ""); err != nil {
+			fmt.Fprintf(hc.Stderr, "podinfo: listen tcp :%d: %v\n", *grpcPort, unwrap(err))
+			return interp.ExitStatus(1)
+		}
+		zap("Starting gRPC Server.", "addr", fmt.Sprintf(":%d", *grpcPort))
+	}
 	if *metricsPort > 0 {
 		go serveHTTP(ctx, hc, "podinfo", mux, fmt.Sprintf(":%d", *metricsPort))
 		zap("Starting HTTP Server.", "addr", fmt.Sprintf(":%d", *metricsPort))
@@ -1651,9 +1651,9 @@ func hpaExampleProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 	fmt.Fprintf(hc.Stderr, "[%s] [mpm_prefork:notice] [pid 1] AH00163: Apache/2.4.10 (Debian) PHP/5.6.14 configured -- resuming normal operations\n", apacheTime(time.Now().UTC()))
 	logger := newLogger(hc.Stdout, 0)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The real page computes square roots for a while; a short sleep
-		// keeps the tab responsive instead.
-		sleepCtx(r.Context(), 20*time.Millisecond)
+		// The real page computes square roots for a while: 20ms of CPU of
+		// the container, throttled by limits.cpu (tabnode_acct.go).
+		acctFrom(r.Context()).Work(r.Context(), 20*time.Millisecond)
 		w.Header().Set("Server", "Apache/2.4.10 (Debian)")
 		w.Header().Set("X-Powered-By", "PHP/5.6.14")
 		w.Header().Set("Content-Type", "text/html")

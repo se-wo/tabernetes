@@ -110,7 +110,7 @@ function untar(tar, path) {
 // (tabnode_gpu.go), or null.
 function start(workerURL, { module, args, env, preopens, stdin, name, gpu }) {
   const worker = new Worker(workerURL, { name: name ? `wasm ${name}` : "wasm" });
-  const handlers = {}, queued = { stdout: [], stderr: [], exit: [] };
+  const handlers = {}, queued = { stdout: [], stderr: [], exit: [], mem: [] };
   let exited = false;
   const emit = (type, ...a) => (handlers[type] ? handlers[type](...a) : queued[type].push(a));
   const exit = (code, msg) => {
@@ -130,6 +130,7 @@ function start(workerURL, { module, args, env, preopens, stdin, name, gpu }) {
     onStdout: on("stdout"),
     onStderr: on("stderr"),
     onExit: on("exit"),
+    onMem: on("mem"),
     // write(bytes) feeds stdin, write(null) closes it.
     write: (data) => !exited && worker.postMessage({ type: "stdin", data }),
     kill: () => exit(137),
