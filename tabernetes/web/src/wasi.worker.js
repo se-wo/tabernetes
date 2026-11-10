@@ -67,7 +67,109 @@ function tree({ files, dirs, readOnly }) {
   return toMap(root);
 }
 
-async function run({ module, args, env, preopens, stdin: withStdin }) {
+// WebGPU for the module, as the import module "tabernetes_webgpu". It works
+// only when the kubelet prepared a DRA device of webgpu.tabernetes.io for the
+// container (gpu is then {device, pool, ...}, tabnode_gpu.go); otherwise every
+// call fails with an error that says how to get one. The calls wait for the GPU
+// with JSPI, so the module sees plain synchronous functions:
+//
+//   adapter_info(buf, len) -> n   the adapter as JSON; n > len: call again with n bytes
+//   compute(wgsl, wgsl_len, data, data_len, x, y, z) -> 0
+//                                 runs the entry point "main" of the WGSL
+//                                 compute shader over data, bound read-write as
+//                                 @group(0) @binding(0), with x*y*z workgroups,
+//                                 and copies the buffer back into data
+//   last_error(buf, len) -> n     the message of the last call that returned -1
+//
+// This is the small first step of the design in tabernetes/README.md ("WebGPU
+// through DRA"); wasi:webgpu of wasi-gfx needs WASI preview 2 components.
+function webgpuImports(gpu, mem) {
+  let lastError = "";
+  let device = null;
+  const fail = (msg) => { lastError = String(msg); return -1; };
+  const bytes = (ptr, len) => new Uint8Array(mem(), ptr, len);
+  const put = (ptr, len, s) => {
+    const b = new TextEncoder().encode(s);
+    if (b.length <= len) bytes(ptr, b.length).set(b);
+    return b.length;
+  };
+  const noDevice = "no WebGPU device is allocated to this container: request one with a ResourceClaim of the " +
+    "DeviceClass webgpu.tabernetes.io and list it in resources.claims of the container";
+  const getDevice = async () => {
+    if (device) return device;
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: "high-performance" });
+    if (!adapter) throw new Error("the browser has no WebGPU adapter (any more)");
+    device = await adapter.requestDevice({
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      },
+    });
+    device.lost.then((info) => { device = null; lastError = `the GPU device was lost: ${info.message}`; });
+    return device;
+  };
+  return {
+    adapter_info(ptr, len) {
+      if (!gpu) return fail(noDevice);
+      return put(ptr, len, JSON.stringify(gpu));
+    },
+    last_error(ptr, len) { return put(ptr, len, lastError); },
+    // Without a device or JSPI the answer is synchronous: a promise would
+    // reach the module as 0.
+    compute(codePtr, codeLen, dataPtr, dataLen, x, y, z) {
+      if (!gpu) return fail(noDevice);
+      if (!jspi) return fail("WebGPU calls need JavaScript Promise Integration (WebAssembly.Suspending), which this browser lacks");
+      return computeAsync(codePtr, codeLen, dataPtr, dataLen, x, y, z);
+    },
+  };
+  async function computeAsync(codePtr, codeLen, dataPtr, dataLen, x, y, z) {
+    try {
+      const code = new TextDecoder().decode(bytes(codePtr, codeLen));
+      const input = bytes(dataPtr, dataLen).slice(); // memory may grow while the GPU works
+      const dev = await getDevice();
+      const module = dev.createShaderModule({ code });
+      let pipeline;
+      try {
+        pipeline = await dev.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
+      } catch (e) {
+        const info = await module.getCompilationInfo();
+        const msgs = info.messages.map((m) => `${m.lineNum}:${m.linePos}: ${m.type}: ${m.message}`);
+        throw new Error(msgs.length ? `WGSL: ${msgs.join("; ")}` : e.message);
+      }
+      const size = Math.max(4, Math.ceil(dataLen / 4) * 4);
+      const storage = dev.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      const readback = dev.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      try {
+        const padded = new Uint8Array(size);
+        padded.set(input);
+        dev.queue.writeBuffer(storage, 0, padded);
+        const bind = dev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: storage } }] });
+        const enc = dev.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bind);
+        pass.dispatchWorkgroups(x >>> 0, y >>> 0, z >>> 0);
+        pass.end();
+        enc.copyBufferToBuffer(storage, 0, readback, 0, size);
+        dev.pushErrorScope("validation");
+        dev.queue.submit([enc.finish()]);
+        const err = await dev.popErrorScope();
+        if (err) throw new Error(err.message);
+        await readback.mapAsync(GPUMapMode.READ);
+        bytes(dataPtr, dataLen).set(new Uint8Array(readback.getMappedRange(), 0, dataLen));
+        readback.unmap();
+      } finally {
+        storage.destroy();
+        readback.destroy();
+      }
+      return 0;
+    } catch (e) {
+      return fail(e?.message ?? e);
+    }
+  }
+}
+
+async function run({ module, args, env, preopens, stdin: withStdin, gpu }) {
   stdin.closed = !withStdin;
   // Not transferred: the shim counts the bytes written after the call.
   const out = (type) => new ConsoleStdout((data) => postMessage({ type, data }));
@@ -88,6 +190,7 @@ async function run({ module, args, env, preopens, stdin: withStdin }) {
   funcs.poll_oneoff = (inPtr, outPtr, nsubs, neventsPtr) => poll(mem, w.fds, inPtr, outPtr, nsubs, neventsPtr);
 
   const imports = {};
+  let gpuFuncs = null;
   for (const imp of WebAssembly.Module.imports(module)) {
     const ns = (imports[imp.module] ??= {});
     if (imp.kind !== "function") throw new Error(`the module imports ${imp.kind} ${imp.module}.${imp.name}: threads and other imports are not supported in the browser`);
@@ -95,6 +198,11 @@ async function run({ module, args, env, preopens, stdin: withStdin }) {
       let fn = funcs[imp.name] ?? (() => wasi.ERRNO_NOSYS);
       if (jspi && (imp.name === "fd_read" || imp.name === "poll_oneoff")) fn = new WebAssembly.Suspending(fn);
       ns[imp.name] = fn;
+    } else if (imp.module === "tabernetes_webgpu") {
+      gpuFuncs ??= webgpuImports(gpu, mem);
+      const fn = gpuFuncs[imp.name];
+      if (!fn) ns[imp.name] = () => { throw new Error(`tabernetes_webgpu.${imp.name} does not exist`); };
+      else ns[imp.name] = jspi && imp.name === "compute" ? new WebAssembly.Suspending(fn) : fn;
     } else {
       ns[imp.name] = () => { throw new Error(`${imp.module}.${imp.name} is not available in the browser`); };
     }

@@ -143,6 +143,7 @@ func (c *ctr) prepare() error {
 	if err != nil {
 		return err
 	}
+	env = append(env, deviceEnv(c.w.containerDevices(c.spec.Name))...)
 	vars := map[string]string{}
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
