@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -45,7 +46,8 @@ func TestParseFlannelSubnet(t *testing.T) {
 //	  --setuid 0 --setgid 0 --propagation private go test -run Netns .
 //
 // As root without user namespaces, "unshare -nm --propagation private" does.
-// It needs ip, nft, python3 and TPROXY and nft_socket in the kernel.
+// It needs ip, nft, python3 and TPROXY, nft_socket and br_netfilter in the
+// kernel.
 func TestPodLinkNetns(t *testing.T) {
 	if os.Getenv("TABERNETES_NETNS_TEST") == "" {
 		t.Skip("set TABERNETES_NETNS_TEST=1 and run in unshare, see above")
@@ -56,10 +58,13 @@ func TestPodLinkNetns(t *testing.T) {
 			t.Fatalf("%s: %v\n%s", cmd, err, out)
 		}
 	}
-	// The node: cni0 to a pod 10.244.1.5 of this node, a default route
-	// elsewhere (eth0). A tab pod is 10.244.0.7.
-	sh("mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up")
-	sh("ip link add cni0 type veth peer name eth0p && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up")
+	// The node: the bridge cni0 with a pod 10.244.1.5 behind it, as the
+	// bridge plugin of CNI builds it, and a default route elsewhere (eth0).
+	// A tab pod is 10.244.0.7. With bridge-nf-call-iptables the packets of
+	// the pod pass prerouting inside the bridge, where TPROXY does not work.
+	sh("mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up && sysctl -qw net.ipv4.ip_forward=1")
+	sh("ip link add cni0 type bridge && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up")
+	sh("ip link add veth0 type veth peer name eth0p && ip link set veth0 master cni0 && ip link set veth0 up")
 	sh("ip link add eth0 type veth peer name eth0up && ip addr add 192.168.65.3/24 dev eth0 && ip link set eth0 up && ip link set eth0up up && ip route add default via 192.168.65.1")
 	sh("ip netns add pod && ip link set eth0p netns pod")
 	sh("ip netns exec pod sh -c 'ip link set lo up; ip addr add 10.244.1.5/24 dev eth0p; ip link set eth0p up; ip route add default via 10.244.1.1'")
@@ -67,6 +72,13 @@ func TestPodLinkNetns(t *testing.T) {
 	if err := nft(podLinkRules(false)); err != nil {
 		t.Fatal(err)
 	}
+	if err := setupPodLinkNet(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile("/proc/sys/net/bridge/bridge-nf-call-iptables"); strings.TrimSpace(string(b)) != "1" {
+		t.Fatal("no bridge-nf-call-iptables: the test would not see what a node does")
+	}
+	// A second time, as after a restart of the agent.
 	if err := setupPodLinkNet(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,5 +170,42 @@ func TestPodLinkNetns(t *testing.T) {
 		if !errors.Is(err, syscall.ECONNREFUSED) {
 			t.Fatalf("dial %d to a closed port: %v, want refused", i, err)
 		}
+	}
+}
+
+// messages is a detached data channel: a read takes one whole message and
+// fails when the buffer is smaller.
+type messages struct {
+	io.Writer
+	io.Closer
+	msgs [][]byte
+}
+
+func (m *messages) Read(p []byte) (int, error) {
+	if len(m.msgs) == 0 {
+		return 0, io.EOF
+	}
+	msg := m.msgs[0]
+	if len(p) < len(msg) {
+		return 0, io.ErrShortBuffer
+	}
+	m.msgs = m.msgs[1:]
+	return copy(p, msg), nil
+}
+
+// The header line and the bytes after it, read from messages.
+func TestDCStream(t *testing.T) {
+	raw := &messages{msgs: [][]byte{[]byte("TABP/1 tcp 10.244.0.3:0 10.244.1.5:80\nGET"), []byte(" / HTTP/1.1\r\n")}}
+	if _, err := readPodLinkLine(raw, 256); !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("a data channel read byte by byte: %v, want a short buffer", err)
+	}
+	s := newDCStream(raw)
+	line, err := readPodLinkLine(s, 256)
+	if err != nil || line != "TABP/1 tcp 10.244.0.3:0 10.244.1.5:80" {
+		t.Fatalf("header = %q, %v", line, err)
+	}
+	rest, err := io.ReadAll(s)
+	if err != nil || string(rest) != "GET / HTTP/1.1\r\n" {
+		t.Errorf("rest = %q, %v", rest, err)
 	}
 }
