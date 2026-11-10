@@ -21,6 +21,7 @@ func main() {
 	dir := flag.String("read", "/config", "print the files of this directory if it exists")
 	stdin := flag.Bool("stdin", false, "echo stdin until it ends")
 	code := flag.Int("exit", 0, "exit code")
+	grow := flag.Int("grow", 0, "MiB to allocate and touch per tick, and hold")
 	flag.Parse()
 
 	host, _ := os.Hostname()
@@ -63,8 +64,18 @@ func main() {
 		}
 	}
 	start := time.Now()
+	var held [][]byte
 	for i := 1; *ticks < 0 || i <= *ticks; i++ {
 		time.Sleep(*interval)
+		if *grow > 0 {
+			b := make([]byte, *grow<<20)
+			for j := 0; j < len(b); j += 4096 {
+				b[j] = 1
+			}
+			held = append(held, b)
+			fmt.Printf("tick %d: holding %d MiB\n", i, len(held)**grow)
+			continue
+		}
 		fmt.Printf("tick %d after %s\n", i, time.Since(start).Round(10*time.Millisecond))
 	}
 	if *code != 0 {

@@ -43,6 +43,10 @@ type ctr struct {
 	launched  bool          // an ephemeral container that was started
 	started   chan struct{} // closed when the container started the first time
 	didStart  bool
+	newImage  chan struct{} // the image changed while the container waits for it (tabnode_pull.go)
+
+	specRestart bool // killed for a new image: restart at once (tabnode_pull.go)
+	reprepare   bool // the image changed: prepare again before the next run
 
 	// set by prepare
 	image *builtinImage
@@ -128,6 +132,9 @@ func (c *ctr) status() v1.ContainerStatus {
 	if !c.init && !c.ephemeral {
 		cs.Started = ptr.To(c.state.Running != nil && c.startupOK)
 	}
+	if c.id == "" {
+		cs.ImageID = "" // never created, like a pull that failed
+	}
 	return cs
 }
 
@@ -185,26 +192,18 @@ func (c *ctr) runOnce() (code int, ok bool) {
 	if ctx.Err() != nil {
 		return 0, false
 	}
-	c.w.mu.Lock()
-	argv, wasm, img, restarts := c.argv, c.wasm, c.image, c.restarts
-	c.w.mu.Unlock()
-
-	if !wasm && len(argv) == 0 {
-		msg := fmt.Sprintf("image %q has no implementation in the browser tab, and the container has no command. Built in: %s. Give it a command (it runs in a POSIX shell), use runtimeClassName: wasmtime for a WebAssembly image, or join a Docker node.", c.spec.Image, strings.Join(builtinImageNames(), ", "))
-		c.setWaiting("UnsupportedImage", msg)
-		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: %s", msg)
-		<-ctx.Done()
+	if !c.applyNewImage() {
 		return 0, false
 	}
-	if restarts == 0 {
-		switch {
-		case wasm:
-			c.w.ctrEvent(c, v1.EventTypeNormal, "Pulling", "Pulling image %q", c.spec.Image)
-		case img != nil && img.name != "":
-			c.w.ctrEvent(c, v1.EventTypeNormal, "Pulled", "Container image %q already present on machine (built into the browser tab)", c.spec.Image)
-		default:
-			c.w.ctrEvent(c, v1.EventTypeNormal, "Pulled", "Container image %q already present on machine (runs its command in the shell of the tab)", c.spec.Image)
-		}
+	c.w.mu.Lock()
+	wasm, restarts := c.wasm, c.restarts
+	c.w.mu.Unlock()
+
+	if restarts == 0 && wasm {
+		c.w.ctrEvent(c, v1.EventTypeNormal, "Pulling", "Pulling image %q", c.spec.Image)
+	}
+	if !wasm && !c.pullImage(ctx) {
+		return 0, false
 	}
 
 	logs := newLogBuf()
@@ -250,6 +249,7 @@ func (c *ctr) runOnce() (code int, ok bool) {
 	c.proc = proc
 	c.runStart = time.Now()
 	c.w.mu.Unlock()
+	go c.watchTmpfs(runCtx, proc)
 
 	// Like the kubelet, the container counts as running only once its
 	// postStart hook returned. A hook that fails kills the run.
@@ -283,10 +283,7 @@ func (c *ctr) runOnce() (code int, ok bool) {
 		// with the tab only, but the container counts as stopped.
 	}
 	code = proc.exitCode()
-	reason := "Completed"
-	if code != 0 {
-		reason = "Error"
-	}
+	reason := terminatedReason(code, proc.oom.Load())
 	msg := proc.killReason()
 	c.w.mu.Lock()
 	c.proc = nil
@@ -338,6 +335,7 @@ type process struct {
 	reason   atomic.Value // why it was killed
 	killed   atomic.Bool
 	stopping atomic.Bool // a stop (preStop hook, kill) is under way
+	oom      atomic.Bool // killed for passing limits.memory (tabnode_oom.go)
 }
 
 func newProcess(cancel context.CancelFunc) *process {
@@ -383,7 +381,7 @@ func (c *ctr) startNative(ctx context.Context, logs *logBuf) (*process, error) {
 	_, ip := c.w.podInfo()
 	ctx, cancel := context.WithCancel(ctx)
 	p := newProcess(cancel)
-	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources)}
+	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources), proc: p}
 	var stdin io.Reader = strings.NewReader("")
 	if c.stdin != nil {
 		stdin = c.stdin.reader(ctx)
@@ -434,6 +432,18 @@ func (r *rootFS) real(p string) string {
 	return r.base + p
 }
 
+// readOnlyVolume reports whether the kubelet mounts the volume read-only,
+// whatever the mount says: configMap, secret, downwardAPI and projected.
+func readOnlyVolume(pod *v1.Pod, name string) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == name {
+			s := v.VolumeSource
+			return s.ConfigMap != nil || s.Secret != nil || s.DownwardAPI != nil || s.Projected != nil
+		}
+	}
+	return false
+}
+
 // rootFS builds the file system of a container: the files of its image, a
 // few files every container has, and its volume mounts.
 func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
@@ -479,7 +489,7 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 				real = r
 			}
 		}
-		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly})
+		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly || readOnlyVolume(pod, m.Name)})
 	}
 	// longest first, so /a/b wins over /a
 	for i := 1; i < len(root.mounts); i++ {

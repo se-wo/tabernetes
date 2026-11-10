@@ -167,12 +167,14 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 		return fmt.Errorf("kubelet server: %w", err)
 	}
 	go n.heartbeat(ctx)
+	go n.sampleStats(ctx)
 	// The WebGPU adapter of the browser as a DRA device (tabnode_gpu.go).
 	// Nothing of the node waits for the probe.
 	go n.syncGPU(ctx)
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
+	go n.handoverCoreDNS(ctx) // tabnode_coredns.go
 	// CRDs do not speak protobuf: a client of its own for them.
 	npa, err := npaclient.NewForConfig(adminCfg)
 	if err != nil {

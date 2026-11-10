@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -156,13 +157,27 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 		}
 		return nil
 	case p.GRPC != nil:
-		return nil // no gRPC health client in the tab; counts as healthy
+		service := ""
+		if p.GRPC.Service != nil {
+			service = *p.GRPC.Service
+		}
+		timeout := time.Second
+		if dl, ok := ctx.Deadline(); ok {
+			timeout = time.Until(dl)
+		}
+		return grpcProbe(ip, service, int(p.GRPC.Port), timeout)
 	}
 	return nil
 }
 
+// HTTPS probes do not verify the certificate, like the kubelet's: pods serve
+// self-signed ones (metrics-server).
 var probeClient = &http.Client{
-	Transport:     &http.Transport{DialContext: (&net.Dialer{}).DialContext, DisableKeepAlives: true},
+	Transport: &http.Transport{
+		DialContext:       (&net.Dialer{}).DialContext,
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
