@@ -156,7 +156,15 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 		}
 		return nil
 	case p.GRPC != nil:
-		return nil // no gRPC health client in the tab; counts as healthy
+		service := ""
+		if p.GRPC.Service != nil {
+			service = *p.GRPC.Service
+		}
+		timeout := time.Second
+		if dl, ok := ctx.Deadline(); ok {
+			timeout = time.Until(dl)
+		}
+		return grpcProbe(ip, service, int(p.GRPC.Port), timeout)
 	}
 	return nil
 }

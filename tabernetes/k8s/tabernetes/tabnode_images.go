@@ -1087,7 +1087,7 @@ func echoserverProg(ctx context.Context, hc interp.HandlerContext, _ []string, _
 // subcommands.
 func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error {
 	if len(args) == 0 {
-		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  connect\n  entrypoint-tester\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
+		fmt.Fprintln(hc.Stderr, "Usage:\n  agnhost [command]\n\nAvailable Commands:\n  connect\n  entrypoint-tester\n  grpc-health-checking\n  liveness\n  logs-generator\n  netexec\n  pause\n  porter\n  serve-hostname\n  test-webserver\n\nUse \"agnhost [command] --help\" for more information about a command.")
 		return nil
 	}
 	sub, rest := args[0], args[1:]
@@ -1199,6 +1199,8 @@ func agnhostProg(ctx context.Context, hc interp.HandlerContext, args []string, e
 		return agnhostNetexec(ctx, hc, fs, rest, exec)
 	case "connect":
 		return agnhostConnect(ctx, hc, fs, rest)
+	case "grpc-health-checking":
+		return agnhostGRPCHealth(ctx, hc, fs, rest, logger)
 	}
 	fmt.Fprintf(hc.Stderr, "Error: unknown command %q for \"agnhost\"\nRun 'agnhost --help' for usage.\n", sub)
 	return interp.ExitStatus(1)
@@ -1417,7 +1419,7 @@ func podinfoProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 	port := fs.String("port", envDef("port", "9898"), "HTTP port")
 	metricsPort := fs.Int("port-metrics", 0, "metrics port")
 	fs.String("host", envDef("host", ""), "host to bind service to")
-	fs.Int("grpc-port", 0, "gRPC port")
+	grpcPort := fs.Int("grpc-port", 0, "gRPC port")
 	fs.String("level", envDef("level", "info"), "log level")
 	fs.Bool("random-delay", false, "between 0 and 5 seconds random delay by default")
 	fs.Bool("random-error", false, "1/3 chances of a random response error")
@@ -1550,6 +1552,14 @@ func podinfoProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 		mux.ServeHTTP(w, r)
 	})
 	zap("Starting podinfo", "version", version, "revision", revision, "port", *port)
+	if *grpcPort > 0 {
+		// podinfo serves grpc.health.v1 next to its own API.
+		if _, err := serveGRPCHealth(ctx, fmt.Sprintf(":%d", *grpcPort), ""); err != nil {
+			fmt.Fprintf(hc.Stderr, "podinfo: listen tcp :%d: %v\n", *grpcPort, unwrap(err))
+			return interp.ExitStatus(1)
+		}
+		zap("Starting gRPC Server.", "addr", fmt.Sprintf(":%d", *grpcPort))
+	}
 	if *metricsPort > 0 {
 		go serveHTTP(ctx, hc, "podinfo", mux, fmt.Sprintf(":%d", *metricsPort))
 		zap("Starting HTTP Server.", "addr", fmt.Sprintf(":%d", *metricsPort))
