@@ -294,8 +294,16 @@ func (s *serviceProxy) endpointFor(addr string) (e endpoint, ok bool, err error)
 }
 
 // dialEndpoint connects to an endpoint: on this node directly, from src if
-// it is set, on other nodes through the apiserver.
+// it is set, to a pod IP of another node over a pod channel (podlink.go)
+// with src or the node IP as the source, else through the apiserver.
 func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint, src *net.TCPAddr) (io.ReadWriteCloser, error) {
+	if e.remote && theTabNode.podLinkTarget(e.node, e.ip) {
+		from := src
+		if from == nil {
+			from = &net.TCPAddr{IP: net.ParseIP(tabNodeIP)}
+		}
+		return dialPodLink(ctx, e.node, from, &net.TCPAddr{IP: net.ParseIP(e.ip), Port: int(e.port)})
+	}
 	if e.remote {
 		if e.pod == nil {
 			return nil, fmt.Errorf("endpoint %s on node %s is not a pod, it cannot be reached from the tab", e.ip, e.node)

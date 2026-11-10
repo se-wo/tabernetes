@@ -21,19 +21,30 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/kube-network-policies/pkg/api"
 	"sigs.k8s.io/kube-network-policies/pkg/network"
 	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
 	"sigs.k8s.io/kube-network-policies/pkg/podinfo"
+	npav1alpha2 "sigs.k8s.io/kube-network-policies/plugins/npa-v1alpha2"
+	npapi "sigs.k8s.io/network-policy-api/apis/v1alpha2"
+	npaclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
+	npainformers "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions"
 )
 
 // netPolicy decides whether a connection may open.
 type netPolicy struct {
 	engine   *networkpolicy.PolicyEngine
 	provider api.PodInfoProvider
+	nodes    corelisters.NodeLister
 
 	mu       sync.Mutex
 	admitted map[admitKey]*admission
+
+	// Strict mode (tabnode_netpol_strict.go).
+	liveMu sync.Mutex
+	live   map[*liveConn]struct{}
+	kick   chan struct{}
 }
 
 // admitKey is a connection that a dial has decided already: the source IP
@@ -53,9 +64,15 @@ const admitTTL = 30 * time.Second
 const synTimeout = 127 * time.Second
 
 // newNetPolicy starts the informers of the engine: all pods, namespaces,
-// nodes and NetworkPolicies of the cluster. Pods of other nodes are needed
-// to know the source of a connection.
-func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName string) (*netPolicy, error) {
+// nodes, NetworkPolicies and ClusterNetworkPolicies of the cluster. Pods of
+// other nodes are needed to know the source of a connection.
+//
+// The evaluators run in the order of upstream's npa-v1alpha2 build:
+// ClusterNetworkPolicies of the Admin tier, NetworkPolicies, then the
+// Baseline tier. Rules on domain names never match: the tab has no DNS
+// traffic to learn the addresses from (egress to the internet goes through
+// fetch(), without an IP).
+func newNetPolicy(ctx context.Context, client kubernetes.Interface, npa npaclient.Interface, nodeName string) (*netPolicy, error) {
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 0,
 		// The cache keeps every pod of the cluster: drop what the engine
 		// never reads.
@@ -79,12 +96,24 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName str
 		return nil, err
 	}
 	standard := networkpolicy.NewStandardNetworkPolicy(nodeName, namespaces, pods, policies)
-	p := &netPolicy{
-		engine:   networkpolicy.NewPolicyEngine(provider, []api.PolicyEvaluator{standard}),
-		provider: provider,
-		admitted: map[admitKey]*admission{},
+	npaFactory := npainformers.NewSharedInformerFactory(npa, 0)
+	cnps := npaFactory.Policy().V1alpha2().ClusterNetworkPolicies()
+	evaluators := []api.PolicyEvaluator{
+		npav1alpha2.NewClusterNetworkPolicy(npapi.AdminTier, cnps, nil, nodes.Lister()),
+		standard,
+		npav1alpha2.NewClusterNetworkPolicy(npapi.BaselineTier, cnps, nil, nodes.Lister()),
 	}
+	p := &netPolicy{
+		engine:   networkpolicy.NewPolicyEngine(provider, evaluators),
+		provider: provider,
+		nodes:    nodes.Lister(),
+		admitted: map[admitKey]*admission{},
+		live:     map[*liveConn]struct{}{},
+		kick:     make(chan struct{}, 1),
+	}
+	p.watchChanges(ctx, pods.Informer(), namespaces.Informer(), policies.Informer(), cnps.Informer())
 	factory.Start(ctx.Done())
+	npaFactory.Start(ctx.Done())
 	return p, nil
 }
 
@@ -193,6 +222,7 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 			// A pod IP of another node: through the apiserver.
 			if pod := n.policy.podByIP(ep.ip); pod != nil {
 				ep.remote = true
+				ep.node = pod.GetNode().GetName()
 				ep.pod = &v1.ObjectReference{Kind: "Pod", Namespace: pod.GetNamespace().GetName(), Name: pod.GetName()}
 			}
 		}
@@ -200,16 +230,24 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 	if !n.policy.allowed(ctx, src, dst) {
 		return nil, dropped(ctx, dst)
 	}
-	n.policy.admit(src.IP, dst)
+	if !ep.remote {
+		// The listener of a pod on this node does not decide again.
+		n.policy.admit(src.IP, dst)
+	}
 	c, err := n.net.dialEndpoint(ctx, ep, src)
 	if err != nil {
+		if !ep.remote {
+			// No connection reached the listener: nothing took the admission.
+			n.policy.consume(src.IP, dst)
+		}
 		return nil, err
 	}
-	if conn, ok := c.(net.Conn); ok {
-		return conn, nil
+	conn, ok := c.(net.Conn)
+	if !ok {
+		// A pod on another node, through the apiserver's port-forward.
+		conn = &streamConn{ReadWriteCloser: c, local: src, remote: dst}
 	}
-	// A pod on another node, through the apiserver's port-forward.
-	return &streamConn{ReadWriteCloser: c, local: src, remote: dst}, nil
+	return n.policy.track(conn, src, dst), nil
 }
 
 // dropped waits like a client whose SYN is dropped: until its context ends,
@@ -247,7 +285,11 @@ func (l *policyListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l.n.admitIngress(c) {
+		switch ok, decided := l.n.admitIngress(c); {
+		case ok && decided:
+			src, dst := c.RemoteAddr().(*net.TCPAddr), c.LocalAddr().(*net.TCPAddr)
+			return l.n.policy.track(c, src, dst), nil
+		case ok:
 			return c, nil
 		}
 		c.Close()
@@ -256,19 +298,21 @@ func (l *policyListener) Accept() (net.Conn, error) {
 
 // admitIngress allows the host of the node (loopback, the node IP), the pod
 // itself, connections a dial has decided, and what the policy allows.
-func (n *tabNode) admitIngress(c net.Conn) bool {
+// decided is true when the policy decided here; such a connection is
+// tracked for strict mode.
+func (n *tabNode) admitIngress(c net.Conn) (ok, decided bool) {
 	src, ok1 := c.RemoteAddr().(*net.TCPAddr)
 	dst, ok2 := c.LocalAddr().(*net.TCPAddr)
 	if !ok1 || !ok2 {
-		return true
+		return true, false
 	}
 	switch {
 	case src.IP.IsLoopback(), src.IP.Equal(net.ParseIP(tabNodeIP)), src.IP.Equal(dst.IP):
-		return true
+		return true, false
 	case n.policy.consume(src.IP, dst):
-		return true
+		return true, false
 	}
-	return n.policy.allowed(context.Background(), src, dst)
+	return n.policy.allowed(context.Background(), src, dst), true
 }
 
 // streamConn is a byte stream to a pod on another node as a net.Conn. It has

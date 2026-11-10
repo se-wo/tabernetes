@@ -1,9 +1,12 @@
 # NetworkPolicy on Tabernetes nodes
 
-Status: design. Nothing of it is implemented yet. The proofs of concept in
+Status: phases 1 to 6 are implemented, see "Implementation" at the end.
+Phase 0 (nfqueue in a rootless Docker node) and the end-to-end runs of phase 7 need
+a Docker node and are still open. The proofs of concept in
 `networking-policy-poc/` answer the open questions that code could settle.
 
-Today a NetworkPolicy is stored and nothing enforces it. This design makes
+Before this work a NetworkPolicy was stored and nothing enforced it. This
+design makes
 the nodes enforce it with the decision engine of
 [kube-network-policies](https://github.com/kubernetes-sigs/kube-network-policies),
 the NetworkPolicy implementation of SIG Network. The engine is the same Go
@@ -505,3 +508,98 @@ Each phase is one small PR.
 - **The agent deciding with its own engine for tab traffic**: would duplicate
   the DaemonSet and need cluster-wide read credentials on every Docker node;
   the transparent helper lets the kernel rules decide.
+
+## Implementation
+
+| Phase | Pull request | Tested |
+| --- | --- | --- |
+| 1 engine in the binary | #10 | build |
+| 2 tab node hooks, `agnhost connect` | #12 | unit tests, browser |
+| 3 pod channel between tab nodes | #13 | unit tests, browser with `addnode 2` |
+| 4 Docker nodes | #14, #18 | agent tests in a network namespace with a bridge; a joined Docker node (below) |
+| 5 ClusterNetworkPolicy | #15 | unit tests, browser |
+| 6 strict mode | #16 | unit tests, browser regression |
+
+"Browser" means the built page in headless Chromium, with scripts in the
+terminal that create pods and policies and probe with `agnhost connect`.
+
+Where the code differs from the design above:
+
+- Pod channels between two Web Workers go through the Go of the page, not
+  over a MessageChannel the page hands to both workers. Simpler, and the
+  page checks every header it relays.
+- The page checks the header of every channel it relays against the sending
+  node, and `pod:*` lets it pick the node by destination. A Docker node has
+  no informers; it trusts the page, which opens all its channels.
+- The agent does not start a helper process for H7: it creates the socket
+  on a thread whose file system uid is 65534 for that moment. The kernel
+  takes the owner of a socket from there, and `meta skuid` sees it.
+- The agent does not catch connections to tab pods with a TPROXY rule on
+  the packets of the pods. A pod's packet enters through the bridge `cni0`,
+  and with `bridge-nf-call-iptables` prerouting runs inside the bridge,
+  before the IP layer takes the packet and drops the socket that TPROXY
+  gave it: the SYN got no answer. The agent routes 10.244.0.0/16 into a
+  veth pair instead (`tabpods0` to `tabpods1`). The routes of flannel are
+  more specific, so the route takes what is left, the pod CIDRs of the tab
+  nodes, and needs no set of them. The TPROXY rule sits on `tabpods1`,
+  where prerouting runs in the IP layer.
+- On the way into the veth pair the packet passes the node like any
+  forwarded packet: the DNAT of kube-proxy (a cluster IP is the pod IP of a
+  tab pod by then) and the postrouting chain of kube-network-policies,
+  with the real destination. What arrives at `tabpods1` is not tracked by
+  conntrack a second time; after DNAT the second entry would collide with
+  the first.
+- A second rule (`socket transparent 1`) delivers the answers to transparent
+  dials whose source is outside the pod network: host traffic of a tab node
+  in a Web Worker, which comes from its node IP.
+- The agent reads a pod channel through a buffer. A detached data channel
+  gives whole messages and fails a read into a smaller buffer, so the
+  header line cannot be read byte by byte from it.
+- The agent makes `/run/netns` a shared mount. The DaemonSet mounts it with
+  `mountPropagation: HostToContainer`, and the kubelet refuses that on a
+  private mount, which the root of the node container is.
+- An endpoint that is not in the pod CIDR of its node (a hostNetwork pod)
+  keeps the port-forward of the apiserver: no pod channel serves a node IP.
+- A Docker pod whose connection a tab node denies sees it open, then end:
+  TPROXY answers the SYN before the tab node decides.
+- Strict mode closes a connection that a policy change denies. On a real
+  node its next packets are dropped.
+- The DaemonSet uses the newest upstream image, v1.1.2-npa-v1alpha2; the
+  tab nodes run the engine of v1.1.3.
+
+### Tested with a Docker node
+
+The page in headless Chromium, a node from `join` in Docker on the same
+machine, `addnode 1`, and pods on all three nodes:
+
+- tab pod and worker pod to a Docker pod and its Service: open, with the
+  pod IP as the source; a closed port is refused;
+- the terminal and a hostNetwork pod of the worker to a Service of a Docker
+  pod: open, with the node IP as the source;
+- Docker pod to a tab pod, a worker pod and their Services (cluster IP and
+  name): open; a closed port is reset;
+- an ingress policy on a tab pod: a Docker pod it does not select gets no
+  answer, one it selects gets through;
+- an egress policy on a tab pod, and an ingress policy on a Docker pod:
+  the tab pod times out;
+- a Service whose endpoint is a hostNetwork pod of the Docker node: open.
+
+Not tested: the DaemonSet deciding on the Docker node (traffic between two
+Docker pods, and the egress of a Docker pod). The kernel of the test
+machine has no `nft_queue`, so kube-network-policies started, failed to
+bind its queue and exited. Pod traffic went on, as its rules never loaded.
+
+### Running the end-to-end tests
+
+The NetworkPolicy end-to-end tests of Kubernetes need a driver outside the browser:
+
+1. `join` a Docker node and `kubectl cordon` it, so the test pods land on
+   `tab` and the workers (`addnode 2`).
+2. Copy `kubectl config view --raw` into the node container. It reaches the
+   apiserver at 127.0.0.1:6443.
+3. In the container, with `e2e.test` of the same Kubernetes version:
+   `e2e.test --kubeconfig <file> --provider=skeleton
+   --ginkgo.focus='\[sig-network\] Netpol' --ginkgo.skip='SCTP|UDP'`.
+4. Uncordon the node for mixed runs.
+
+Expected failures are listed in "Proof that it is real".
