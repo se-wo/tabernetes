@@ -266,7 +266,7 @@ func (n *tabNode) servePodLinkHeader(conn io.ReadWriteCloser, from, line string)
 		conn.Close()
 		return
 	}
-	go pipeConns(conn, c)
+	go pipeConns(conn, n.policy.track(c, src, dst))
 }
 
 // podLinkTarget is the node of the pod with IP ip if that node takes pod

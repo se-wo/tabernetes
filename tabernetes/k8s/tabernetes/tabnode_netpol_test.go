@@ -226,3 +226,55 @@ func TestFakeNetSourceAddress(t *testing.T) {
 		t.Errorf("dial without listener: %v, want ECONNREFUSED", err)
 	}
 }
+
+// TestStrictMode: a policy that denies an open connection closes it.
+func TestStrictMode(t *testing.T) {
+	client := fake.NewClientset(
+		&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", Labels: map[string]string{"kubernetes.io/metadata.name": "default"}}},
+		testPod("web", "10.244.0.2", "tab", map[string]string{"app": "web"}),
+		testPod("client", "10.244.0.3", "tab", map[string]string{"role": "client"}),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := readyNetPolicy(ctx, t, client, npafake.NewSimpleClientset())
+	src, dst := tcpAddr("10.244.0.3:40000"), tcpAddr("10.244.0.2:80")
+	if !p.allowed(ctx, src, dst) {
+		t.Fatal("no policy yet: must be allowed")
+	}
+	a, b := net.Pipe()
+	defer b.Close()
+	tracked := p.track(a, src, dst)
+	// Host traffic and connections the policy still allows stay open.
+	keepA, keepB := net.Pipe()
+	defer keepB.Close()
+	kept := p.track(keepA, tcpAddr("10.244.0.2:40001"), tcpAddr("10.244.0.3:80"))
+	defer kept.Close()
+
+	deny := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "deny-web", Namespace: "default"},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		},
+	}
+	if _, err := client.NetworkingV1().NetworkPolicies("default").Create(ctx, deny, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() {
+		_, err := b.Read(make([]byte, 1))
+		closed <- err
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the denied connection is still open")
+	}
+	p.liveMu.Lock()
+	n := len(p.live)
+	p.liveMu.Unlock()
+	if n != 1 {
+		t.Errorf("%d tracked connections, want 1 (the allowed one)", n)
+	}
+	tracked.Close()
+}

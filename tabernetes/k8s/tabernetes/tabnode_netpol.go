@@ -40,6 +40,11 @@ type netPolicy struct {
 
 	mu       sync.Mutex
 	admitted map[admitKey]*admission
+
+	// Strict mode (tabnode_netpol_strict.go).
+	liveMu sync.Mutex
+	live   map[*liveConn]struct{}
+	kick   chan struct{}
 }
 
 // admitKey is a connection that a dial has decided already: the source IP
@@ -103,7 +108,10 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, npa npaclien
 		provider: provider,
 		nodes:    nodes.Lister(),
 		admitted: map[admitKey]*admission{},
+		live:     map[*liveConn]struct{}{},
+		kick:     make(chan struct{}, 1),
 	}
+	p.watchChanges(ctx, pods.Informer(), namespaces.Informer(), policies.Informer(), cnps.Informer())
 	factory.Start(ctx.Done())
 	npaFactory.Start(ctx.Done())
 	return p, nil
@@ -227,11 +235,12 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 	if err != nil {
 		return nil, err
 	}
-	if conn, ok := c.(net.Conn); ok {
-		return conn, nil
+	conn, ok := c.(net.Conn)
+	if !ok {
+		// A pod on another node, through the apiserver's port-forward.
+		conn = &streamConn{ReadWriteCloser: c, local: src, remote: dst}
 	}
-	// A pod on another node, through the apiserver's port-forward.
-	return &streamConn{ReadWriteCloser: c, local: src, remote: dst}, nil
+	return n.policy.track(conn, src, dst), nil
 }
 
 // dropped waits like a client whose SYN is dropped: until its context ends,
@@ -269,7 +278,11 @@ func (l *policyListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l.n.admitIngress(c) {
+		switch ok, decided := l.n.admitIngress(c); {
+		case ok && decided:
+			src, dst := c.RemoteAddr().(*net.TCPAddr), c.LocalAddr().(*net.TCPAddr)
+			return l.n.policy.track(c, src, dst), nil
+		case ok:
 			return c, nil
 		}
 		c.Close()
@@ -278,19 +291,21 @@ func (l *policyListener) Accept() (net.Conn, error) {
 
 // admitIngress allows the host of the node (loopback, the node IP), the pod
 // itself, connections a dial has decided, and what the policy allows.
-func (n *tabNode) admitIngress(c net.Conn) bool {
+// decided is true when the policy decided here; such a connection is
+// tracked for strict mode.
+func (n *tabNode) admitIngress(c net.Conn) (ok, decided bool) {
 	src, ok1 := c.RemoteAddr().(*net.TCPAddr)
 	dst, ok2 := c.LocalAddr().(*net.TCPAddr)
 	if !ok1 || !ok2 {
-		return true
+		return true, false
 	}
 	switch {
 	case src.IP.IsLoopback(), src.IP.Equal(net.ParseIP(tabNodeIP)), src.IP.Equal(dst.IP):
-		return true
+		return true, false
 	case n.policy.consume(src.IP, dst):
-		return true
+		return true, false
 	}
-	return n.policy.allowed(context.Background(), src, dst)
+	return n.policy.allowed(context.Background(), src, dst), true
 }
 
 // streamConn is a byte stream to a pod on another node as a net.Conn. It has
