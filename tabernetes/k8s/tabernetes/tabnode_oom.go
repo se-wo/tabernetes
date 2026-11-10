@@ -69,14 +69,20 @@ func (c *ctr) watchTmpfs(ctx context.Context, p *process) {
 	if len(dirs) == 0 {
 		return
 	}
+	sum := func() (n int64) {
+		for _, d := range dirs {
+			n += dirSize(d)
+		}
+		return n
+	}
+	// Like the page cache of a real node, the files count for the cgroup
+	// that wrote them: what an earlier run of the container left in the
+	// volume does not count for this one.
+	before := sum()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
-		var sum int64
-		for _, d := range dirs {
-			sum += dirSize(d)
-		}
-		c.chargeMem(p, "tmpfs", sum)
+		c.chargeMem(p, "tmpfs", sum()-before)
 		select {
 		case <-ctx.Done():
 			return

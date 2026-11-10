@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -270,5 +272,51 @@ func TestStressUsage(t *testing.T) {
 	<-p.done
 	if p.exitCode() != 0 || !strings.Contains(out.String(), "Usage: stress [OPTION [ARG]]") {
 		t.Errorf("exit=%d output %q", p.exitCode(), out.String())
+	}
+}
+
+// Files in an emptyDir with medium: Memory count, but only what the run
+// wrote: what an earlier run left there does not.
+func TestWatchTmpfs(t *testing.T) {
+	spec := v1.Container{Name: "app", VolumeMounts: []v1.VolumeMount{{Name: "cache", MountPath: "/cache"}}}
+	spec.Resources.Limits = v1.ResourceList{v1.ResourceMemory: resource.MustParse("32Mi")}
+	w := testWorker(t, v1.PodSpec{
+		Containers: []v1.Container{spec},
+		Volumes:    []v1.Volume{{Name: "cache", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{Medium: v1.StorageMediumMemory}}}},
+	})
+	dir, _ := w.volumeDir("cache")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	// left by an earlier run
+	if err := os.WriteFile(filepath.Join(dir, "old"), make([]byte, 30<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newCtr(w, spec, false, false)
+	c.id = "tabernetes://" + t.Name()
+	t.Cleanup(func() { forgetAcct(c) })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p := newProcess(cancel)
+	base := acctOf(c).WorkingSet()
+	go c.watchTmpfs(ctx, p)
+	time.Sleep(200 * time.Millisecond)
+	if p.oom.Load() || acctOf(c).WorkingSet() != base {
+		t.Fatalf("the files of an earlier run count: working set %d, base %d", acctOf(c).WorkingSet(), base)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new"), make([]byte, 8<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if got := acctOf(c).WorkingSet(); got != base+8<<20 || p.oom.Load() {
+		t.Fatalf("working set = %d, want %d, oom=%v", got, base+8<<20, p.oom.Load())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big"), make([]byte, 30<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if !p.oom.Load() {
+		t.Fatal("not killed above the limit")
 	}
 }
