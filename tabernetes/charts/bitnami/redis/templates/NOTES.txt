@@ -1,0 +1,21 @@
+CHART NAME: {{ .Chart.Name }}
+CHART VERSION: {{ .Chart.Version }}
+APP VERSION: {{ .Chart.AppVersion }}
+
+** Please be patient while the chart is being deployed **
+
+Redis(R) can be accessed on the following DNS name from within your cluster:
+
+    {{ include "redis.fullname" . }}-master.{{ .Release.Namespace }}.svc.cluster.local for read/write operations (port {{ .Values.master.service.ports.redis }})
+{{- if .Values.auth.enabled }}
+
+To get your password run:
+
+    export REDIS_PASSWORD=$(kubectl get secret --namespace {{ .Release.Namespace }} {{ include "redis.secretName" . }} -o jsonpath="{.data.{{ include "redis.secretPasswordKey" . }}}" | base64 -d)
+{{- end }}
+
+To connect to your Redis(R) server:
+
+    kubectl run --namespace {{ .Release.Namespace }} redis-client --restart='Never' {{ if .Values.auth.enabled }}--env REDIS_PASSWORD=$REDIS_PASSWORD {{ end }}--image {{ include "redis.image" . }} --command -- sleep infinity
+    kubectl exec --tty -i redis-client --namespace {{ .Release.Namespace }} -- bash
+    {{ if .Values.auth.enabled }}REDISCLI_AUTH="$REDIS_PASSWORD" {{ end }}redis-cli -h {{ include "redis.fullname" . }}-master

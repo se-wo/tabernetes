@@ -14,4 +14,10 @@ LD="-s -w"
 for pkg in k8s.io/component-base/version k8s.io/client-go/pkg/version; do
 	LD="$LD -X $pkg.gitVersion=$V -X $pkg.gitMajor=$MAJOR -X $pkg.gitMinor=$MINOR -X $pkg.gitCommit=$COMMIT -X $pkg.gitTreeState=clean -X $pkg.buildDate=$DATE"
 done
+# helm version: the version patch.go vendored.
+HELM=$(sed -n 's|^# helm.sh/helm/v4 \(v[^ ]*\)$|\1|p' vendor/modules.txt)
+[ -n "$HELM" ] || { echo "build.sh: helm.sh/helm/v4 is not in vendor/modules.txt" >&2; exit 1; }
+LD="$LD -X helm.sh/helm/v4/internal/version.version=$HELM -X helm.sh/helm/v4/internal/version.gitTreeState=clean"
+# The Kubernetes version of "helm template": client-go v0.37.2 is Kubernetes v1.37.2.
+case "$V" in v1.*) LD="$LD -X helm.sh/helm/v4/internal/version.clientGoVersion=v0.${V#v1.}" ;; esac
 GOOS=js GOARCH=wasm go build -trimpath -ldflags="$LD" -o "$OUT" ./cmd/tabernetes

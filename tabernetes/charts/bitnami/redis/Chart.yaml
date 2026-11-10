@@ -1,0 +1,17 @@
+apiVersion: v2
+name: redis
+version: 23.2.0
+appVersion: 8.2.2
+description: Redis(R) is an open source, advanced key-value store. It is often referred to as a data structure server since keys can contain strings, hashes, lists, sets and sorted sets. A small chart in the style of Bitnami's for Tabernetes (standalone only).
+type: application
+keywords:
+  - redis
+  - keyvalue
+  - database
+home: https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/redis
+icon: https://redis.io/wp-content/uploads/2024/04/Logotype.svg
+maintainers:
+  - name: Tabernetes
+    url: https://github.com/se-wo/tabernetes
+sources:
+  - https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/redis
