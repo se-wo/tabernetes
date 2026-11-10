@@ -1,0 +1,94 @@
+# A small chart with the values of Bitnami's apache chart that tutorials use.
+# Tabernetes runs the official httpd image (docker.io/library/httpd).
+
+## @param nameOverride String to partially override apache.fullname
+nameOverride: ""
+## @param fullnameOverride String to fully override apache.fullname
+fullnameOverride: ""
+## @param commonLabels Labels to add to all deployed objects
+commonLabels: {}
+## @param commonAnnotations Annotations to add to all deployed objects
+commonAnnotations: {}
+
+## Apache image
+image:
+  registry: docker.io
+  repository: library/httpd
+  tag: 2.4.65
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+## @param replicaCount Number of Apache replicas to deploy
+replicaCount: 1
+## @param revisionHistoryLimit The number of old history to retain to allow rollback
+revisionHistoryLimit: 10
+## @param updateStrategy.type Apache deployment strategy type
+updateStrategy:
+  type: RollingUpdate
+
+## @param containerPorts.http Port of the Apache container (the "Listen" of the httpd.conf of the image)
+containerPorts:
+  http: 80
+
+## @param extraEnvVars Array with extra environment variables to add to the Apache container
+## e.g:
+## extraEnvVars:
+##   - name: FOO
+##     value: "bar"
+extraEnvVars: []
+
+## @param podLabels Extra labels for Apache pods
+podLabels: {}
+## @param podAnnotations Annotations for Apache pods
+podAnnotations: {}
+## @param nodeSelector Node labels for pod assignment
+nodeSelector: {}
+## @param tolerations Tolerations for pod assignment
+tolerations: []
+## @param affinity Affinity for pod assignment
+affinity: {}
+
+## @param resources Set container requests and limits for different resources like CPU or memory
+## e.g:
+## resources:
+##   requests:
+##     cpu: 100m
+##     memory: 128Mi
+##   limits:
+##     cpu: 250m
+##     memory: 256Mi
+resources: {}
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+service:
+  ## @param service.type Service type: LoadBalancer, NodePort or ClusterIP
+  type: LoadBalancer
+  ports:
+    ## @param service.ports.http Service HTTP port
+    http: 80
+  ## @param service.nodePorts.http Node port for HTTP (NodePort and LoadBalancer; empty: one is chosen)
+  nodePorts:
+    http: ""
+  ## @param service.clusterIP Service Cluster IP
+  clusterIP: ""
+  ## @param service.loadBalancerIP LoadBalancer service IP address
+  loadBalancerIP: ""
+  ## @param service.externalTrafficPolicy Service external traffic policy
+  externalTrafficPolicy: Cluster
+  ## @param service.annotations Service annotations
+  annotations: {}

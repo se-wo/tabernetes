@@ -945,7 +945,7 @@ func whichCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ in
 		switch {
 		case pod && shells[n]:
 			fmt.Fprintf(hc.Stdout, "/bin/%s\n", n)
-		case coreutils[n] != nil, n == "kubectl", n == "k",
+		case coreutils[n] != nil, n == "kubectl", n == "k", !pod && n == "helm",
 			pod && (podTools[n] != nil || imagePrograms[n] != nil):
 			fmt.Fprintf(hc.Stdout, "/usr/bin/%s\n", n)
 		default:

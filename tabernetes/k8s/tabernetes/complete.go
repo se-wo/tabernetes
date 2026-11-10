@@ -15,7 +15,7 @@ import (
 )
 
 // Tab completion for the terminal: command names, file names, and for
-// kubectl whatever its cobra "__complete" command offers (resource types,
+// kubectl and helm whatever their cobra "__complete" command offers (resource types,
 // names from the cluster, flags).
 
 // cobra's ShellCompDirective bits.
@@ -49,7 +49,9 @@ func (s *shell) complete(line string, builtins []string) completion {
 	case len(words) == 1 && !strings.Contains(word, "/"):
 		c.items = commandNames(word, builtins)
 	case words[0] == "kubectl" || words[0] == "k":
-		return s.completeKubectl(words[1:])
+		return s.completeCobra(runKubectl, words[1:])
+	case words[0] == "helm":
+		return s.completeCobra(helmComplete, words[1:])
 	default:
 		c.items, c.noSpace = s.completeFile(word, nil, false)
 	}
@@ -57,7 +59,7 @@ func (s *shell) complete(line string, builtins []string) completion {
 }
 
 func commandNames(prefix string, builtins []string) []string {
-	names := append([]string{"kubectl", "k", "doom"}, builtins...)
+	names := append([]string{"kubectl", "k", "helm", "doom"}, builtins...)
 	for name := range coreutils {
 		names = append(names, name)
 	}
@@ -76,15 +78,15 @@ func commandNames(prefix string, builtins []string) []string {
 	return slices.Compact(out)
 }
 
-// completeKubectl asks kubectl itself, like the bash completion of kubectl
+// completeCobra asks kubectl or helm itself, like their bash completion
 // does. args ends with the word under the cursor.
-func (s *shell) completeKubectl(args []string) completion {
+func (s *shell) completeCobra(run func(context.Context, []string, io.Reader, io.Writer, io.Writer) int, args []string) completion {
 	word := args[len(args)-1]
 	c := completion{word: word}
 	ctx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 	defer cancel()
 	var out bytes.Buffer
-	runKubectl(ctx, append([]string{"__complete"}, args...), nil, &out, io.Discard)
+	run(ctx, append([]string{"__complete"}, args...), nil, &out, io.Discard)
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	directive := 0

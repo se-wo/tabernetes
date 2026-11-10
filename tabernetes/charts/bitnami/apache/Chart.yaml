@@ -1,0 +1,20 @@
+apiVersion: v2
+name: apache
+version: 11.4.0
+appVersion: 2.4.65
+description: Apache HTTP Server is an open-source HTTP server. A small chart in the style of Bitnami's for Tabernetes.
+type: application
+keywords:
+  - apache
+  - http
+  - https
+  - www
+  - web
+  - httpd
+home: https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/apache
+icon: https://httpd.apache.org/images/httpd_logo_wide_new.png
+maintainers:
+  - name: Tabernetes
+    url: https://github.com/se-wo/tabernetes
+sources:
+  - https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/apache
