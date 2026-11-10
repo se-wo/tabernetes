@@ -430,6 +430,12 @@ func (w *podWorker) buildStatus() v1.PodStatus {
 		HostIP:   tabNodeIP,
 		HostIPs:  []v1.HostIP{{IP: tabNodeIP}},
 		QOSClass: pod.Status.QOSClass,
+		// The resourceclaim controller and the scheduler own these. A kubelet
+		// keeps them as they are, and NodeRestriction refuses a status update
+		// that changes them.
+		ResourceClaimStatuses:                pod.Status.ResourceClaimStatuses,
+		ExtendedResourceClaimStatus:          pod.Status.ExtendedResourceClaimStatus,
+		NodeAllocatableResourceClaimStatuses: pod.Status.NodeAllocatableResourceClaimStatuses,
 	}
 	start := metav1.NewTime(w.started.Truncate(time.Second))
 	st.StartTime = &start

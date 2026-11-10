@@ -236,3 +236,24 @@ func TestHTTPGetRequest(t *testing.T) {
 		}
 	}
 }
+
+// The status of the tab node keeps the claim statuses that the resourceclaim
+// controller and the scheduler wrote: NodeRestriction refuses an update by a
+// node that changes them.
+func TestStatusKeepsClaimStatuses(t *testing.T) {
+	w := testWorker(t, v1.PodSpec{Containers: []v1.Container{{Name: "app"}}})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pod.Status.ResourceClaimStatuses = []v1.PodResourceClaimStatus{{Name: "gpu", ResourceClaimName: ptr.To("p-gpu-abcde")}}
+	w.pod.Status.ExtendedResourceClaimStatus = &v1.PodExtendedResourceClaimStatus{
+		ResourceClaimName: "p-extended-resources-abcde",
+		RequestMappings:   []v1.ContainerExtendedResourceRequest{{ContainerName: "app", ResourceName: "tabernetes.io/webgpu", RequestName: "container-0-request-0"}},
+	}
+	st := w.buildStatus()
+	if len(st.ResourceClaimStatuses) != 1 || ptr.Deref(st.ResourceClaimStatuses[0].ResourceClaimName, "") != "p-gpu-abcde" {
+		t.Errorf("resourceClaimStatuses = %+v, want the one of the pod", st.ResourceClaimStatuses)
+	}
+	if st.ExtendedResourceClaimStatus == nil || st.ExtendedResourceClaimStatus.ResourceClaimName != "p-extended-resources-abcde" {
+		t.Errorf("extendedResourceClaimStatus = %+v, want the one of the pod", st.ExtendedResourceClaimStatus)
+	}
+}

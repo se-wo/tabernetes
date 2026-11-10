@@ -98,7 +98,6 @@ export function joinBuiltins({ image, stun = "stun:stun.l.google.com:19302", sta
       }
       const pc = new RTCPeerConnection({ iceServers: stun ? [{ urls: stun }] : [] });
       pc.createDataChannel("ctl");
-      pc.ondatachannel = (e) => globalThis.tabernetes.attachChannel(e.channel);
       const open = (label) => new Promise((resolve, reject) => {
         const dc = pc.createDataChannel(label);
         const t = setTimeout(() => reject(new Error("data channel timeout")), 15000);
@@ -106,6 +105,8 @@ export function joinBuiltins({ image, stun = "stun:stun.l.google.com:19302", sta
         dc.onerror = (e) => { clearTimeout(t); reject(e.error || new Error("data channel error")); };
       });
       const info = await globalThis.tabernetes.prepareJoin(open);
+      // Channels the node opens; the page names the node (pod channels trust it).
+      pc.ondatachannel = (e) => globalThis.tabernetes.attachChannel(e.channel, info.name);
       await pc.setLocalDescription(await pc.createOffer());
       await gatheringComplete(pc, 3000);
       if (!active()) { pc.close(); return; } // Ctrl-C while preparing

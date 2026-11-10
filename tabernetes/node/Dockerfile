@@ -103,7 +103,7 @@ FROM ${BASE_IMAGE}
 # only while building, not in the image
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables mount util-linux \
+ && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables mount nftables util-linux \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=download /out/ /
 COPY --from=passt /out/ /
