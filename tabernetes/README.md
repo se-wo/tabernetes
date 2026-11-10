@@ -185,6 +185,16 @@ memory of the node comes from the Go runtime. The endpoints take a client
 certificate of the cluster CA or a bearer token that the apiserver allows to
 get `nodes/stats` or `nodes/metrics`.
 
+The addon metrics-server (`addons/metrics-server.yaml`, the manifest of the
+upstream release) serves `metrics.k8s.io`, so `kubectl top` and
+HorizontalPodAutoscalers work. The image is a built-in image
+(`tabnode_images_metrics.go`, `metricsserver*.go`): an extension apiserver of
+`k8s.io/apiserver` behind the aggregator, with delegated authentication and
+authorization. Every 15 seconds it scrapes `/metrics/resource` of every
+kubelet with its service account token. Unlike upstream, the Deployment stays
+on the node `tab`: only its network reaches the kubelets of all nodes. HTTPS
+probes skip the certificate check, like the ones of the kubelet.
+
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port
