@@ -188,6 +188,168 @@ Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
 with `limits.cpu` below 500m).
 
+### WebGPU through DRA
+
+The kubelets in the browser offer the WebGPU adapter of the browser to
+WebAssembly pods as a device of the DRA driver `webgpu.tabernetes.io`
+([Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/),
+`resource.k8s.io/v1`). The tab node always offers it. A node in a Web Worker
+offers it when you start it with `addnode --gpu`.
+
+```console
+$ k get resourceslices
+NAME                  NODE           DRIVER                 POOL           AGE
+tab-webgpu            tab            webgpu.tabernetes.io   tab            53s
+tab-worker-1-webgpu   tab-worker-1   webgpu.tabernetes.io   tab-worker-1   25s
+```
+
+A pod asks for the GPU with a claim and lists the claim in the container that
+uses it:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: webgpu
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: webgpu.tabernetes.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mandelbrot
+spec:
+  runtimeClassName: wasmtime
+  restartPolicy: Never
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: webgpu
+  containers:
+  - name: mandelbrot
+    image: ghcr.io/se-wo/tabernetes/wasi-webgpu:latest
+    resources:
+      claims:
+      - name: gpu
+```
+
+`k logs mandelbrot` shows the adapter, a kernel whose 65,536 results are
+checked against the CPU, and the Mandelbrot set computed on the GPU.
+`resources.limits: {tabernetes.io/webgpu: 1}` works, too: the DeviceClass has
+`extendedResourceName`, so the scheduler creates the claim. Where no node has
+WebGPU, the pod stays `Pending` with `cannot allocate all claims`.
+
+How it works (`k8s/tabernetes/tabnode_gpu.go`, `web/src/gpu.js`,
+`web/src/wasi.worker.js`, `k8s/tabernetes/addons/webgpu.yaml`):
+
+1. **Detection.** `gpu.js` calls `navigator.gpu.requestAdapter()` in the tab,
+   or in the worker of the node; Chrome and Edge offer WebGPU in dedicated
+   workers. The kubelet probes at its start and again with every node status
+   update, once a minute. These adapter fields become device attributes:
+   `vendor` and `architecture` (from `adapter.info`, always set), plus
+   `device` and `description` when the browser fills them. Chrome often
+   leaves them empty. Also published:
+   - `fallback` for a software adapter such as SwiftShader;
+   - `shaderF16`, `subgroups` and `timestampQuery` for those features;
+   - the limits `maxBufferSize`, `maxStorageBufferBindingSize`,
+     `maxComputeWorkgroupStorageSize`, `maxComputeInvocations`
+     (maxComputeInvocationsPerWorkgroup; attribute names have at most 32
+     characters) and `maxComputeWorkgroupsPerDimension`;
+   - `wasmJSPI`, whether WebAssembly can wait for the GPU;
+   - `browser` and `type: webgpu`.
+
+   A request selects on them with CEL, for example
+   `device.attributes["webgpu.tabernetes.io"].maxBufferSize >= 1073741824` or
+   `!device.attributes["webgpu.tabernetes.io"].fallback`. WebGPU has no
+   attribute for the GPU memory, so there is no memory capacity.
+2. **Publishing.** The addons install the DeviceClass `webgpu.tabernetes.io`.
+   Its selector is `device.driver == "webgpu.tabernetes.io"`. Each node writes
+   one ResourceSlice `<node>-webgpu`: the pool is the node, the slice is owned
+   by the Node, and there is one device `gpu-0`. A real DRA kubelet plugin
+   sends its slices to the kubelet over gRPC. Here the kubelet is the driver
+   and writes the slice itself as `system:node:<name>`, and the Node
+   authorizer and NodeRestriction allow a node its own slices. When the
+   adapter goes away, the slice goes, too. The build needs no patch for
+   this. `resource.k8s.io/v1` is in `stableAPIGroupVersionsEnabledByDefault`
+   of kube-apiserver, the feature gate `DynamicResourceAllocation` is GA and
+   locked on, and the scheduler adds the `DynamicResources` plugin to its
+   default profile. The `resourceclaim` controller of the controller-manager
+   (`--controllers=*`) creates claims from templates and writes
+   `status.resourceClaimStatuses` of the pod.
+3. **Allocation and preparation.** The scheduler allocates and binds. Before
+   anything of the pod starts, the tab kubelet reads the claims of the pod;
+   this is `PrepareDynamicResources` of the kubelet. They must be allocated
+   and reserved for the pod, and their results must be devices of this
+   node's pool. Otherwise the pod waits with the event
+   `FailedPrepareDynamicResources`. The device goes only to containers that
+   list the claim in `resources.claims`, or that the extended resource
+   mapping names:
+   - their WebAssembly worker gets the `tabernetes_webgpu` imports;
+   - they get `TABERNETES_WEBGPU_DEVICE=webgpu.tabernetes.io/<node>/gpu-0`,
+     which is what a CDI spec would add;
+   - their status gets `allocatedResourcesStatus`
+     (`claim:<name>[/<request>]`, `Healthy` while the adapter is there,
+     `Unhealthy` after it is gone). This is the beta gate
+     `ResourceHealthStatus`.
+
+   The claim gets `status.devices`, a `Ready` condition with the adapter as
+   `data`. The Node authorizer lets a node only read claims, and a real driver
+   writes this with a service account of its own; here the admin credentials
+   of the tab stand in for it. **Sharing:** the browser shares the GPU between
+   all tabs and workers anyway, so the device has
+   `allowMultipleAllocations: true`. That needs the gate
+   `DRAConsumableCapacity`, beta and on in 1.37. The capacity `shares` is 8.
+   A claim takes 1 by default, and one that wants the GPU alone asks for all
+   of it with `capacity.requests.shares: "8"`. That pod waits until the other
+   claims are gone, and later ones wait for it. Shares are a scheduling budget,
+   not isolation: all pods of a tab share the memory of the GPU.
+4. **Workload API.** We implemented a host import module, `tabernetes_webgpu`
+   in `wasi.worker.js`. Its functions are `adapter_info`, `last_error`, and
+   `compute(wgsl, data, x, y, z)`, which runs the entry point `main` of a
+   WGSL compute shader over a read-write storage buffer. It waits for the GPU
+   with JavaScript Promise Integration, so a WASI preview 1 module, such as a
+   Go program with `//go:wasmimport` (`wasm-images/webgpu`), sees plain
+   synchronous calls. We set aside two other options:
+   - `wasi:webgpu` of [wasi-gfx](https://github.com/WebAssembly/wasi-gfx) is
+     the standard to aim for, but it is a component-model interface, and the
+     tab runs only preview 1 modules. It needs a preview 2 path first, for
+     example components transpiled with jco.
+   - A built-in image runtime like upstream's `webllm:<model>` gives the
+     biggest demo, but it is no WASI workload and adds WebLLM to the bundle.
+     It fits as a next step that asks for a claim of the same class instead
+     of the extended resource `tabernetes.dev/webgpu`.
+5. **GPU tabs.** All nodes of one tab use the same physical GPU. If every
+   worker published it, the cluster would count the GPU several times, so
+   only the tab offers it by default and `addnode --gpu` adds more on
+   purpose. A pod there runs WebGPU in a worker of the node worker. Upstream's
+   "every tab is a node" (control plane in a SharedWorker, `tabs.go`,
+   `web/src/cluster.js`, not merged) composes with this: the probe belongs to
+   the kubelet, not to the control plane. Every tab node would publish its
+   own slice from the tab, and the SharedWorker needs no WebGPU. The slices
+   are owned by their Node, so a closed tab takes its device with it.
+6. **Docker nodes.** An existing DRA driver, such as the NVIDIA one
+   (`gpu.nvidia.com`), publishes its own driver name. A single claim can
+   still fit both kinds of node with `firstAvailable` (prioritized list, GA
+   in 1.37) over `webgpu.tabernetes.io` and the class of that driver. The
+   workload is the harder part: on a Docker node, runwasi's wasmtime has no
+   `tabernetes_webgpu`, and wasi-gfx needs a wasmtime with `wasi:webgpu`. So
+   one manifest needs one image that runs on both, and that comes only with
+   `wasi:webgpu` on both sides. The node container would also need
+   `docker run --gpus` and the driver in the node image. With
+   `extendedResourceName`, a device plugin that announces
+   `tabernetes.io/webgpu` on a Docker node would serve the same
+   `resources.limits` there.
+
+Limits of the prototype: the software adapter of a headless Chrome
+(`--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) is published like
+a real one, with `fallback: true`. Firefox and Safari have no JSPI or no
+WebGPU in workers in some versions; `wasmJSPI` and a missing slice show that.
+A lost device is noticed at the next probe, within a minute.
+
 ## Patches
 
 `k8s/patch.go` patches a Kubernetes checkout. It is plain Go, so it works the
