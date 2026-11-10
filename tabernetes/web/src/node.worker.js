@@ -8,6 +8,7 @@ import { installFS } from "./fs.js";
 import { patchWalltime } from "./clock.js";
 import { portChannel, openChannel } from "./channel.js";
 import { installWasi } from "./wasi.js";
+import { installGPU } from "./gpu.js";
 
 const early = []; // channels that arrive before Go is up
 
@@ -34,6 +35,8 @@ async function start({ module, config, wasi }) {
   });
   // WebAssembly pods of this node run in workers of this worker.
   if (wasi) installWasi(wasi);
+  // addnode --gpu: this node probes WebGPU in the worker (config.gpu).
+  installGPU();
   globalThis.tabernetesNodeConfig = config;
   globalThis.tabernetesOpen = (label) => Promise.resolve(openChannel(self, label));
   const go = new globalThis.Go();
