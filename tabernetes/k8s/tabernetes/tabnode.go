@@ -25,6 +25,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -248,7 +249,26 @@ func (n *tabNode) nodeLabels() map[string]string {
 	}
 }
 
+// register creates the Node and writes its first status. A failure may be
+// transient (the apiserver is busy while several nodes start), and a node
+// that gives up stays NotReady for good, so it tries for two minutes.
 func (n *tabNode) register(ctx context.Context) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for wait := 500 * time.Millisecond; ; wait = min(2*wait, 5*time.Second) {
+		err := n.registerOnce(ctx)
+		if err == nil || ctx.Err() != nil || time.Now().After(deadline) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "tab node: registering node %s: %v; trying again\n", tabNodeName, err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (n *tabNode) registerOnce(ctx context.Context) error {
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: tabNodeName, Labels: n.nodeLabels()},
 		Spec:       v1.NodeSpec{Taints: tabNodeTaints(n.static != nil)},
@@ -332,11 +352,27 @@ func browserInfo() (ua string, cpus int, memGiB int) {
 	return ua, cpus, memGiB
 }
 
+// updateStatus writes the node status as a patch of the status fields the
+// kubelet owns, like the kubelet does. An update of the whole object would
+// also carry the spec as it was read: when the node lifecycle controller
+// adds a taint in between, NodeRestriction sees the node remove that taint
+// and refuses the write ("not allowed to modify taints").
 func (n *tabNode) updateStatus(ctx context.Context) error {
 	node, err := n.client.CoreV1().Nodes().Get(ctx, tabNodeName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
+	patch, err := json.Marshal(map[string]any{"status": n.nodeStatus(node.Status.Conditions)})
+	if err != nil {
+		return err
+	}
+	_, err = n.client.CoreV1().Nodes().Patch(ctx, tabNodeName, types.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
+	return err
+}
+
+// nodeStatus is the status this kubelet reports. old are the conditions of
+// the node as it is, for their transition times.
+func (n *tabNode) nodeStatus(old []v1.NodeCondition) v1.NodeStatus {
 	_, cpus, mem := browserInfo()
 	now := metav1.Now()
 	capacity := v1.ResourceList{
@@ -347,30 +383,30 @@ func (n *tabNode) updateStatus(ctx context.Context) error {
 	}
 	cond := func(t v1.NodeConditionType, s v1.ConditionStatus, reason, msg string) v1.NodeCondition {
 		c := v1.NodeCondition{Type: t, Status: s, Reason: reason, Message: msg, LastHeartbeatTime: now, LastTransitionTime: now}
-		for _, old := range node.Status.Conditions {
-			if old.Type == t && old.Status == s {
-				c.LastTransitionTime = old.LastTransitionTime
+		for _, o := range old {
+			if o.Type == t && o.Status == s {
+				c.LastTransitionTime = o.LastTransitionTime
 			}
 		}
 		return c
 	}
-	node.Status.Capacity = capacity
-	node.Status.Allocatable = capacity
-	node.Status.Conditions = []v1.NodeCondition{
-		cond(v1.NodeMemoryPressure, v1.ConditionFalse, "KubeletHasSufficientMemory", "kubelet has sufficient memory available"),
-		cond(v1.NodeDiskPressure, v1.ConditionFalse, "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
-		cond(v1.NodePIDPressure, v1.ConditionFalse, "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
-		cond(v1.NodeReady, v1.ConditionTrue, "KubeletReady", "kubelet is posting ready status"),
+	return v1.NodeStatus{
+		Capacity:    capacity,
+		Allocatable: capacity,
+		Conditions: []v1.NodeCondition{
+			cond(v1.NodeMemoryPressure, v1.ConditionFalse, "KubeletHasSufficientMemory", "kubelet has sufficient memory available"),
+			cond(v1.NodeDiskPressure, v1.ConditionFalse, "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
+			cond(v1.NodePIDPressure, v1.ConditionFalse, "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
+			cond(v1.NodeReady, v1.ConditionTrue, "KubeletReady", "kubelet is posting ready status"),
+		},
+		Addresses: []v1.NodeAddress{
+			{Type: v1.NodeInternalIP, Address: tabNodeIP},
+			{Type: v1.NodeHostName, Address: tabNodeName},
+		},
+		DaemonEndpoints: v1.NodeDaemonEndpoints{KubeletEndpoint: v1.DaemonEndpoint{Port: kubeletPort}},
+		NodeInfo:        tabNodeInfo(),
+		Images:          append(builtinImageList(), n.static.images()...),
 	}
-	node.Status.Addresses = []v1.NodeAddress{
-		{Type: v1.NodeInternalIP, Address: tabNodeIP},
-		{Type: v1.NodeHostName, Address: tabNodeName},
-	}
-	node.Status.DaemonEndpoints.KubeletEndpoint.Port = kubeletPort
-	node.Status.NodeInfo = tabNodeInfo()
-	node.Status.Images = append(builtinImageList(), n.static.images()...)
-	_, err = n.client.CoreV1().Nodes().UpdateStatus(ctx, node, metav1.UpdateOptions{})
-	return err
 }
 
 // heartbeat renews the node lease every 10 seconds and the node status every
