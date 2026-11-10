@@ -141,6 +141,12 @@ func boot() (*cluster, error) {
 		"--service-account-signing-key-file=" + p("sa.key"),
 		"--token-auth-file=" + p("tokens.csv"),
 		"--authorization-mode=Node,RBAC",
+		// The Node authorizer lets every kubelet write Nodes, Leases,
+		// ResourceSlices and pod status; NodeRestriction limits each one to
+		// its own. NodeRestriction is not one of the apiserver's default
+		// plugins: without it, a joined node could change other nodes, for
+		// example drop their taints or publish devices on their behalf.
+		"--enable-admission-plugins=NodeRestriction",
 		"--enable-bootstrap-token-auth=true",
 		"--allow-privileged=true",
 		// Priority and fairness protects a shared apiserver from noisy
@@ -274,10 +280,15 @@ func main() {
 		status = func(s string) { cb.Invoke(s) }
 	}
 
-	// attachChannel(dc) for channels the other side opens: a Docker node
-	// agent (RTCDataChannel) or a node in a Web Worker (web/src/channel.js).
+	// attachChannel(dc, node?) for channels the other side opens: a Docker
+	// node agent (RTCDataChannel) or a node in a Web Worker
+	// (web/src/channel.js). The page names the node they come from.
 	api.Set("attachChannel", js.FuncOf(func(this js.Value, a []js.Value) any {
-		attachChannel(a[0])
+		from := ""
+		if len(a) > 1 && a[1].Type() == js.TypeString {
+			from = a[1].String()
+		}
+		attachChannel(a[0], from)
 		return nil
 	}))
 	// In a Web Worker this instance is a node, not a cluster (nodeworker.go).

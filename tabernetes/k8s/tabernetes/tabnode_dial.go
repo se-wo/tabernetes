@@ -21,7 +21,8 @@ func listenPod(ctx context.Context, addr string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pe := procOf(ctx); pe != nil {
+	pe := procOf(ctx)
+	if pe != nil {
 		switch host {
 		case "", "0.0.0.0", "::", "[::]", "localhost", "127.0.0.1", "::1":
 			host = pe.ip
@@ -32,19 +33,31 @@ func listenPod(ctx context.Context, addr string) (net.Listener, error) {
 		return nil, err
 	}
 	context.AfterFunc(ctx, func() { ln.Close() })
+	if pe != nil && pe.ip != tabNodeIP && theTabNode != nil {
+		// NetworkPolicy for ingress (tabnode_netpol.go). hostNetwork pods
+		// share the node IP; no policy selects them.
+		ln = &policyListener{Listener: ln, n: theTabNode}
+	}
 	return ln, nil
 }
 
 // dialCluster dials from a pod or the terminal into the cluster: localhost
 // is the pod (or 127.0.0.1 in the terminal), names of services resolve to
-// their cluster IP, which the service proxy (tabnode_net.go) serves.
+// their cluster IP, which the service proxy (tabnode_net.go) serves. A pod
+// dials from its pod IP, and NetworkPolicy decides before the connection
+// exists (tabnode_netpol.go). The terminal, the kubelet and hostNetwork pods
+// are the host of the node: no policy.
 func dialCluster(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
 	host = clusterHost(ctx, host)
-	return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	addr = net.JoinHostPort(host, port)
+	if pe := procOf(ctx); pe != nil && pe.ip != "" && pe.ip != tabNodeIP && theTabNode != nil {
+		return theTabNode.dialFromPod(ctx, pe.ip, addr)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 }
 
 // clusterHost resolves host the way a pod would: localhost, service names
