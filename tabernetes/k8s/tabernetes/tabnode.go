@@ -44,6 +44,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/component-base/version"
 	"k8s.io/utils/ptr"
+	npaclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
 )
 
 // The node of this wasm instance: "tab" next to the control plane, or a
@@ -161,7 +162,12 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
-	if n.policy, err = newNetPolicy(ctx, admin, tabNodeName); err != nil {
+	// CRDs do not speak protobuf: a client of its own for them.
+	npa, err := npaclient.NewForConfig(adminCfg)
+	if err != nil {
+		return err
+	}
+	if n.policy, err = newNetPolicy(ctx, admin, npa, tabNodeName); err != nil {
 		return fmt.Errorf("network policy: %w", err)
 	}
 

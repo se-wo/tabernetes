@@ -26,6 +26,10 @@ import (
 	"sigs.k8s.io/kube-network-policies/pkg/network"
 	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
 	"sigs.k8s.io/kube-network-policies/pkg/podinfo"
+	npav1alpha2 "sigs.k8s.io/kube-network-policies/plugins/npa-v1alpha2"
+	npapi "sigs.k8s.io/network-policy-api/apis/v1alpha2"
+	npaclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
+	npainformers "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions"
 )
 
 // netPolicy decides whether a connection may open.
@@ -55,9 +59,15 @@ const admitTTL = 30 * time.Second
 const synTimeout = 127 * time.Second
 
 // newNetPolicy starts the informers of the engine: all pods, namespaces,
-// nodes and NetworkPolicies of the cluster. Pods of other nodes are needed
-// to know the source of a connection.
-func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName string) (*netPolicy, error) {
+// nodes, NetworkPolicies and ClusterNetworkPolicies of the cluster. Pods of
+// other nodes are needed to know the source of a connection.
+//
+// The evaluators run in the order of upstream's npa-v1alpha2 build:
+// ClusterNetworkPolicies of the Admin tier, NetworkPolicies, then the
+// Baseline tier. Rules on domain names never match: the tab has no DNS
+// traffic to learn the addresses from (egress to the internet goes through
+// fetch(), without an IP).
+func newNetPolicy(ctx context.Context, client kubernetes.Interface, npa npaclient.Interface, nodeName string) (*netPolicy, error) {
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 0,
 		// The cache keeps every pod of the cluster: drop what the engine
 		// never reads.
@@ -81,13 +91,21 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, nodeName str
 		return nil, err
 	}
 	standard := networkpolicy.NewStandardNetworkPolicy(nodeName, namespaces, pods, policies)
+	npaFactory := npainformers.NewSharedInformerFactory(npa, 0)
+	cnps := npaFactory.Policy().V1alpha2().ClusterNetworkPolicies()
+	evaluators := []api.PolicyEvaluator{
+		npav1alpha2.NewClusterNetworkPolicy(npapi.AdminTier, cnps, nil, nodes.Lister()),
+		standard,
+		npav1alpha2.NewClusterNetworkPolicy(npapi.BaselineTier, cnps, nil, nodes.Lister()),
+	}
 	p := &netPolicy{
-		engine:   networkpolicy.NewPolicyEngine(provider, []api.PolicyEvaluator{standard}),
+		engine:   networkpolicy.NewPolicyEngine(provider, evaluators),
 		provider: provider,
 		nodes:    nodes.Lister(),
 		admitted: map[admitKey]*admission{},
 	}
 	factory.Start(ctx.Done())
+	npaFactory.Start(ctx.Done())
 	return p, nil
 }
 

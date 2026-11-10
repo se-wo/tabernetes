@@ -1,6 +1,6 @@
-# NetworkPolicy on the Docker nodes: the upstream DaemonSet of
-# sigs.k8s.io/kube-network-policies (its install.yaml), next to flannel and
-# kube-proxy. The tab nodes run the same engine in the binary
+# NetworkPolicy and ClusterNetworkPolicy on the Docker nodes: the upstream
+# DaemonSet of sigs.k8s.io/kube-network-policies (its install-cnp.yaml), next
+# to flannel and kube-proxy. The tab nodes run the same engine in the binary
 # (tabnode_netpol.go, docs/networking-policy.md), so it stays off them.
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -8,10 +8,13 @@ metadata:
   name: kube-network-policies
 rules:
 - apiGroups: [""]
-  resources: [pods, namespaces]
+  resources: [pods, namespaces, nodes]
   verbs: [list, watch]
 - apiGroups: [networking.k8s.io]
   resources: [networkpolicies]
+  verbs: [list, watch]
+- apiGroups: [policy.networking.k8s.io]
+  resources: [clusternetworkpolicies]
   verbs: [list, watch]
 ---
 kind: ClusterRoleBinding
@@ -72,7 +75,7 @@ spec:
       serviceAccountName: kube-network-policies
       containers:
       - name: kube-network-policies
-        image: registry.k8s.io/networking/kube-network-policies:v1.1.2
+        image: registry.k8s.io/networking/kube-network-policies:v1.1.2-npa-v1alpha2
         args:
         - /bin/netpol
         - --hostname-override=$(MY_NODE_NAME)

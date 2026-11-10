@@ -26,6 +26,9 @@ MVDAN_SH_VERSION = "v3.14.1"
 # must match KUBERNETES_VERSION.
 # renovate: datasource=go depName=sigs.k8s.io/kube-network-policies
 KUBE_NETWORK_POLICIES_VERSION = "v1.1.3"
+# The ClusterNetworkPolicy API of that engine: the version its go.mod requires.
+# renovate: datasource=go depName=sigs.k8s.io/network-policy-api
+NETWORK_POLICY_API_VERSION = "v0.2.1"
 
 [tasks.checkout]
 description = "Clone Kubernetes at KUBERNETES_VERSION into .build/kubernetes"
