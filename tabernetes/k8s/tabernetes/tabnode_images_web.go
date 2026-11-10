@@ -1236,7 +1236,7 @@ func nginxProg(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	errlog("notice", "using the \"epoll\" event method")
 	errlog("notice", "nginx/%s", version)
 	errlog("notice", "built into Tabernetes (Go %s, js/wasm)", strings.TrimPrefix(runtime.Version(), "go"))
-	errlog("notice", "OS: Linux 6.0.0-tabernetes")
+	errlog("notice", "OS: Linux "+kernelVersion)
 	errlog("notice", "getrlimit(RLIMIT_NOFILE): 1048576:1048576")
 	errlog("notice", "start worker processes")
 	errlog("notice", "start worker process 29")
