@@ -284,11 +284,11 @@ func TestWatchTmpfs(t *testing.T) {
 		Containers: []v1.Container{spec},
 		Volumes:    []v1.Volume{{Name: "cache", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{Medium: v1.StorageMediumMemory}}}},
 	})
+	w.dir = t.TempDir() // not /var/lib/tabnode: CI runs as a user
 	dir, _ := w.volumeDir("cache")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
 	// left by an earlier run
 	if err := os.WriteFile(filepath.Join(dir, "old"), make([]byte, 30<<20), 0o644); err != nil {
 		t.Fatal(err)
