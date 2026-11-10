@@ -36,8 +36,8 @@ browser tab (single wasm binary)                     docker run tabernetes
 - The terminal runs a real POSIX shell: [mvdan.cc/sh](https://github.com/mvdan/sh),
   a shell interpreter in Go, compiled into the same binary. Pipes, variables,
   loops, `$(...)`, redirects and here-documents work. There are no processes,
-  so every command is a function: kubectl runs in-process, a few coreutils
-  (`grep`, `head`, `wc`, `xargs`, ...) live in `k8s/tabernetes/coreutils.go`, and
+  so every command is a function: kubectl runs in-process, the shell tools
+  live in `k8s/tabernetes/coreutils*.go`, and
   `join`, `logs` and `clear` are JavaScript. Files land in the in-memory file
   system, so `kubectl get cm x -o yaml > cm.yaml` works.
   `tar` and `gzip` (`k8s/tabernetes/coreutils_tar.go`) work in the terminal and
@@ -48,6 +48,16 @@ browser tab (single wasm binary)                     docker run tabernetes
   servers that allow CORS, for example `raw.githubusercontent.com`.
   `localhost` and `127.0.0.1` stay in the in-process network of the Wasm, so
   `k port-forward deploy/web 8080:80 &` and `wget -qO- localhost:8080` work.
+- The shell tools are small Go versions with the common flags: `cp`, `mv`,
+  `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
+  ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
+  ([gojq](https://github.com/itchyny/gojq)), `date`, `watch`, `less`, `df`,
+  `du`, `mount`, `nc`, `ping`, `telnet`, `openssl` and more; `help` lists them
+  all. They work in the terminal and in `kubectl exec` of tab node
+  containers, where paths go through the root of the container and `nc`,
+  `ping` and `telnet` dial from the pod IP. `openssl` covers keys, requests,
+  signing and `x509 -text` for the CertificateSigningRequest exercise.
+  `kubectl convert` is compiled in, because plugins cannot run in Wasm.
 - `history` lists the command lines of the tab, and Ctrl-R searches them
   backwards like Bash. The history ends with the tab.
 - `cmd &` runs in the background, `jobs` lists the jobs, `kill %1` stops one.
@@ -469,6 +479,8 @@ same on macOS and Linux:
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
   their command line.
+- gojq (with timefmt-go) and goawk are vendored the same way
+  (`GOJQ_VERSION`, `TIMEFMT_GO_VERSION`, `GOAWK_VERSION`).
 - The decision packages of kube-network-policies and the client of
   network-policy-api are vendored the same way
   (`KUBE_NETWORK_POLICIES_VERSION`, `NETWORK_POLICY_API_VERSION`), without
@@ -594,6 +606,11 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
+- `yq` runs jq expressions on YAML with gojq: the yq v4 commands and flags
+  work, its own functions mostly do not (`strenv` and `env` do). `jq` and
+  `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes), and
+  `ping` has no ICMP: a TCP connection to the host stands in for it.
+  `less` and `more` print the whole input.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
   Docker node, so service proxy URLs work only for pods on the tab node.

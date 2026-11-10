@@ -137,12 +137,13 @@ func newPodRunner(env []string, dir string, stdin io.Reader, stdout, stderr io.W
 
 func podOpen(ctx context.Context, p string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
 	switch p {
-	case "/dev/null":
-		return devNull{}, nil
 	case "/dev/stdout":
 		return nopCloser{interp.HandlerCtx(ctx).Stdout}, nil
 	case "/dev/stderr", "/dev/termination-log":
 		return nopCloser{interp.HandlerCtx(ctx).Stderr}, nil
+	}
+	if d := devFile(p); d != nil {
+		return d, nil
 	}
 	rp := realPath(ctx, interp.HandlerCtx(ctx).Dir, p)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE) != 0 {
@@ -259,7 +260,7 @@ func podExec(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		case podTools[name] != nil:
 			return podTools[name](ctx, hc, args[1:], self)
 		case coreutils[name] != nil:
-			return coreutils[name](ctx, hc, args[1:], self)
+			return sigpipe(coreutils[name](ctx, hc, args[1:], self))
 		case interp.IsBuiltin(name):
 			err := hc.Builtin(ctx, append([]string{name}, args[1:]...))
 			if err != nil {

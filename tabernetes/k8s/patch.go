@@ -160,6 +160,12 @@ func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	vendorModule("mvdan.cc/sh/v3", os.Getenv("MVDAN_SH_VERSION"),
 		"expand", "fileutil", "internal", "interp", "pattern", "syntax")
 
+	// jq, yq and awk of the shell (tabernetes/coreutils_jq.go, coreutils_awk.go).
+	vendorModule("github.com/itchyny/gojq", os.Getenv("GOJQ_VERSION"), "")
+	vendorModule("github.com/itchyny/timefmt-go", os.Getenv("TIMEFMT_GO_VERSION"), "")
+	vendorModule("github.com/benhoyt/goawk", os.Getenv("GOAWK_VERSION"),
+		"interp", "parser", "lexer", "internal/ast", "internal/compiler", "internal/resolver")
+
 	// The NetworkPolicy engine of the tab nodes (tabernetes/tabnode_netpol.go,
 	// docs/networking-policy.md): its decision packages, not its nftables
 	// dataplane. Kubernetes vendors their other dependencies already.
@@ -280,7 +286,8 @@ var OnForward = func(namespace, pod string, ports []portforward.ForwardedPort) f
 
 // vendorModule adds packages of a module that Kubernetes does not use to the
 // vendor directory, the way "go mod vendor" would: go.mod, go.sum,
-// vendor/modules.txt and the sources without tests.
+// vendor/modules.txt and the sources without tests. The package "" is the
+// root package of the module.
 func vendorModule(path, version string, pkgs ...string) {
 	if version == "" {
 		fail("vendor %s: no version set", path)
@@ -308,7 +315,7 @@ func vendorModule(path, version string, pkgs ...string) {
 	}
 	entry := fmt.Sprintf("# %s %s\n## explicit; go %s\n", path, version, goVersion[1])
 	for _, p := range pkgs {
-		entry += path + "/" + p + "\n"
+		entry += strings.TrimSuffix(path+"/"+p, "/") + "\n"
 	}
 	// modules.txt is sorted by module path.
 	at := len(modules)
@@ -346,9 +353,14 @@ func vendorModule(path, version string, pkgs ...string) {
 			must(os.WriteFile(filepath.Join(dst, p, e.Name()), b, 0o644))
 		}
 	}
-	b, err := os.ReadFile(filepath.Join(mod.Dir, "LICENSE"))
-	must(err)
-	must(os.WriteFile(filepath.Join(dst, "LICENSE"), b, 0o644))
+	// goawk calls it LICENSE.txt.
+	for _, name := range []string{"LICENSE", "LICENSE.txt"} {
+		if b, err := os.ReadFile(filepath.Join(mod.Dir, name)); err == nil {
+			must(os.WriteFile(filepath.Join(dst, name), b, 0o644))
+			return
+		}
+	}
+	fail("vendor %s: no LICENSE", path)
 }
 
 // remove deletes a file that must exist.

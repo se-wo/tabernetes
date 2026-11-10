@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -35,15 +34,17 @@ import (
 // simple: the common flags, no locale, no options nobody types.
 type util func(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error
 
-var coreutils map[string]util
+// coreutils is filled by the init functions of coreutils*.go: each file adds
+// its own tools.
+var coreutils = map[string]util{}
 
 func init() {
-	coreutils = map[string]util{
-		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free, "grep": grep,
+	maps.Copy(coreutils, map[string]util{
+		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free,
 		"head": head, "host": hostCmd, "ls": ls, "mkdir": mkdir, "nslookup": nslookup, "rm": rm, "seq": seq, "sleep": sleepCmd,
 		"sort": sortCmd, "tail": tail, "tee": tee, "touch": touch, "tr": tr,
 		"uniq": uniq, "vi": viCmd, "vim": viCmd, "wc": wc, "wget": wget, "xargs": xargs,
-	}
+	})
 }
 
 // opts parses short flags. spec lists the flags, a trailing ":" marks a flag
@@ -127,8 +128,8 @@ func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []
 		if r == nil {
 			r = strings.NewReader("")
 		}
-		if f == "/dev/null" {
-			r = strings.NewReader("")
+		if d := devFile(f); d != nil {
+			r = d
 		} else if f != "-" {
 			fh, err := os.Open(abs(ctx, hc, f))
 			if err != nil {
@@ -180,79 +181,22 @@ func cat(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	})
 }
 
-func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("grep", args, "ivcnEFoqwe:", map[string]string{"ignore-case": "i", "invert-match": "v", "count": "c", "regexp": "e"})
-	if err != nil {
-		return fail(hc, 2, "%v", err)
-	}
-	pat, ok := o["e"]
-	if !ok {
-		if len(args) == 0 {
-			return fail(hc, 2, "usage: grep [-ivcnoqwFE] pattern [file...]")
-		}
-		pat, args = args[0], args[1:]
-	}
-	if has(o, "F") {
-		pat = regexp.QuoteMeta(pat)
-	} else if !has(o, "E") {
-		// basic regular expressions: \| \( \) \+ are the special ones
-		pat = strings.NewReplacer(`\|`, `|`, `\(`, `(`, `\)`, `)`, `\+`, `+`, `\?`, `?`, `|`, `\|`, `(`, `\(`, `)`, `\)`, `+`, `\+`, `?`, `\?`).Replace(pat)
-	}
-	if has(o, "w") {
-		pat = `\b(?:` + pat + `)\b`
-	}
-	if has(o, "i") {
-		pat = "(?i)" + pat
-	}
-	re, err := regexp.Compile(pat)
-	if err != nil {
-		return fail(hc, 2, "grep: %v", err)
-	}
-	found := false
-	err = inputs(ctx, hc, "grep", args, func(file string, r io.Reader) error {
-		prefix := ""
-		if len(args) > 1 {
-			prefix = file + ":"
-		}
-		n := 0
-		sc := bufio.NewScanner(r)
-		sc.Buffer(nil, 16<<20)
-		for i := 1; sc.Scan(); i++ {
-			l := sc.Text()
-			if re.MatchString(l) == has(o, "v") {
-				continue
-			}
-			found, n = true, n+1
-			switch {
-			case has(o, "q"), has(o, "c"):
-			case has(o, "o") && !has(o, "v"):
-				for _, m := range re.FindAllString(l, -1) {
-					fmt.Fprintln(hc.Stdout, prefix+m)
-				}
-			case has(o, "n"):
-				fmt.Fprintf(hc.Stdout, "%s%d:%s\n", prefix, i, l)
-			default:
-				fmt.Fprintln(hc.Stdout, prefix+l)
-			}
-		}
-		if has(o, "c") {
-			fmt.Fprintf(hc.Stdout, "%s%d\n", prefix, n)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if !found {
-		return interp.ExitStatus(1)
-	}
-	return nil
-}
-
 func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("head", args, "n:#", map[string]string{"lines": "n"})
+	o, args, err := opts("head", args, "n:c:#", map[string]string{"lines": "n", "bytes": "c"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
+	}
+	if v, ok := o["c"]; ok {
+		c, err := parseSize(v)
+		if err != nil {
+			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
+		}
+		return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
+			// No draining: the shell closes the pipe when head ends, which
+			// stops the writer, like SIGPIPE (cat /dev/zero | head -c 4).
+			io.CopyN(hc.Stdout, r, c)
+			return nil
+		})
 	}
 	n, err := count(o, 10)
 	if err != nil {
@@ -264,8 +208,6 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		for i := 0; i < n && sc.Scan(); i++ {
 			fmt.Fprintln(hc.Stdout, sc.Text())
 		}
-		// keep draining, so the writer of a pipe does not block forever
-		io.Copy(io.Discard, r)
 		return nil
 	})
 }
@@ -398,12 +340,19 @@ func uniq(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 }
 
 func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("cut", args, "d:f:", map[string]string{"delimiter": "d", "fields": "f"})
+	o, args, err := opts("cut", args, "d:f:c:b:", map[string]string{"delimiter": "d", "fields": "f", "characters": "c", "bytes": "b"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
+	// -c and -b select characters: the same list, applied to the runes.
+	chars := false
+	for _, k := range []string{"c", "b"} {
+		if v, ok := o[k]; ok {
+			o["f"], chars = v, true
+		}
+	}
 	if !has(o, "f") {
-		return fail(hc, 2, "usage: cut -f list [-d delim] [file...]")
+		return fail(hc, 2, "usage: cut -f list [-d delim] | -c list [file...]")
 	}
 	d := "\t"
 	if v, ok := o["d"]; ok {
@@ -430,6 +379,19 @@ func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	}
 	return inputs(ctx, hc, "cut", args, func(_ string, r io.Reader) error {
 		for _, l := range lines(r) {
+			if chars {
+				var b strings.Builder
+				for i, c := range []rune(l) {
+					for _, rg := range fields {
+						if i+1 >= rg[0] && i+1 <= rg[1] {
+							b.WriteRune(c)
+							break
+						}
+					}
+				}
+				fmt.Fprintln(hc.Stdout, b.String())
+				continue
+			}
 			f := strings.Split(l, d)
 			if len(f) == 1 {
 				fmt.Fprintln(hc.Stdout, l)
@@ -457,6 +419,12 @@ func tr(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	}
 	set := func(s string) []rune {
 		var out []rune
+		// [:class:] and the escapes \n \t \r \\ of POSIX tr
+		for class, chars := range map[string]string{"[:upper:]": "A-Z", "[:lower:]": "a-z", "[:digit:]": "0-9",
+			"[:alpha:]": "a-zA-Z", "[:alnum:]": "a-zA-Z0-9", "[:space:]": " \t\n\r\v\f", "[:blank:]": " \t"} {
+			s = strings.ReplaceAll(s, class, chars)
+		}
+		s = strings.NewReplacer(`\n`, "\n", `\t`, "\t", `\r`, "\r", `\\`, `\`).Replace(s)
 		r := []rune(s)
 		for i := 0; i < len(r); i++ {
 			if i+2 < len(r) && r[i+1] == '-' {
@@ -691,20 +659,45 @@ func seq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 	return nil
 }
 
+// sleepCmd sleeps for the sum of its arguments: numbers with the suffixes
+// s, m, h and d of GNU sleep (fractions too), Go durations like 1m30s, and
+// infinity.
 func sleepCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	if len(args) != 1 {
-		return fail(hc, 1, "usage: sleep seconds")
+	if len(args) == 0 {
+		return fail(hc, 1, "usage: sleep NUMBER[smhd]... | infinity")
 	}
-	d, err := time.ParseDuration(args[0])
-	if err != nil {
-		f, err2 := strconv.ParseFloat(args[0], 64)
-		if err2 != nil {
-			return fail(hc, 1, "sleep: invalid time %q", args[0])
+	var total time.Duration
+	forever := false
+	for _, a := range args {
+		if a == "infinity" || a == "inf" {
+			forever = true
+			continue
 		}
-		d = time.Duration(f * float64(time.Second))
+		if a == "" {
+			return fail(hc, 1, "sleep: invalid time interval ''")
+		}
+		unit := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour}
+		num, mult := a, time.Second
+		if u, ok := unit[a[len(a)-1]]; ok {
+			num, mult = a[:len(a)-1], u
+		}
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil || f < 0 {
+			d, err := time.ParseDuration(a)
+			if err != nil || d < 0 {
+				return fail(hc, 1, "sleep: invalid time interval '%s'", a)
+			}
+			total += d
+			continue
+		}
+		total += time.Duration(f * float64(mult))
+	}
+	var done <-chan time.Time
+	if !forever {
+		done = time.After(total)
 	}
 	select {
-	case <-time.After(d):
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return interp.ExitStatus(130)
