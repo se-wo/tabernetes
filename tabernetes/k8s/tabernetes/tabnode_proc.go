@@ -352,9 +352,10 @@ func runShell(ctx context.Context, hc interp.HandlerContext, args []string) erro
 				t.setIntr(cancel)
 				runErr = r.Run(sctx, st)
 				t.setIntr(nil)
+				interrupted := sctx.Err() != nil && ctx.Err() == nil
 				cancel()
-				if sctx.Err() != nil && ctx.Err() == nil {
-					runErr = interp.ExitStatus(130) // interrupted: the shell goes on
+				if interrupted {
+					runErr = interp.ExitStatus(130) // Ctrl-C: the shell goes on
 					continue
 				}
 			} else {

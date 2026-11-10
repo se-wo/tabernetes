@@ -4,6 +4,7 @@
   "description": "Browser terminal for the Tabernetes Kubernetes control plane",
   "devDependencies": {
     "@bjorn3/browser_wasi_shim": "0.4.2",
+    "@novnc/novnc": "1.7.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "esbuild": "0.28.2",

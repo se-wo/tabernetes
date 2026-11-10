@@ -106,7 +106,9 @@ function untar(tar, path) {
 
 // start runs a module in a new worker. The callbacks may come later than
 // the first events: those wait for them.
-function start(workerURL, { module, args, env, preopens, stdin, name }) {
+// gpu is the WebGPU device the kubelet prepared for the container
+// (tabnode_gpu.go), or null.
+function start(workerURL, { module, args, env, preopens, stdin, name, gpu }) {
   const worker = new Worker(workerURL, { name: name ? `wasm ${name}` : "wasm" });
   const handlers = {}, queued = { stdout: [], stderr: [], exit: [] };
   let exited = false;
@@ -123,7 +125,7 @@ function start(workerURL, { module, args, env, preopens, stdin, name }) {
     else if (!exited) emit(data.type, data.data);
   };
   worker.onerror = (e) => { e.preventDefault(); exit(128, `wasm worker: ${e.message || "failed to start (is wasi.worker.js there?)"}`); };
-  worker.postMessage({ type: "start", module, args, env, preopens, stdin });
+  worker.postMessage({ type: "start", module, args, env, preopens, stdin, gpu: gpu ?? null });
   return {
     onStdout: on("stdout"),
     onStderr: on("stderr"),

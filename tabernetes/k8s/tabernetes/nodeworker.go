@@ -28,8 +28,9 @@ var workerSeq int // guarded by nodesMu
 
 // prepareWorkerNode names a new worker node, gives it an IP, issues its
 // credentials and listens on <ip>:10250 for the apiserver. open(label)
-// returns a Promise of a channel into the worker.
-func (c *cluster) prepareWorkerNode(open js.Value) (map[string]any, error) {
+// returns a Promise of a channel into the worker. With gpu, the node offers
+// the WebGPU adapter of its worker (addnode --gpu, tabnode_gpu.go).
+func (c *cluster) prepareWorkerNode(open js.Value, gpu bool) (map[string]any, error) {
 	nodesMu.Lock()
 	n := nextNode
 	nextNode++
@@ -63,6 +64,7 @@ func (c *cluster) prepareWorkerNode(open js.Value) (map[string]any, error) {
 		"servingCert": string(nc.servingCert),
 		"servingKey":  string(nc.servingKey),
 		"adminToken":  nc.adminToken,
+		"gpu":         gpu,
 	}, nil
 }
 
@@ -83,6 +85,7 @@ func removeWorkerNode(name string) {
 func runWorkerNode(cfg js.Value) error {
 	tabNodeName = cfg.Get("name").String()
 	tabNodeIP = cfg.Get("ip").String()
+	gpuOffered = cfg.Get("gpu").Truthy()
 	nc := nodeCreds{
 		ca:          []byte(cfg.Get("ca").String()),
 		cert:        []byte(cfg.Get("cert").String()),
