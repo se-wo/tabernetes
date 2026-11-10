@@ -128,8 +128,8 @@ func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []
 		if r == nil {
 			r = strings.NewReader("")
 		}
-		if f == "/dev/null" {
-			r = strings.NewReader("")
+		if d := devFile(f); d != nil {
+			r = d
 		} else if f != "-" {
 			fh, err := os.Open(abs(ctx, hc, f))
 			if err != nil {
@@ -187,13 +187,13 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		return fail(hc, 2, "%v", err)
 	}
 	if v, ok := o["c"]; ok {
-		c, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || c < 0 {
+		c, err := parseSize(v)
+		if err != nil {
 			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
 		}
 		return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
 			io.CopyN(hc.Stdout, r, c)
-			io.Copy(io.Discard, r)
+			drain(r)
 			return nil
 		})
 	}
@@ -207,8 +207,7 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		for i := 0; i < n && sc.Scan(); i++ {
 			fmt.Fprintln(hc.Stdout, sc.Text())
 		}
-		// keep draining, so the writer of a pipe does not block forever
-		io.Copy(io.Discard, r)
+		drain(r)
 		return nil
 	})
 }
