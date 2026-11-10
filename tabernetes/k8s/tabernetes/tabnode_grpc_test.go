@@ -52,4 +52,3 @@ func TestGRPCProbe(t *testing.T) {
 		t.Errorf("closed port: %v", err)
 	}
 }
-
