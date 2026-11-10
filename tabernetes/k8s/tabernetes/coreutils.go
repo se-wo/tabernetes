@@ -187,7 +187,7 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		return fail(hc, 2, "%v", err)
 	}
 	if v, ok := o["c"]; ok {
-		c, err := parseByteSize(v)
+		c, err := parseSize(v)
 		if err != nil {
 			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
 		}

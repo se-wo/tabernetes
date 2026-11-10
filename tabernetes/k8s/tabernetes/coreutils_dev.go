@@ -50,10 +50,10 @@ type devFull struct{ devZero }
 
 func (devFull) Write([]byte) (int, error) { return 0, syscall.ENOSPC }
 
-// parseByteSize reads sizes like 512, 10K, 50M, 1G, 1MB and 1KiB the way
+// parseSize reads sizes like 512, 10K, 50M, 1G, 1MB and 1KiB the way
 // head, dd and truncate do: K, M and G are powers of 1024, KB, MB and GB
 // powers of 1000, and dd also knows c (1), w (2) and b (512).
-func parseByteSize(s string) (int64, error) {
+func parseSize(s string) (int64, error) {
 	mult := int64(1)
 	units := []struct {
 		suffix string
@@ -108,7 +108,7 @@ func ddCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 		if !ok {
 			return def, nil
 		}
-		n, err := parseByteSize(v)
+		n, err := parseSize(v)
 		if err != nil {
 			return 0, fmt.Errorf("dd: %v", err)
 		}
