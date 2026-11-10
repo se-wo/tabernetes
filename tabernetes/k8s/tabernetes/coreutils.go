@@ -1439,7 +1439,8 @@ func dnsLookup(ctx context.Context, name string) (a dnsAnswer, found bool) {
 }
 
 // nslookup answers like the nslookup of busybox, from the cluster DNS of
-// the service proxy (tabnode_net.go): there is no CoreDNS on the tab node.
+// the service proxy (tabnode_net.go), which is also what the CoreDNS of the
+// tab node (tabnode_coredns.go) answers from.
 func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	var names []string
 	for _, a := range args {

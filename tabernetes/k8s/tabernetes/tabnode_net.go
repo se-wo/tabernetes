@@ -51,6 +51,7 @@ type serviceProxy struct {
 	slices   cache.Indexer
 	synced   atomic.Bool
 	kick     chan struct{}
+	corefile atomic.Pointer[corefileState] // kube-system/coredns (tabnode_coredns.go)
 
 	mu        sync.Mutex
 	listeners map[string]*svcListener // by ip:port
@@ -86,6 +87,7 @@ func newServiceProxy(client kubernetes.Interface) *serviceProxy {
 
 // run watches services and endpoint slices until ctx ends.
 func (s *serviceProxy) run(ctx context.Context) {
+	s.watchCorefile(ctx)
 	factory := informers.NewSharedInformerFactory(s.client, 0)
 	svcInformer := factory.Core().V1().Services()
 	sliceInformer := factory.Discovery().V1().EndpointSlices().Informer()
@@ -511,10 +513,11 @@ func (s *serviceProxy) lookup(host, namespace string) (dnsAnswer, bool) {
 		if namespace != "" {
 			candidates = append(candidates, host+"."+namespace+".svc."+clusterDomain)
 		}
-		candidates = append(candidates, host+".svc."+clusterDomain, host+"."+clusterDomain)
+		// The name as given last, for hosts of the Corefile.
+		candidates = append(candidates, host+".svc."+clusterDomain, host+"."+clusterDomain, host)
 	}
 	for _, name := range candidates {
-		if a, ok := s.lookupFQDN(name, 0); ok {
+		if a, ok := s.lookupName(name); ok {
 			return a, true
 		}
 	}

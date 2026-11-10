@@ -109,7 +109,8 @@ Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
 keeps its Lease and runs the pods the scheduler binds to it. It has the taint
 `tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
 everything lands here; once a Docker node joins, the scheduler prefers that
-one. flannel, kube-proxy and CoreDNS stay off it (node affinity).
+one. flannel and kube-proxy stay off it (its kube-proxy is built in). CoreDNS
+runs here as a built-in image until a Docker node is Ready, then moves there.
 
 A container is not a process:
 
@@ -157,6 +158,16 @@ port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service na
 with the search path of the pod, in pods and in the terminal:
 `k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
+
+`tabnode_coredns.go` is the CoreDNS of the tab: the built-in image
+`registry.k8s.io/coredns/coredns` logs like the real one, serves `/health`,
+`/ready` and `/metrics` as the Corefile asks, and answers DNS over TCP from
+the same service proxy. There is no UDP in the tab. `hosts` entries and
+`rewrite name` rules of `kubectl edit cm coredns -n kube-system` apply to the
+names of the tab at once. `forward` and the other plugins are ignored: the
+browser has no DNS. Pods on a Docker node need UDP, so once a Docker node is
+Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
+two minutes) and the real CoreDNS runs there.
 
 ### More nodes in Web Workers
 
