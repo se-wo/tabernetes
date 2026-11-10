@@ -57,6 +57,10 @@ const images = path.join(tab, "wasm-images");
 const hasImages = fs.existsSync(path.join(images, "build.sh"));
 if (hasImages) execFileSync("bash", [path.join(images, "build.sh"), path.join(out, "oci")], { stdio: "inherit", cwd: tab });
 
+// The chart repositories that helm in the terminal fetches from charts/ next
+// to tabernetes.js instead of servers without CORS headers (charts.bitnami.com).
+execFileSync(process.execPath, [path.join(here, "charts.mjs"), path.join(tab, "charts"), path.join(out, "charts")], { stdio: "inherit" });
+
 // ---- licenses ----
 fs.copyFileSync(need(path.join(root, "LICENSE")), path.join(out, "LICENSE.txt"));
 const goLicenses = JSON.parse(fs.readFileSync(need(path.join(assets, "THIRD_PARTY_LICENSES.go.json")), "utf8"));

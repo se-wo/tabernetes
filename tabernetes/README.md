@@ -48,6 +48,16 @@ browser tab (single wasm binary)                     docker run tabernetes
   servers that allow CORS, for example `raw.githubusercontent.com`.
   `localhost` and `127.0.0.1` stay in the in-process network of the Wasm, so
   `k port-forward deploy/web 8080:80 &` and `wget -qO- localhost:8080` work.
+- `helm` (Helm v4, `HELM_VERSION`) runs in-process like kubectl
+  (`k8s/tabernetes/helm.go`). Releases are Secrets in the cluster, repositories
+  and the cache are files of the terminal. Helm downloads chart repositories with
+  `fetch()`, so a repository must send CORS headers: repositories on GitHub
+  Pages work directly. `https://charts.bitnami.com/bitnami` and
+  `oci://registry-1.docker.io/bitnamicharts/<chart>` come from `charts/bitnami/`
+  next to the page instead: small charts in the style of Bitnami's
+  (`tabernetes/charts/`, nginx, apache and redis) that run the official images on
+  the tab node, so `helm repo add bitnami https://charts.bitnami.com/bitnami` and
+  `helm install web bitnami/nginx` work.
 - The shell tools are small Go versions with the common flags: `cp`, `mv`,
   `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
   ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
@@ -579,6 +589,12 @@ same on macOS and Linux:
   (`KUBE_NETWORK_POLICIES_VERSION`, `NETWORK_POLICY_API_VERSION`), without
   the nftables dataplane. Their `packet.go` gets the IANA numbers of five
   `syscall.IPPROTO_*` constants that js lacks.
+- Helm is vendored at `HELM_VERSION` with its whole module graph
+  (`vendorGraph`): modules Kubernetes vendors stay at its version, only the
+  missing modules and packages are added. Hooks give each helm the settings of
+  its shell, its context and a `log.Fatal` that does not end the tab, send
+  chart repositories without CORS headers to `charts/` next to the page, and
+  replace flock with locks in the process.
 - `kubectl port-forward` and `kubectl proxy` stop with their command
   context. Otherwise their listeners would stay until the tab closes.
 
@@ -603,10 +619,11 @@ works under any base path, such as `/tabernetes/` on GitHub Pages
 (`.github/workflows/pages.yaml`). It also writes `THIRD_PARTY_LICENSES.txt`:
 the Go modules in the binary (`go list -deps`, collected by the `wasm` task
 while the Kubernetes checkout is there) and the npm packages in the bundles,
-each with its license text. `join` prints `TABERNETES_IMAGE` if set at build
-time, else `$NODE_IMAGE:latest`.
+each with its license text. `site/charts.mjs` packages the charts of
+`charts/` into chart repositories under `charts/` of the site. `join` prints
+`TABERNETES_IMAGE` if set at build time, else `$NODE_IMAGE:latest`.
 
-The binary is around 290 MB, or 28 MB with zstd (gzip: 45 MB). GitHub Pages
+The binary is around 310 MB, or 30 MB with zstd (gzip: 47 MB). GitHub Pages
 does not send `Content-Encoding` for it, and `DecompressionStream` has no
 zstd. The page fetches the `.zst` file and unpacks it with
 [fzstd](https://github.com/101arrowz/fzstd) in a Web Worker, block by block

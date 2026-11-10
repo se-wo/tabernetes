@@ -10,7 +10,10 @@
 //   - applies a few content patches,
 //   - vendors mvdan.cc/sh (the terminal's shell) at MVDAN_SH_VERSION,
 //   - vendors the engine of sigs.k8s.io/kube-network-policies at
-//     KUBE_NETWORK_POLICIES_VERSION and
+//     KUBE_NETWORK_POLICIES_VERSION,
+//   - vendors Helm (helm.sh/helm/v4) at HELM_VERSION with every module and
+//     package it needs that Kubernetes does not vendor already (vendorGraph):
+//     modules both use stay at the version of Kubernetes, and
 //   - copies tabernetes/ (the main package) to cmd/tabernetes.
 //
 // Every patch fails when its target is gone. A Kubernetes update shows exactly
@@ -22,11 +25,14 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"go/build/constraint"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -219,6 +225,11 @@ func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		"syscall.IPPROTO_SCTP", "132",
 	)
 
+	// Helm, in-process like kubectl (tabernetes/helm.go). Its module graph is
+	// too big for a list of packages: vendorGraph works it out.
+	vendorGraph("helm.sh/helm/v4", os.Getenv("HELM_VERSION"), "pkg/cmd", "pkg/kube", "pkg/getter")
+	patchHelm()
+
 	// A background job ("k port-forward ... &") runs with the context of its
 	// command line, which ends with the line. The hook lets tabernetes give each
 	// job its own context (tabernetes/jobs.go).
@@ -383,6 +394,513 @@ func vendorModule(path, version string, pkgs ...string) {
 	}
 	fail("vendor %s: no LICENSE", path)
 }
+
+// patchHelm makes Helm's command line (helm.sh/helm/v4/pkg/cmd) and its
+// HTTP getter fit a process that runs one helm after the other next to the
+// control plane (tabernetes/helm.go).
+func patchHelm() {
+	const cmd = "vendor/helm.sh/helm/v4/pkg/cmd/"
+	// The settings are a package variable, read from the environment once.
+	// Every helm of the terminal starts with the environment of its shell.
+	// cobra.OnInitialize adds to a global list that every cobra command of
+	// the process runs, kubectl included: tie it to the root command of this
+	// helm instead.
+	edit(cmd+"root.go", "\tcobra.OnInitialize(func() {", "\tonInitialize(cmd, func() { // tabernetes")
+	// log.Fatal ends the process, which is the browser tab: panic instead,
+	// runHelm recovers.
+	entries, err := os.ReadDir(cmd)
+	must(err)
+	fatal := 0
+	for _, e := range entries {
+		f := cmd + e.Name()
+		if e.IsDir() {
+			continue
+		}
+		if s := read(f); strings.Contains(s, "log.Fatal(") {
+			edit(f, "log.Fatal(", "logFatal(")
+			if !regexp.MustCompile(`\blog\.[A-Z]`).MatchString(read(f)) {
+				dropUnusedImport(f, "log")
+			}
+			fatal++
+		}
+	}
+	if fatal == 0 {
+		fail("%s: patch target not found: log.Fatal", cmd)
+	}
+	// install and upgrade stop on SIGINT, which a tab has not: Ctrl-C ends
+	// the context of the command.
+	edit(cmd+"install.go", "ctx := context.Background()", "ctx := Context() // tabernetes")
+	edit(cmd+"upgrade.go", "ctx := context.Background()", "ctx := Context() // tabernetes")
+	write(cmd+"tabernetes.go", `package cmd
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"helm.sh/helm/v4/pkg/cli"
+)
+
+// Added by tabernetes (k8s/patch.go).
+
+// ResetSettings reads the settings from the environment again, as a new
+// helm process would.
+func ResetSettings() { settings = cli.New() }
+
+// Context is the context of the running helm: install and upgrade stop with it.
+var Context = context.Background
+
+// FatalError is what log.Fatal panics with.
+type FatalError string
+
+func logFatal(v ...any) { panic(FatalError(fmt.Sprint(v...))) }
+
+// onInitialize runs fn before the command, like cobra.OnInitialize, but for
+// the commands of root only.
+func onInitialize(root *cobra.Command, fn func()) {
+	pre := root.PersistentPreRun
+	root.PersistentPreRun = func(c *cobra.Command, args []string) {
+		fn()
+		if pre != nil {
+			pre(c, args)
+		}
+	}
+}
+`)
+
+	// Helm takes the Kubernetes version of "helm template" and "helm version"
+	// from the version of k8s.io/client-go in the build info. Here it is a
+	// staging module, v0.0.0: k8s/build.sh sets the real one.
+	const version = "vendor/helm.sh/helm/v4/internal/version/"
+	edit(version+"clientgo.go", "\tm := info.Deps[idx]\n\n\treturn m.Version, nil",
+		"\tm := info.Deps[idx]\n\tif clientGoVersion != \"\" { // tabernetes\n\t\treturn clientGoVersion, nil\n\t}\n\n\treturn m.Version, nil")
+	write(version+"tabernetes.go", `package version
+
+// clientGoVersion is the version of k8s.io/client-go, set with -ldflags -X.
+// Added by tabernetes (k8s/patch.go).
+var clientGoVersion = ""
+`)
+
+	// Chart repositories: net/http of js fetches with fetch(), so a
+	// repository must allow CORS. RewriteURL sends well-known ones to a copy
+	// next to the page, FetchError explains a failed fetch().
+	const getter = "vendor/helm.sh/helm/v4/pkg/getter/"
+	edit(getter+"httpgetter.go",
+		"\treq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, href, http.NoBody)",
+		"\thref = RewriteURL(href) // tabernetes\n\treq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, href, http.NoBody)",
+		"\tresp, err := client.Do(req)\n\tif err != nil {\n\t\treturn nil, err\n\t}",
+		"\treq.Header.Del(\"User-Agent\") // tabernetes: the browser sends its own, another one needs a CORS preflight\n\tresp, err := client.Do(req)\n\tif err != nil {\n\t\treturn nil, FetchError(href, err) // tabernetes\n\t}",
+	)
+	write(getter+"tabernetes.go", `package getter
+
+// Added by tabernetes (k8s/patch.go).
+
+// RewriteURL maps the URL of a chart repository file before the download.
+var RewriteURL = func(href string) string { return href }
+
+// FetchError turns a failed download into the error helm shows.
+var FetchError = func(href string, err error) error { return err }
+`)
+
+	// js has no flock(2), and the browser tab is the only process: locks in
+	// the process (helm repo add locks repositories.yaml).
+	buildTag("vendor/github.com/gofrs/flock/flock_others.go", "(%s) && !js")
+	write("vendor/github.com/gofrs/flock/flock_js.go", `//go:build js
+
+package flock
+
+import "sync"
+
+// Added by tabernetes (k8s/patch.go): js has no flock(2), and the browser
+// tab is the only process, so the locks live in the process.
+
+var (
+	locksMu sync.Mutex
+	locks   = map[string]*pathLock{}
+)
+
+type pathLock struct {
+	cond    *sync.Cond
+	writer  bool
+	readers int
+}
+
+func lockOf(path string) *pathLock {
+	l := locks[path]
+	if l == nil {
+		l = &pathLock{cond: sync.NewCond(&locksMu)}
+		locks[path] = l
+	}
+	return l
+}
+
+func (f *Flock) Lock() error {
+	_, err := f.lock(true, true)
+	return err
+}
+
+func (f *Flock) RLock() error {
+	_, err := f.lock(false, true)
+	return err
+}
+
+func (f *Flock) TryLock() (bool, error) { return f.lock(true, false) }
+
+func (f *Flock) TryRLock() (bool, error) { return f.lock(false, false) }
+
+func (f *Flock) lock(exclusive, wait bool) (bool, error) {
+	f.m.Lock()
+	defer f.m.Unlock()
+	if f.l || (!exclusive && f.r) {
+		return true, nil
+	}
+	locksMu.Lock()
+	defer locksMu.Unlock()
+	l := lockOf(f.path)
+	for l.writer || (exclusive && l.readers > 0) {
+		if !wait {
+			return false, nil
+		}
+		l.cond.Wait()
+	}
+	if exclusive {
+		l.writer, f.l = true, true
+	} else {
+		l.readers, f.r = l.readers+1, true
+	}
+	return true, nil
+}
+
+func (f *Flock) Unlock() error {
+	f.m.Lock()
+	defer f.m.Unlock()
+	if !f.l && !f.r {
+		return nil
+	}
+	locksMu.Lock()
+	l := lockOf(f.path)
+	if f.l {
+		l.writer = false
+	} else {
+		l.readers--
+	}
+	l.cond.Broadcast()
+	locksMu.Unlock()
+	f.reset()
+	return nil
+}
+`)
+}
+
+// vendorGraph vendors the packages pkgs of path@version and everything they
+// import for js/wasm, the way "go mod vendor" would, without changing what
+// Kubernetes vendors already. It resolves the module graph in a temporary
+// module, where the staging modules are the ones of the checkout and every
+// module of vendor/modules.txt is pinned to its version there. Then it adds
+//
+//   - the new modules: go.mod (path itself direct, the others indirect),
+//     go.sum, an "## explicit" entry in vendor/modules.txt and the files of
+//     their packages and their license files, and
+//   - packages that Kubernetes does not use of modules it vendors, at the
+//     version of Kubernetes.
+//
+// The temporary module needs the module proxy, like vendorModule.
+func vendorGraph(path, version string, pkgs ...string) {
+	if version == "" {
+		fail("vendor %s: no version set", path)
+	}
+	modules := read("vendor/modules.txt")
+	if strings.Contains(modules, "\n# "+path+" ") {
+		fail("vendor %s: Kubernetes vendors it already, drop vendorGraph", path)
+	}
+	// The modules of Kubernetes and their packages.
+	type vendored struct {
+		version, replace string
+		pkgs             map[string]bool
+	}
+	k8s := map[string]*vendored{}
+	var cur *vendored
+	for _, l := range strings.Split(modules, "\n") {
+		switch {
+		case strings.HasPrefix(l, "# "):
+			f := strings.Fields(l)
+			if len(f) < 3 {
+				fail("vendor/modules.txt: patch target not found: module line %q", l)
+			}
+			cur = &vendored{version: f[2], pkgs: map[string]bool{}}
+			if len(f) == 5 && f[3] == "=>" {
+				cur.replace = f[4]
+			}
+			k8s[f[1]] = cur
+		case l != "" && !strings.HasPrefix(l, "#") && cur != nil:
+			cur.pkgs[l] = true
+		}
+	}
+
+	checkout, err := os.Getwd()
+	must(err)
+	tmp, err := os.MkdirTemp("", "tabernetes-vendor-")
+	must(err)
+	defer os.RemoveAll(tmp)
+	gomod := fmt.Sprintf("module tabernetes-vendor\n\ngo 1.26.0\n\nrequire %s %s\n\n", path, version)
+	for _, m := range slices.Sorted(maps.Keys(k8s)) {
+		switch v := k8s[m]; {
+		case strings.HasPrefix(v.replace, "./"): // a staging module
+			gomod += fmt.Sprintf("replace %s => %s\n", m, filepath.Join(checkout, v.replace))
+		case v.replace != "":
+			fail("vendor %s: %s is replaced by %s, vendorGraph does not handle that", path, m, v.replace)
+		default:
+			gomod += fmt.Sprintf("replace %s => %s %s\n", m, m, v.version)
+		}
+	}
+	main := "package main\n\nimport (\n"
+	for _, p := range pkgs {
+		main += fmt.Sprintf("\t_ %q\n", path+"/"+p)
+	}
+	must(os.WriteFile(filepath.Join(tmp, "go.mod"), []byte(gomod), 0o644))
+	must(os.WriteFile(filepath.Join(tmp, "main.go"), []byte(main+")\n\nfunc main() {}\n"), 0o644))
+	gocmd := func(env []string, args ...string) []byte {
+		cmd := exec.Command("go", args...)
+		cmd.Dir = tmp
+		cmd.Env = append(os.Environ(), append([]string{"GOWORK=off", "GOFLAGS=-mod=mod"}, env...)...)
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			fail("vendor %s: go %s: %v", path, strings.Join(args, " "), err)
+		}
+		return out
+	}
+	// The packages the build needs.
+	type pkg struct {
+		ImportPath, Dir string
+		Standard        bool
+		EmbedFiles      []string
+		Module          *struct {
+			Path, Version, Dir, GoVersion string
+			Main                          bool
+			Replace                       *struct{ Path, Version string }
+		}
+	}
+	type module struct {
+		version, goVersion string
+		pkgs               []string
+	}
+	added := map[string]*module{}  // new modules
+	extra := map[string][]string{} // new packages of modules Kubernetes vendors
+	dec := json.NewDecoder(bytes.NewReader(gocmd([]string{"GOOS=js", "GOARCH=wasm"}, "list", "-deps", "-json", ".")))
+	for dec.More() {
+		var p pkg
+		must(dec.Decode(&p))
+		m := p.Module
+		if p.Standard || m == nil || m.Main {
+			continue
+		}
+		if v := k8s[m.Path]; v != nil {
+			if v.replace != "" || v.pkgs[p.ImportPath] {
+				continue // a staging module or a package Kubernetes vendors
+			}
+			if m.Replace == nil || m.Replace.Version != v.version {
+				fail("vendor %s: %s is not pinned to %s", path, m.Path, v.version)
+			}
+			copyPackage(p.Dir, filepath.Join("vendor", p.ImportPath), p.EmbedFiles)
+			copyLicenses(m.Dir, p.Dir, filepath.Join("vendor", m.Path))
+			extra[m.Path] = append(extra[m.Path], p.ImportPath)
+			continue
+		}
+		if m.Replace != nil {
+			fail("vendor %s: %s is replaced", path, m.Path)
+		}
+		a := added[m.Path]
+		if a == nil {
+			a = &module{version: m.Version, goVersion: m.GoVersion}
+			added[m.Path] = a
+		}
+		a.pkgs = append(a.pkgs, p.ImportPath)
+		copyPackage(p.Dir, filepath.Join("vendor", p.ImportPath), p.EmbedFiles)
+		copyLicenses(m.Dir, p.Dir, filepath.Join("vendor", m.Path))
+	}
+	if added[path] == nil {
+		fail("vendor %s: no package of it is needed", path)
+	}
+
+	// vendor/modules.txt: the new packages in the list of their module, the
+	// new modules in sorted position.
+	for m, ps := range extra {
+		head := fmt.Sprintf("\n# %s %s\n", m, k8s[m].version)
+		i := strings.Index(modules, head)
+		if i < 0 {
+			fail("vendor/modules.txt: patch target not found: %q", head)
+		}
+		start := i + len(head)
+		end := len(modules) // the last module
+		if j := strings.Index(modules[start:], "\n# "); j >= 0 {
+			end = start + j + 1
+		}
+		var lines []string
+		for _, l := range strings.Split(strings.TrimSuffix(modules[start:end], "\n"), "\n") {
+			switch {
+			case strings.HasPrefix(l, "## "):
+				lines = append(lines, l)
+			case l != "":
+				ps = append(ps, l)
+			}
+		}
+		slices.Sort(ps)
+		modules = modules[:start] + strings.Join(append(lines, ps...), "\n") + "\n" + modules[end:]
+	}
+	var direct, indirect string
+	for _, m := range slices.Sorted(maps.Keys(added)) {
+		a := added[m]
+		entry := fmt.Sprintf("# %s %s\n## explicit", m, a.version)
+		if a.goVersion != "" {
+			entry += "; go " + a.goVersion
+		}
+		slices.Sort(a.pkgs)
+		entry += "\n" + strings.Join(a.pkgs, "\n") + "\n"
+		at := len(modules)
+		for _, i := range regexp.MustCompile(`(?m)^# (\S+) `).FindAllStringSubmatchIndex(modules, -1) {
+			if modules[i[2]:i[3]] > m {
+				at = i[0]
+				break
+			}
+		}
+		modules = modules[:at] + entry + modules[at:]
+		if m == path {
+			direct += "\t" + m + " " + a.version + "\n"
+		} else {
+			indirect += "\t" + m + " " + a.version + " // indirect\n"
+		}
+	}
+	write("vendor/modules.txt", modules)
+
+	// go.mod: the direct requirement in the first require block, the
+	// indirect ones in the second, like "go mod tidy" does.
+	s := read("go.mod")
+	blocks := strings.SplitAfterN(s, "\nrequire (\n", 3)
+	if len(blocks) != 3 {
+		fail("go.mod: patch target not found: two require blocks")
+	}
+	write("go.mod", blocks[0]+direct+blocks[1]+indirect+blocks[2])
+	// go.sum: the hashes of the module and of its go.mod.
+	var args []string
+	for _, m := range slices.Sorted(maps.Keys(added)) {
+		args = append(args, m+"@"+added[m].version)
+	}
+	sum := read("go.sum")
+	dec = json.NewDecoder(bytes.NewReader(gocmd(nil, append([]string{"mod", "download", "-json"}, args...)...)))
+	for dec.More() {
+		var d struct{ Path, Version, Sum, GoModSum string }
+		must(dec.Decode(&d))
+		if d.Sum == "" || d.GoModSum == "" {
+			fail("vendor %s: no hashes for %s %s", path, d.Path, d.Version)
+		}
+		sum += fmt.Sprintf("%s %s %s\n%s %s/go.mod %s\n", d.Path, d.Version, d.Sum, d.Path, d.Version, d.GoModSum)
+	}
+	write("go.sum", sum)
+}
+
+// copyPackage copies the files of the package in src to dst like "go mod
+// vendor": everything but tests and Go files that no build includes
+// ("//go:build ignore"), and the files its //go:embed patterns need. It fails
+// instead of changing a file that is there already.
+func copyPackage(src, dst string, embeds []string) {
+	entries, err := os.ReadDir(src)
+	must(err)
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || strings.HasSuffix(n, "_test.go") || n == "go.mod" || n == "go.sum" {
+			continue
+		}
+		if strings.HasSuffix(n, ".go") && ignored(filepath.Join(src, n)) {
+			continue
+		}
+		names = append(names, n)
+	}
+	for _, n := range append(names, embeds...) {
+		b, err := os.ReadFile(filepath.Join(src, n))
+		must(err)
+		target := filepath.Join(dst, n)
+		if old, err := os.ReadFile(target); err == nil {
+			if !bytes.Equal(old, b) {
+				fail("vendor: %s is there already with other content", target)
+			}
+			continue
+		}
+		must(os.MkdirAll(filepath.Dir(target), 0o755))
+		must(os.WriteFile(target, b, 0o644))
+	}
+}
+
+// ignored reports whether no build includes the Go file: its build
+// constraint needs the tag "ignore" whatever the other tags are.
+func ignored(file string) bool {
+	b, err := os.ReadFile(file)
+	must(err)
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "package ") {
+			return false
+		}
+		if !constraint.IsGoBuild(l) {
+			continue
+		}
+		expr, err := constraint.Parse(l)
+		if err != nil {
+			return false
+		}
+		// Any tag but "ignore" is whatever suits the expression best.
+		var eval func(constraint.Expr, bool) bool
+		eval = func(x constraint.Expr, want bool) bool {
+			switch x := x.(type) {
+			case *constraint.TagExpr:
+				return x.Tag != "ignore" && want
+			case *constraint.NotExpr:
+				return !eval(x.X, !want)
+			case *constraint.AndExpr:
+				return eval(x.X, want) && eval(x.Y, want)
+			case *constraint.OrExpr:
+				return eval(x.X, want) || eval(x.Y, want)
+			}
+			return true
+		}
+		return !eval(expr, true)
+	}
+	return false
+}
+
+// copyLicenses copies the license files of a module ("go mod vendor" copies
+// LICENSE, NOTICE, ... of the module root and of every directory down to a
+// package) from modDir into dst, the module in vendor/.
+func copyLicenses(modDir, pkgDir, dst string) {
+	rel, err := filepath.Rel(modDir, pkgDir)
+	must(err)
+	dirs := []string{"."}
+	for d := rel; d != "." && d != ""; d = filepath.Dir(d) {
+		dirs = append(dirs, d)
+	}
+	for _, d := range dirs {
+		entries, err := os.ReadDir(filepath.Join(modDir, d))
+		must(err)
+		for _, e := range entries {
+			if e.IsDir() || !metaFile.MatchString(e.Name()) {
+				continue
+			}
+			target := filepath.Join(dst, d, e.Name())
+			if _, err := os.Stat(target); err == nil {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(modDir, d, e.Name()))
+			must(err)
+			must(os.MkdirAll(filepath.Dir(target), 0o755))
+			must(os.WriteFile(target, b, 0o644))
+		}
+	}
+}
+
+// metaFile matches the files "go mod vendor" keeps outside of packages.
+var metaFile = regexp.MustCompile(`(?i)^(AUTHORS|CONTRIBUTORS|COPYLEFT|COPYING|COPYRIGHT|LEGAL|LICENSE|NOTICE|PATENTS)`)
 
 // remove deletes a file that must exist.
 func remove(path string) {

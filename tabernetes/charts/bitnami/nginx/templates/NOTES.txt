@@ -1,0 +1,27 @@
+CHART NAME: {{ .Chart.Name }}
+CHART VERSION: {{ .Chart.Version }}
+APP VERSION: {{ .Chart.AppVersion }}
+
+** Please be patient while the chart is being deployed **
+
+NGINX can be accessed through the following DNS name from within your cluster:
+
+    {{ include "nginx.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local (port {{ .Values.service.ports.http }})
+
+To access NGINX from the terminal of Tabernetes:
+
+    wget -qO- {{ include "nginx.fullname" . }}{{ if ne (int .Values.service.ports.http) 80 }}:{{ .Values.service.ports.http }}{{ end }}
+
+or show it next to the terminal:
+
+    proxy svc/{{ include "nginx.fullname" . }}
+{{- if eq .Values.service.type "NodePort" }}
+
+The service listens on a node port as well:
+
+    export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "nginx.fullname" . }})
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+The service is of type LoadBalancer. Tabernetes has no load balancer, so its
+EXTERNAL-IP stays <pending>; the cluster IP and the node port work.
+{{- end }}

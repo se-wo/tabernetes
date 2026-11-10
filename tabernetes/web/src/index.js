@@ -24,6 +24,9 @@ const wasi = {
   mirror: el.dataset.oci === "" ? "" : url(el.dataset.oci, "oci/"),
 };
 installWasi(wasi);
+// helm downloads chart repositories without CORS headers from copies in
+// charts/ (k8s/tabernetes/helm.go).
+globalThis.tabernetesCharts = url(el.dataset.charts, "charts/");
 // The tab node offers the WebGPU adapter of the browser as a DRA device.
 installGPU();
 // The status line under the terminal: the nodes (Docker, then Web Workers),

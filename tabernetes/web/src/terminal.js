@@ -152,6 +152,7 @@ export async function startTerminal(el, opts) {
         "Kubernetes",
         "  kubectl, k               kubectl against the in-browser cluster",
         "  kubectl edit ...         opens vi: :wq applies, :q! cancels",
+        "  helm                     Helm v4; helm repo add bitnami https://charts.bitnami.com/bitnami works",
         "",
         "The tab node (pods run inside this tab, no Docker needed)",
         "  k create deploy web --image=nginx --replicas=3",

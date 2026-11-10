@@ -341,3 +341,56 @@ func TestEtcdLogLine(t *testing.T) {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
 }
+
+// The node lifecycle controller may taint the node between the read and the
+// write of the status. The write must not carry the spec that was read:
+// NodeRestriction would see the node drop the taint and refuse it.
+func TestNodeStatusKeepsTaints(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset(&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: tabNodeName}})
+	n := &tabNode{client: client}
+	tainted := false
+	client.PrependReactor("get", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		obj, err := client.Tracker().Get(v1.SchemeGroupVersion.WithResource("nodes"), "", tabNodeName)
+		if err != nil {
+			return true, nil, err
+		}
+		read := obj.(*v1.Node).DeepCopy()
+		if !tainted {
+			tainted = true
+			now := obj.(*v1.Node).DeepCopy()
+			now.Spec.Taints = []v1.Taint{{Key: "node.kubernetes.io/not-ready", Effect: v1.TaintEffectNoSchedule}}
+			if err := client.Tracker().Update(v1.SchemeGroupVersion.WithResource("nodes"), now, ""); err != nil {
+				return true, nil, err
+			}
+		}
+		return true, read, nil
+	})
+	if err := n.updateStatus(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range client.Actions() {
+		switch a := a.(type) {
+		case k8stesting.UpdateAction:
+			t.Errorf("the node is updated as a whole (%s %s)", a.GetVerb(), a.GetSubresource())
+		case k8stesting.PatchAction:
+			if a.GetSubresource() != "status" || strings.Contains(string(a.GetPatch()), "spec") || strings.Contains(string(a.GetPatch()), "taints") {
+				t.Errorf("patch of %q: %s", a.GetSubresource(), a.GetPatch())
+			}
+		}
+	}
+	node, err := client.CoreV1().Nodes().Get(ctx, tabNodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(node.Spec.Taints) != 1 || node.Spec.Taints[0].Key != "node.kubernetes.io/not-ready" {
+		t.Errorf("taints after the status write: %v", node.Spec.Taints)
+	}
+	ready := false
+	for _, c := range node.Status.Conditions {
+		ready = ready || c.Type == v1.NodeReady && c.Status == v1.ConditionTrue
+	}
+	if !ready || node.Status.NodeInfo.KernelVersion != kernelVersion {
+		t.Errorf("status %+v", node.Status)
+	}
+}
