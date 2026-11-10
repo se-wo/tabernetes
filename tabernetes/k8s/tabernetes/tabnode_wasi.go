@@ -171,6 +171,8 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 	opts.Set("preopens", preopens)
 	opts.Set("stdin", c.stdin != nil)
 	opts.Set("name", c.w.namespace+"/"+c.w.name+"/"+c.spec.Name)
+	// The WebGPU device of its claims, if any (tabnode_gpu.go).
+	opts.Set("gpu", c.w.gpuForWorker(c.spec.Name))
 
 	ctx, cancel := context.WithCancel(ctx)
 	p := newProcess(cancel)
