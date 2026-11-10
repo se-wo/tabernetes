@@ -155,7 +155,10 @@ kube-proxy and DNS of the tab: it listens on every cluster IP and node port
 and forwards to ready endpoints (endpoints on a Docker node through the
 port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service names
 with the search path of the pod, in pods and in the terminal:
-`k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
+`k expose deploy web --port 80; wget -qO- web`. Endpoints rotate, but with
+`sessionAffinity: ClientIP` a client IP (a pod, or the node IP for the
+terminal) keeps its endpoint for `timeoutSeconds`, and
+`internalTrafficPolicy: Local` uses the endpoints on the tab node only. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
 
 ### More nodes in Web Workers
