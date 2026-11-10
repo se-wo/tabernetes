@@ -176,6 +176,47 @@ Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
 with `limits.cpu` below 500m).
 
+## NetworkPolicy
+
+NetworkPolicies and ClusterNetworkPolicies (`policy.networking.k8s.io/v1alpha2`)
+are enforced, on every node. The decisions come from the engine of
+[kube-network-policies](https://github.com/kubernetes-sigs/kube-network-policies),
+the NetworkPolicy implementation of SIG Network. The design is in
+`docs/networking-policy.md`.
+
+- The tab nodes have the engine in the binary (`tabnode_netpol.go`). It
+  decides when a connection opens, which is what it gets on a real node: the
+  first packet of a connection. A pod dials from its pod IP, and a service IP
+  goes to one endpoint first, like kube-proxy's DNAT. A denied connection
+  times out, like a dropped SYN. A service without endpoints is refused.
+- Pods of different nodes talk over a `pod` channel (`podlink.go`), not the
+  port-forward of the apiserver. Its first line names the source and the
+  destination. The page names the node a channel comes from, and checks that
+  the source belongs to that node.
+- Docker nodes run the upstream DaemonSet with nftables and nfqueue,
+  next to flannel and kube-proxy. The agent dials pods for the tab from the
+  tab pod's IP as uid 65534, so those rules decide it. Pods of a Docker node
+  reach tab pods: TPROXY hands their connections to the agent.
+- A policy change also applies to open connections (strict mode): a denied
+  one is closed.
+- Never blocked, like on a real node: a pod to itself, and the host of a
+  node to its own pods. The host of the tab node is the terminal, the
+  kubelet, the apiserver and hostNetwork pods. To pods of other nodes, its
+  traffic comes from the node IP, so only `ipBlock` rules can allow it.
+- `agnhost connect <host:port> --timeout=1s` exits 0, or prints `TIMEOUT`
+  or `REFUSED`, like in the NetworkPolicy end-to-end tests.
+
+```bash
+k run web --image=nginx -l app=web --port 80; k expose pod web
+k run client --image=registry.k8s.io/e2e-test-images/agnhost:2.53 -l role=client -- pause
+printf 'apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {name: web}\nspec:\n  podSelector: {matchLabels: {app: web}}\n  ingress: [{from: [{podSelector: {matchLabels: {role: other}}}]}]\n' | k apply -f -
+k exec client -- /agnhost connect web:80 --timeout=2s   # TIMEOUT
+```
+
+Not covered: UDP (the tab nodes have none), rules on domain names (egress
+to the internet goes through `fetch()`, without an IP), and an exact
+`except` of `ipBlock` for internet egress.
+
 ## Patches
 
 `k8s/patch.go` patches a Kubernetes checkout. It is plain Go, so it works the
@@ -192,6 +233,11 @@ same on macOS and Linux:
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
   their command line.
+- The decision packages of kube-network-policies and the client of
+  network-policy-api are vendored the same way
+  (`KUBE_NETWORK_POLICIES_VERSION`, `NETWORK_POLICY_API_VERSION`), without
+  the nftables dataplane. Their `packet.go` gets the IANA numbers of five
+  `syscall.IPPROTO_*` constants that js lacks.
 - `kubectl port-forward` and `kubectl proxy` stop with their command
   context. Otherwise their listeners would stay until the tab closes.
 
@@ -315,8 +361,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
   Docker node, so service proxy URLs work only for pods on the tab node.
-- Pods on Docker nodes cannot reach pods on the tab nodes: kube-proxy of a
-  Docker node has no route into the browser.
+- Pods on Docker nodes reach pods on the tab nodes over TCP only, through
+  the agent (TPROXY). If the tab node denies such a connection, the pod sees
+  it open and then end, not a timeout.
 - The tab node is not a sandbox: all its containers share the tab, its
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container

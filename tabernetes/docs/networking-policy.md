@@ -1,9 +1,12 @@
 # NetworkPolicy on Tabernetes nodes
 
-Status: design. Nothing of it is implemented yet. The proofs of concept in
+Status: phases 1 to 6 are implemented, see "Implementation" at the end.
+Phase 0 (nfqueue in a rootless Docker node) and the end-to-end runs of phase 7 need
+a Docker node and are still open. The proofs of concept in
 `networking-policy-poc/` answer the open questions that code could settle.
 
-Today a NetworkPolicy is stored and nothing enforces it. This design makes
+Before this work a NetworkPolicy was stored and nothing enforced it. This
+design makes
 the nodes enforce it with the decision engine of
 [kube-network-policies](https://github.com/kubernetes-sigs/kube-network-policies),
 the NetworkPolicy implementation of SIG Network. The engine is the same Go
@@ -505,3 +508,52 @@ Each phase is one small PR.
 - **The agent deciding with its own engine for tab traffic**: would duplicate
   the DaemonSet and need cluster-wide read credentials on every Docker node;
   the transparent helper lets the kernel rules decide.
+
+## Implementation
+
+| Phase | Pull request | Tested |
+| --- | --- | --- |
+| 1 engine in the binary | #10 | build |
+| 2 tab node hooks, `agnhost connect` | #12 | unit tests, browser |
+| 3 pod channel between tab nodes | #13 | unit tests, browser with `addnode 2` |
+| 4 Docker nodes | #14 | agent tests in a user and network namespace; no Docker node |
+| 5 ClusterNetworkPolicy | #15 | unit tests, browser |
+| 6 strict mode | #16 | unit tests, browser regression |
+
+"Browser" means the built page in headless Chromium, with scripts in the
+terminal that create pods and policies and probe with `agnhost connect`.
+
+Where the code differs from the design above:
+
+- Pod channels between two Web Workers go through the Go of the page, not
+  over a MessageChannel the page hands to both workers. Simpler, and the
+  page checks every header it relays.
+- The page checks the header of every channel it relays against the sending
+  node, and `pod:*` lets it pick the node by destination. A Docker node has
+  no informers; it trusts the page, which opens all its channels.
+- The agent does not start a helper process for H7: it creates the socket
+  on a thread whose file system uid is 65534 for that moment. The kernel
+  takes the owner of a socket from there, and `meta skuid` sees it.
+- The TPROXY rule of the agent needs no set of tab pod CIDRs: it catches
+  TCP to 10.244.0.0/16 whose route is not cni0, flannel.1 or lo (`fib`).
+- A Docker pod whose connection a tab node denies sees it open, then end:
+  TPROXY answers the SYN before the tab node decides.
+- Strict mode closes a connection that a policy change denies. On a real
+  node its next packets are dropped.
+- The DaemonSet uses the newest upstream image, v1.1.2-npa-v1alpha2; the
+  tab nodes run the engine of v1.1.3.
+
+### Running the end-to-end tests
+
+The NetworkPolicy end-to-end tests of Kubernetes need a driver outside the browser:
+
+1. `join` a Docker node and `kubectl cordon` it, so the test pods land on
+   `tab` and the workers (`addnode 2`).
+2. Copy `kubectl config view --raw` into the node container. It reaches the
+   apiserver at 127.0.0.1:6443.
+3. In the container, with `e2e.test` of the same Kubernetes version:
+   `e2e.test --kubeconfig <file> --provider=skeleton
+   --ginkgo.focus='\[sig-network\] Netpol' --ginkgo.skip='SCTP|UDP'`.
+4. Uncordon the node for mixed runs.
+
+Expected failures are listed in "Proof that it is real".
