@@ -164,7 +164,21 @@ func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	// docs/networking-policy.md): its decision packages, not its nftables
 	// dataplane. Kubernetes vendors their other dependencies already.
 	vendorModule("sigs.k8s.io/kube-network-policies", os.Getenv("KUBE_NETWORK_POLICIES_VERSION"),
-		"pkg/api", "pkg/network", "pkg/networkpolicy", "pkg/podinfo")
+		"pkg/api", "pkg/network", "pkg/networkpolicy", "pkg/podinfo", "plugins/npa-v1alpha2")
+	// ClusterNetworkPolicy: its types, clientset, informers and listers.
+	vendorModule("sigs.k8s.io/network-policy-api", os.Getenv("NETWORK_POLICY_API_VERSION"),
+		"apis/v1alpha1", "apis/v1alpha2",
+		"pkg/client/applyconfiguration/apis/v1alpha1", "pkg/client/applyconfiguration/apis/v1alpha2",
+		"pkg/client/applyconfiguration/internal",
+		"pkg/client/clientset/versioned", "pkg/client/clientset/versioned/scheme",
+		"pkg/client/clientset/versioned/typed/apis/v1alpha1", "pkg/client/clientset/versioned/typed/apis/v1alpha2",
+		"pkg/client/clientset/versioned/fake",
+		"pkg/client/clientset/versioned/typed/apis/v1alpha1/fake", "pkg/client/clientset/versioned/typed/apis/v1alpha2/fake",
+		"pkg/client/applyconfiguration",
+		"pkg/client/informers/externalversions", "pkg/client/informers/externalversions/internalinterfaces",
+		"pkg/client/informers/externalversions/apis", "pkg/client/informers/externalversions/apis/v1alpha1",
+		"pkg/client/informers/externalversions/apis/v1alpha2",
+		"pkg/client/listers/apis/v1alpha1", "pkg/client/listers/apis/v1alpha2")
 	// netlink.go needs mdlayher/netlink and only serves pkg/dataplane and
 	// pkg/dns, which are not vendored.
 	remove("vendor/sigs.k8s.io/kube-network-policies/pkg/network/netlink.go")

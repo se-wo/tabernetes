@@ -285,7 +285,7 @@ func init() {
 			// A connection from a tab pod to a pod here (podlink.go).
 			dc.OnOpen(func() {
 				if raw, err := dc.Detach(); err == nil {
-					go servePodLink(dataChannelRW{raw})
+					go servePodLink(raw)
 				}
 			})
 			return
@@ -375,6 +375,9 @@ func runNode(ctx context.Context, tok offerToken) error {
 	prepareUnprivileged()
 	if err := setupCgroups(); err != nil {
 		log.Printf("cgroups: %v", err)
+	}
+	if err := shareNetns(); err != nil {
+		log.Printf("NetworkPolicy on this node: kube-network-policies cannot start: %v", err)
 	}
 	files := map[string]string{
 		"/etc/kubernetes/pki/ca.crt": tok.CA,
@@ -581,6 +584,27 @@ func isNoise(line string) bool {
 		}
 	}
 	return false
+}
+
+// netnsDir is where containerd keeps the network namespaces of the pods.
+const netnsDir = "/run/netns"
+
+// shareNetns makes netnsDir a shared mount of its own. The DaemonSet of
+// kube-network-policies mounts it with mountPropagation HostToContainer, and
+// the kubelet refuses that for a path on a private mount: the root of a
+// container is private, and the user namespace makes it private again
+// (userns.go). It runs before containerd creates the first namespace.
+func shareNetns() error {
+	if err := os.MkdirAll(netnsDir, 0o755); err != nil {
+		return err
+	}
+	if err := syscall.Mount(netnsDir, netnsDir, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind %s: %w", netnsDir, err)
+	}
+	if err := syscall.Mount("", netnsDir, "", syscall.MS_SHARED|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("share %s: %w", netnsDir, err)
+	}
+	return nil
 }
 
 // prepareUnprivileged makes a container without --privileged usable for

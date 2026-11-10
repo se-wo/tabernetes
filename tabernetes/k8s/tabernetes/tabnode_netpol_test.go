@@ -15,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
+	npapi "sigs.k8s.io/network-policy-api/apis/v1alpha2"
+	npafake "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/fake"
 )
 
 func testPod(name, ip, node string, labels map[string]string) *v1.Pod {
@@ -57,15 +59,7 @@ func TestNetPolicy(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p, err := newNetPolicy(ctx, client, "tab")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for deadline := time.Now().Add(10 * time.Second); !p.engine.Ready(); time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("engine not ready")
-		}
-	}
+	p := readyNetPolicy(ctx, t, client, npafake.NewSimpleClientset())
 	for _, c := range []struct {
 		src, dst string
 		want     bool
@@ -82,6 +76,87 @@ func TestNetPolicy(t *testing.T) {
 	}
 	if pod := p.podByIP("10.244.1.2"); pod == nil || pod.GetName() != "other" || pod.GetNamespace().GetName() != "default" {
 		t.Errorf("podByIP(10.244.1.2) = %v, want default/other", pod)
+	}
+}
+
+func readyNetPolicy(ctx context.Context, t *testing.T, client *fake.Clientset, npa *npafake.Clientset) *netPolicy {
+	t.Helper()
+	p, err := newNetPolicy(ctx, client, npa, "tab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !p.engine.Ready(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("engine not ready")
+		}
+	}
+	return p
+}
+
+// TestClusterNetworkPolicy: the Admin tier wins over NetworkPolicies, the
+// Baseline tier applies where no NetworkPolicy does.
+func TestClusterNetworkPolicy(t *testing.T) {
+	port80 := intstr.FromInt32(80)
+	tcp := v1.ProtocolTCP
+	client := fake.NewClientset(
+		&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", Labels: map[string]string{"kubernetes.io/metadata.name": "default"}}},
+		testPod("web", "10.244.0.2", "tab", map[string]string{"app": "web"}),
+		testPod("client", "10.244.0.3", "tab", map[string]string{"role": "client"}),
+		testPod("other", "10.244.0.4", "tab", map[string]string{"role": "other"}),
+		&networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+				Ingress: []networkingv1.NetworkPolicyIngressRule{{
+					From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port80}},
+				}},
+			},
+		},
+	)
+	all := metav1.LabelSelector{}
+	npa := npafake.NewSimpleClientset(
+		// Admin: role=other never reaches web, whatever NetworkPolicies say.
+		&npapi.ClusterNetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "admin"},
+			Spec: npapi.ClusterNetworkPolicySpec{
+				Tier: npapi.AdminTier, Priority: 10,
+				Subject: npapi.ClusterNetworkPolicySubject{Pods: &npapi.NamespacedPod{NamespaceSelector: all, PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}},
+				Ingress: []npapi.ClusterNetworkPolicyIngressRule{{
+					Action: npapi.ClusterNetworkPolicyRuleActionDeny,
+					From:   []npapi.ClusterNetworkPolicyIngressPeer{{Pods: &npapi.NamespacedPod{NamespaceSelector: all, PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "other"}}}}},
+				}},
+			},
+		},
+		// Baseline: nothing reaches role=client, unless a NetworkPolicy allows it.
+		&npapi.ClusterNetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "baseline"},
+			Spec: npapi.ClusterNetworkPolicySpec{
+				Tier: npapi.BaselineTier, Priority: 10,
+				Subject: npapi.ClusterNetworkPolicySubject{Pods: &npapi.NamespacedPod{NamespaceSelector: all, PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "client"}}}},
+				Ingress: []npapi.ClusterNetworkPolicyIngressRule{{
+					Action: npapi.ClusterNetworkPolicyRuleActionDeny,
+					From:   []npapi.ClusterNetworkPolicyIngressPeer{{Namespaces: &all}},
+				}},
+			},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := readyNetPolicy(ctx, t, client, npa)
+	for _, c := range []struct {
+		src, dst string
+		want     bool
+	}{
+		{"10.244.0.3:0", "10.244.0.2:80", true},  // client -> web: the NetworkPolicy allows it
+		{"10.244.0.4:0", "10.244.0.2:80", false}, // other -> web: Admin denies it first
+		{"10.244.0.2:0", "10.244.0.3:80", false}, // web -> client: Baseline denies it
+		{"10.244.0.2:0", "10.244.0.4:80", true},  // web -> other: no policy at all
+	} {
+		if got := p.allowed(ctx, tcpAddr(c.src), tcpAddr(c.dst)); got != c.want {
+			t.Errorf("%s -> %s: allowed %v, want %v", c.src, c.dst, got, c.want)
+		}
 	}
 }
 
@@ -150,4 +225,56 @@ func TestFakeNetSourceAddress(t *testing.T) {
 	if _, err := net.Dial("tcp", "10.244.250.9:80"); err == nil || !refused(err) {
 		t.Errorf("dial without listener: %v, want ECONNREFUSED", err)
 	}
+}
+
+// TestStrictMode: a policy that denies an open connection closes it.
+func TestStrictMode(t *testing.T) {
+	client := fake.NewClientset(
+		&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", Labels: map[string]string{"kubernetes.io/metadata.name": "default"}}},
+		testPod("web", "10.244.0.2", "tab", map[string]string{"app": "web"}),
+		testPod("client", "10.244.0.3", "tab", map[string]string{"role": "client"}),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := readyNetPolicy(ctx, t, client, npafake.NewSimpleClientset())
+	src, dst := tcpAddr("10.244.0.3:40000"), tcpAddr("10.244.0.2:80")
+	if !p.allowed(ctx, src, dst) {
+		t.Fatal("no policy yet: must be allowed")
+	}
+	a, b := net.Pipe()
+	defer b.Close()
+	tracked := p.track(a, src, dst)
+	// Host traffic and connections the policy still allows stay open.
+	keepA, keepB := net.Pipe()
+	defer keepB.Close()
+	kept := p.track(keepA, tcpAddr("10.244.0.2:40001"), tcpAddr("10.244.0.3:80"))
+	defer kept.Close()
+
+	deny := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "deny-web", Namespace: "default"},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		},
+	}
+	if _, err := client.NetworkingV1().NetworkPolicies("default").Create(ctx, deny, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() {
+		_, err := b.Read(make([]byte, 1))
+		closed <- err
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the denied connection is still open")
+	}
+	p.liveMu.Lock()
+	n := len(p.live)
+	p.liveMu.Unlock()
+	if n != 1 {
+		t.Errorf("%d tracked connections, want 1 (the allowed one)", n)
+	}
+	tracked.Close()
 }

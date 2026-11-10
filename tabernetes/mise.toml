@@ -3,7 +3,7 @@
 #   mise run build       build the WebAssembly binary and the terminal into .build/assets/
 #   mise run web         rebuild only the terminal (needs .build/wasm_exec.js)
 #   mise run site        build the standalone page (GitHub Pages) into .build/site/
-#   mise run test        run the etcd shim tests
+#   mise run test        run the tests of the etcd shim, the shell and the node agent
 #   mise run node-image  build the node image (tabernetes) for the local platform
 #
 # Updating Kubernetes means bumping KUBERNETES_VERSION, running `mise run build`
@@ -26,6 +26,9 @@ MVDAN_SH_VERSION = "v3.14.1"
 # must match KUBERNETES_VERSION.
 # renovate: datasource=go depName=sigs.k8s.io/kube-network-policies
 KUBE_NETWORK_POLICIES_VERSION = "v1.1.3"
+# The ClusterNetworkPolicy API of that engine: the version its go.mod requires.
+# renovate: datasource=go depName=sigs.k8s.io/network-policy-api
+NETWORK_POLICY_API_VERSION = "v0.2.1"
 
 [tasks.checkout]
 description = "Clone Kubernetes at KUBERNETES_VERSION into .build/kubernetes"
@@ -108,13 +111,14 @@ description = "Build everything into .build/assets/"
 depends = ["wasm", "web"]
 
 [tasks.test]
-description = "Run the etcd shim tests and the shell tests (in node), vet the node agent"
+description = "Run the etcd shim tests and the shell tests (in node), vet and test the node agent"
 depends = ["patch"]
 dir = "{{config_root}}/.build/kubernetes"
 run = """
 go test ./cmd/tabernetes/etcdshim/
 GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/tabernetes/
 GOOS=linux go -C {{config_root}}/node/agent vet ./...
+GOOS=linux go -C {{config_root}}/node/agent test ./...
 """
 
 [tasks.node-image]
