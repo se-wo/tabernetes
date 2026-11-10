@@ -442,32 +442,42 @@ func TestSecFileTools(t *testing.T) {
 	os.WriteFile(pe.root.real("/etc/conf"), []byte("a=1\n"), 0o644)
 	os.WriteFile(pe.root.real("/tmp/theirs"), []byte("x\n"), 0o644)
 	os.WriteFile(pe.root.real("/root/secret"), []byte("x\n"), 0o600)
+	// Under node the files are the ones of the machine: without the right
+	// to chown, new files do not belong to the user of the container, and
+	// the cases that go on with them are skipped.
+	probe := filepath.Join(t.TempDir(), "probe")
+	os.WriteFile(probe, nil, 0o644)
+	canChown := os.Chown(probe, 4242, 4242) == nil
 	for _, tc := range []struct {
 		script, want string
 		ok           bool
+		owns         bool // works on entries the container created before
 	}{
-		{"cp /etc/conf /etc/copy", "Permission denied", false},
-		{"cp /etc/conf /tmp/copy && cat /tmp/copy", "a=1", true},
-		{"cp -r /etc /tmp/etc && cat /tmp/etc/conf", "a=1", true},
-		{"mv /etc/conf /tmp/conf", "Permission denied", false},
-		{"mv /tmp/theirs /tmp/mine", "Permission denied", false}, // the sticky bit
-		{"mv /tmp/copy /tmp/copy2 && cat /tmp/copy2", "a=1", true},
-		{"ln -s /etc/conf /etc/link", "Permission denied", false},
-		{"ln -s copy2 /tmp/link && cat /tmp/link", "a=1", true},
-		{"chmod 777 /etc/conf", "Operation not permitted", false},
-		{"chown 4242 /etc/conf", "Operation not permitted", false},
-		{"sed -i s/1/2/ /etc/conf", "Permission denied", false},
-		{"sed s/1/2/ /etc/conf", "a=2", true},
-		{"dd if=/etc/conf of=/etc/dd status=none", "Permission denied", false},
-		{"rmdir /etc", "Permission denied", false},
-		{"mktemp -d /etc/XXXXXX", "Permission denied", false},
-		{"cd /tmp && tar cf a.tar copy2 && mkdir out && tar xf a.tar -C out && cat out/copy2", "a=1", true},
-		{"tar xf /tmp/a.tar -C /etc", "Permission denied", false},
-		{"grep -r x /root", "Permission denied", false},
-		{"awk '{print > \"/etc/awk\"}' /etc/conf", "", false},
-		{"find /tmp/copy2 -delete && ls /tmp/copy2", "No such file", false},
-		{"find /etc/conf -delete", "Permission denied", false},
+		{"cp /etc/conf /etc/copy", "Permission denied", false, false},
+		{"cp /etc/conf /tmp/copy && cat /tmp/copy", "a=1", true, false},
+		{"cp -r /etc /tmp/etc && cat /tmp/etc/conf", "a=1", true, true},
+		{"mv /etc/conf /tmp/conf", "Permission denied", false, false},
+		{"mv /tmp/theirs /tmp/mine", "Permission denied", false, false}, // the sticky bit
+		{"mv /tmp/copy /tmp/copy2 && cat /tmp/copy2", "a=1", true, true},
+		{"ln -s /etc/conf /etc/link", "Permission denied", false, false},
+		{"ln -s copy2 /tmp/link && cat /tmp/link", "a=1", true, true},
+		{"chmod 777 /etc/conf", "Operation not permitted", false, false},
+		{"chown 4242 /etc/conf", "Operation not permitted", false, false},
+		{"sed -i s/1/2/ /etc/conf", "Permission denied", false, false},
+		{"sed s/1/2/ /etc/conf", "a=2", true, false},
+		{"dd if=/etc/conf of=/etc/dd status=none", "Permission denied", false, false},
+		{"rmdir /etc", "Permission denied", false, false},
+		{"mktemp -d /etc/XXXXXX", "Permission denied", false, false},
+		{"cd /tmp && tar cf a.tar copy2 && mkdir out && tar xf a.tar -C out && cat out/copy2", "a=1", true, true},
+		{"tar xf /tmp/a.tar -C /etc", "Permission denied", false, true},
+		{"grep -r x /root", "Permission denied", false, false},
+		{"awk '{print > \"/etc/awk\"}' /etc/conf", "", false, false},
+		{"find /tmp/copy2 -delete && ls /tmp/copy2", "No such file", false, true},
+		{"find /etc/conf -delete", "Permission denied", false, false},
 	} {
+		if tc.owns && !canChown {
+			continue
+		}
 		got, code := runIn(t, pe, tc.script)
 		if (code == 0) != tc.ok || !strings.Contains(got, tc.want) {
 			t.Errorf("%s: exit %d, %q; want %q (ok %v)", tc.script, code, got, tc.want, tc.ok)
