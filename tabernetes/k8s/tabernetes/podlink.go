@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"syscall/js"
@@ -59,6 +60,10 @@ func podLinkNode(label string) (node string, route, ok bool) {
 // come from the page and name their node in the label).
 func attachPodLink(conn io.ReadWriteCloser, label, from string) {
 	node, route, _ := podLinkNode(label)
+	if theTabNode == nil {
+		conn.Close() // the node of this instance has not started
+		return
+	}
 	if route {
 		// Only the page routes, and only channels of nodes it knows.
 		if from == "" {
@@ -194,19 +199,22 @@ func readPodLinkLine(r io.Reader, max int) (string, error) {
 	return string(b), errors.New("line too long")
 }
 
-// parsePodLinkHeader parses "TABP/1 tcp <src> <dst>".
+// parsePodLinkHeader parses "TABP/1 tcp <src> <dst>". The addresses are IP
+// literals: a name is refused, not resolved.
 func parsePodLinkHeader(line string) (src, dst *net.TCPAddr, err error) {
 	f := strings.Fields(line)
 	if len(f) != 4 || f[0] != podLinkVersion || f[1] != "tcp" {
 		return nil, nil, fmt.Errorf("bad header %q", line)
 	}
-	if src, err = net.ResolveTCPAddr("tcp", f[2]); err != nil || src.IP == nil {
+	s, err := netip.ParseAddrPort(f[2])
+	if err != nil {
 		return nil, nil, fmt.Errorf("bad source in %q", line)
 	}
-	if dst, err = net.ResolveTCPAddr("tcp", f[3]); err != nil || dst.IP == nil {
+	d, err := netip.ParseAddrPort(f[3])
+	if err != nil || d.Port() == 0 {
 		return nil, nil, fmt.Errorf("bad destination in %q", line)
 	}
-	return src, dst, nil
+	return net.TCPAddrFromAddrPort(s), net.TCPAddrFromAddrPort(d), nil
 }
 
 // servePodLink serves a pod channel from the node from.
@@ -266,17 +274,28 @@ func (n *tabNode) servePodLinkHeader(conn io.ReadWriteCloser, from, line string)
 		conn.Close()
 		return
 	}
-	go pipeConns(conn, c)
+	go pipeConns(conn, n.policy.track(c, src, dst))
 }
 
-// podLinkTarget is the node of the pod with IP ip if that node takes pod
-// channels.
-func (n *tabNode) podLinkTarget(node string) bool {
+// podLinkTarget reports whether ip is reached over a pod channel to node: the
+// node takes pod channels and ip is in its pod CIDR. A hostNetwork pod has
+// the node IP, which no pod channel serves; it keeps the port-forward of the
+// apiserver.
+func (n *tabNode) podLinkTarget(node, ip string) bool {
 	if n == nil || n.policy == nil || node == "" || node == tabNodeName {
 		return false
 	}
 	nd, err := n.policy.nodes.Get(node)
-	return err == nil && nd.Labels[podLinkNodeLabel] != ""
+	if err != nil || nd.Labels[podLinkNodeLabel] == "" {
+		return false
+	}
+	addr := net.ParseIP(ip)
+	for _, c := range nodePodCIDRs(nd) {
+		if _, cidr, err := net.ParseCIDR(c); err == nil && addr != nil && cidr.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeOf is the node whose pod CIDR contains ip, "" if none.
