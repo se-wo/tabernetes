@@ -68,6 +68,8 @@ browser tab (single wasm binary)                     docker run tabernetes
   `ping` and `telnet` dial from the pod IP. `openssl` covers keys, requests,
   signing and `x509 -text` for the CertificateSigningRequest exercise.
   `kubectl convert` is compiled in, because plugins cannot run in Wasm.
+  `ls` prints like BusyBox, with `-l -n -a -A -d -h -i -L -R -r -S -t -1` and
+  `--color`.
 - `history` lists the command lines of the tab, and Ctrl-R searches them
   backwards like Bash. The history ends with the tab.
 - `cmd &` runs in the background, `jobs` lists the jobs, `kill %1` stops one.
