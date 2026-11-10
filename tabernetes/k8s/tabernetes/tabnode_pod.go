@@ -45,6 +45,7 @@ type podWorker struct {
 	failMessage string
 	sent        *v1.PodStatus               // last status written
 	devices     map[string][]preparedDevice // DRA devices by container (tabnode_gpu.go)
+	vs          volState                    // volume caches (tabnode_volrefresh.go)
 
 	kick        chan struct{}
 	specChanged chan struct{}  // wakes the active deadline
@@ -155,6 +156,7 @@ func (w *podWorker) run() {
 		case <-time.After(5 * time.Second):
 		}
 	}
+	go w.refreshVolumes()
 	for _, c := range w.ctrs {
 		if err := c.prepare(); err != nil {
 			c.setWaiting("CreateContainerConfigError", err.Error())

@@ -718,7 +718,13 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 		p.files.Call("push", jsArray(rel, arr))
 		return nil
 	}
-	walk := func(p *pre, dir string) error {
+	// A volume is links (key -> ..data/key, ..data -> ..<ts>): follow them and
+	// skip the ".." entries, which are the plumbing of the atomic writer.
+	var walk func(p *pre, dir, prefix string) error
+	walk = func(p *pre, dir, prefix string) error {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = r
+		}
 		return filepath.WalkDir(dir, func(real string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -728,6 +734,30 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
+			if strings.HasPrefix(d.Name(), "..") {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if prefix != "" {
+				rel = prefix + "/" + rel
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				st, err := os.Stat(real)
+				if err != nil {
+					return err
+				}
+				if st.IsDir() {
+					r, err := filepath.EvalSymlinks(real)
+					if err != nil {
+						return err
+					}
+					p.dirs.Call("push", rel)
+					return walk(p, r, rel)
+				}
+				return addFile(p, rel, real)
+			}
 			if d.IsDir() {
 				p.dirs.Call("push", rel)
 				return nil
@@ -736,7 +766,7 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 		})
 	}
 	rootPre := newPre("/", false)
-	if err := walk(rootPre, root.base); err != nil {
+	if err := walk(rootPre, root.base, ""); err != nil {
 		return js.Undefined(), err
 	}
 	// A module finds the preopen with the longest prefix of a path.
@@ -752,7 +782,7 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 			}
 			continue
 		}
-		if err := walk(newPre(m.path, m.readOnly), m.real); err != nil {
+		if err := walk(newPre(m.path, m.readOnly), m.real, ""); err != nil {
 			return js.Undefined(), err
 		}
 	}

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -530,7 +531,7 @@ func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 }
 
 func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("ls", args, "la1Ad", nil)
+	o, args, err := opts("ls", args, "la1AdL", nil)
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
@@ -539,7 +540,11 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	}
 	code := 0
 	for n, a := range args {
-		fi, err := os.Lstat(abs(ctx, hc, a))
+		stat := os.Lstat
+		if has(o, "L") || strings.HasSuffix(a, "/") {
+			stat = os.Stat
+		}
+		fi, err := stat(abs(ctx, hc, a))
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "ls: %s: %v\n", a, unwrap(err))
 			code = 2
@@ -552,7 +557,11 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 					continue
 				}
-				if info, err := de.Info(); err == nil {
+				info, err := de.Info()
+				if has(o, "L") {
+					info, err = os.Stat(filepath.Join(abs(ctx, hc, a), de.Name()))
+				}
+				if err == nil {
 					entries = append(entries, info)
 				}
 			}
@@ -574,7 +583,16 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 				name = "\x1b[1;34m" + name + "\x1b[0m"
 			}
 			if has(o, "l") {
-				fmt.Fprintf(hc.Stdout, "%s 1 root root %8d %s %s\n", e.Mode(), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
+				if e.Mode()&fs.ModeSymlink != 0 {
+					p := abs(ctx, hc, a)
+					if fi.IsDir() && !has(o, "d") {
+						p = filepath.Join(p, e.Name())
+					}
+					if t, err := os.Readlink(p); err == nil {
+						name += " -> " + t
+					}
+				}
+				fmt.Fprintf(hc.Stdout, "%s 1 root root %8d %s %s\n", lsMode(e.Mode()), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
 			} else {
 				fmt.Fprintln(hc.Stdout, name)
 			}

@@ -140,6 +140,14 @@ env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+configMap, secret, projected and downwardAPI volumes look like on a real
+node (`tabnode_volwriter.go`): the files sit in a `..<timestamp>` directory,
+`..data` links to it and every key links into `..data`. They get `defaultMode`
+or `items[].mode`, so `ls -lL` shows `-r--------` for `defaultMode: 0400`.
+Every minute the node writes them again (`tabnode_volrefresh.go`), so
+`kubectl edit cm` reaches a running pod within about a minute. `subPath`
+mounts and immutable objects keep their content, like on a real node.
+Projected service account tokens are renewed at 80 % of their lifetime.
 `tabnode_lifecycle.go` adds what the kubelet drives on its own: `postStart`
 and `preStop` hooks with `exec`, `httpGet` and `sleep` (a failed postStart
 kills the container, preStop counts against the grace period),
