@@ -109,8 +109,9 @@ Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
 keeps its Lease and runs the pods the scheduler binds to it. It has the taint
 `tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
 everything lands here; once a Docker node joins, the scheduler prefers that
-one. flannel and kube-proxy stay off it (the tab has a kube-proxy of its own). CoreDNS
-runs here as a built-in image until a Docker node is Ready, then moves there.
+one. flannel and kube-proxy stay off it (the tab has a kube-proxy of its
+own). CoreDNS runs here as a built-in image until a Docker node is Ready,
+then moves there.
 
 A container is not a process:
 
