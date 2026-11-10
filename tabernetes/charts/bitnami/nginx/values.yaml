@@ -1,5 +1,5 @@
-# A small chart with the values of Bitnami's nginx chart that tutorials use.
-# Tabernetes runs the official nginx image (docker.io/library/nginx).
+## @param clusterDomain Kubernetes Cluster Domain
+clusterDomain: cluster.local
 
 ## @param nameOverride String to partially override nginx.fullname
 nameOverride: ""

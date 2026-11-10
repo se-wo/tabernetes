@@ -2,7 +2,7 @@ apiVersion: v2
 name: nginx
 version: 22.1.0
 appVersion: 1.29.3
-description: NGINX Open Source is a web server that can be also used as a reverse proxy, load balancer, and HTTP cache. A small chart in the style of Bitnami's for Tabernetes.
+description: NGINX Open Source is a web server that can be also used as a reverse proxy, load balancer, and HTTP cache. Recommended for high-demanding sites due to its ability to provide faster content.
 type: application
 keywords:
   - nginx
@@ -10,10 +10,10 @@ keywords:
   - web
   - www
   - reverse proxy
-home: https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/nginx
+home: https://bitnami.com
 icon: https://nginx.org/nginx.png
 maintainers:
-  - name: Tabernetes
-    url: https://github.com/se-wo/tabernetes
+  - name: Broadcom, Inc. All Rights Reserved.
+    url: https://github.com/bitnami/charts
 sources:
-  - https://github.com/se-wo/tabernetes/tree/main/tabernetes/charts/bitnami/nginx
+  - https://github.com/bitnami/charts/tree/main/bitnami/nginx

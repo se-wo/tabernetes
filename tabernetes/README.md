@@ -57,7 +57,12 @@ browser tab (single wasm binary)                     docker run tabernetes
   next to the page instead: small charts in the style of Bitnami's
   (`tabernetes/charts/`, nginx, apache and redis) that run the official images on
   the tab node, so `helm repo add bitnami https://charts.bitnami.com/bitnami` and
-  `helm install web bitnami/nginx` work.
+  `helm install web bitnami/nginx` work. What helm prints for these charts
+  (the notes, `helm show`) is the output of the real charts and says nothing
+  about this project, so it reads as on a real cluster. There is no load
+  balancer: the `EXTERNAL-IP` of a `LoadBalancer` service stays `<pending>`;
+  use the cluster IP, the node port or `port-forward`. `proxy svc/<name>` shows
+  a service next to the terminal.
 - The shell tools are small Go versions with the common flags: `cp`, `mv`,
   `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
   ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
@@ -645,8 +650,10 @@ python3 -m http.server -d .build/site 8080   # http://localhost:8080/
 works under any base path, such as `/tabernetes/` on GitHub Pages
 (`.github/workflows/pages.yaml`). It also writes `THIRD_PARTY_LICENSES.txt`:
 the Go modules in the binary (`go list -deps`, collected by the `wasm` task
-while the Kubernetes checkout is there) and the npm packages in the bundles,
-each with its license text. `site/charts.mjs` packages the charts of
+while the Kubernetes checkout is there), the npm packages in the bundles and
+the Helm charts of `charts/bitnami/` (Apache License 2.0, from Bitnami's
+charts; the license text is `charts/bitnami/LICENSE`), each with its license
+text. `site/charts.mjs` packages the charts of
 `charts/` into chart repositories under `charts/` of the site. `join` prints
 `TABERNETES_IMAGE` if set at build time, else `$NODE_IMAGE:latest`.
 
