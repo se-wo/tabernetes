@@ -35,15 +35,17 @@ import (
 // simple: the common flags, no locale, no options nobody types.
 type util func(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error
 
-var coreutils map[string]util
+// coreutils is filled by the init functions of coreutils*.go: each file adds
+// its own tools.
+var coreutils = map[string]util{}
 
 func init() {
-	coreutils = map[string]util{
+	maps.Copy(coreutils, map[string]util{
 		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free, "grep": grep,
 		"head": head, "host": hostCmd, "ls": ls, "mkdir": mkdir, "nslookup": nslookup, "rm": rm, "seq": seq, "sleep": sleepCmd,
 		"sort": sortCmd, "tail": tail, "tee": tee, "touch": touch, "tr": tr,
 		"uniq": uniq, "vi": viCmd, "vim": viCmd, "wc": wc, "wget": wget, "xargs": xargs,
-	}
+	})
 }
 
 // opts parses short flags. spec lists the flags, a trailing ":" marks a flag
