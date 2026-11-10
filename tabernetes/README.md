@@ -140,6 +140,11 @@ env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+- `grpc` probes call `grpc.health.v1.Health/Check` with the gRPC prober of
+  the kubelet, so a closed port or `NOT_SERVING` fails with the same
+  `Unhealthy` event. `agnhost grpc-health-checking` (`--port`, `--http-port`,
+  `--service`, `--delay-unhealthy-sec`; `/make-not-serving` and
+  `/make-serving` on the HTTP port) and `podinfo --grpc-port` serve it.
 `tabnode_lifecycle.go` adds what the kubelet drives on its own: `postStart`
 and `preStop` hooks with `exec`, `httpGet` and `sleep` (a failed postStart
 kills the container, preStop counts against the grace period),
