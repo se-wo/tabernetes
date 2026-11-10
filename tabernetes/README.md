@@ -186,6 +186,7 @@ A container is not a process:
 What works like on a real node: init and sidecar containers, restart
 policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/
 downwardAPI/hostPath volumes (hostPath is the file system of the terminal),
+persistentVolumeClaim and generic ephemeral volumes (see below),
 env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
@@ -253,6 +254,26 @@ names of the tab at once. `forward` and the other plugins are ignored: the
 browser has no DNS. Pods on a Docker node need UDP, so once a Docker node is
 Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
 two minutes) and the real CoreDNS runs there.
+
+### Persistent volumes
+
+kube-controller-manager binds claims to PersistentVolumes, and the scheduler
+places a pod with a claim on a node that fits the node affinity of the volume.
+The kubelet then follows the claim to its volume (`tabnode_pvc.go`):
+
+- A `hostPath` or `local` volume is a directory in the file system of the
+  node. The data outlives the pod, and pods on the same node share it. A node
+  in a Web Worker has a file system of its own, so give a volume there node
+  affinity for that node.
+- `hostPath` creates its directory unless its type is `Directory`. A `local`
+  path must exist, as on a real node.
+- `readOnly: true` in the claim source makes every mount of the volume
+  read-only.
+- A claim that is not bound keeps the pod in `ContainerCreating`, with the
+  `FailedMount` event of a real kubelet. Other volume sources (NFS, CSI) fail
+  with an event.
+- `persistentVolumeReclaimPolicy` is handled by the controller-manager, as on a
+  real cluster.
 
 ### More nodes in Web Workers
 
