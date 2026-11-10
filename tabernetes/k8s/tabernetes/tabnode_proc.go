@@ -29,7 +29,8 @@ type procEnv struct {
 	root *rootFS
 	ip   string
 	cpu  *throttle
-	tty  *pty // the terminal of the process, if it has one
+	tty  *pty     // the terminal of the process, if it has one
+	proc *process // the process of the container, nil in the terminal
 }
 
 type procKey struct{}

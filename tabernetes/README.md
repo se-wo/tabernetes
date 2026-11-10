@@ -237,6 +237,13 @@ Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
 with `limits.cpu` below 500m).
 
+`limits.memory` works like the memory cgroup: a container that passes it ends
+with `OOMKilled` and exit code 137, and restarts by its restart policy. What
+counts: the base size of its image, the memory `stress` and `stress-ng` hold
+(`polinux/stress`, `progrium/stress`, `alexeiled/stress-ng`), files in
+`emptyDir` volumes with `medium: Memory`, and the linear memory of a
+WebAssembly container. A container without a limit is never killed.
+
 ### WebGPU through DRA
 
 The kubelets in the browser offer the WebGPU adapter of the browser to
