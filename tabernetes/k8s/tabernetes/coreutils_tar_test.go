@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -245,5 +246,18 @@ func TestTarEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "good")); err != nil {
 		t.Errorf("good was not extracted: %v", err)
+	}
+}
+
+func TestReadOnlyVolume(t *testing.T) {
+	pod := &v1.Pod{Spec: v1.PodSpec{Volumes: []v1.Volume{
+		{Name: "cm", VolumeSource: v1.VolumeSource{ConfigMap: &v1.ConfigMapVolumeSource{}}},
+		{Name: "sec", VolumeSource: v1.VolumeSource{Secret: &v1.SecretVolumeSource{}}},
+		{Name: "data", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+	}}}
+	for name, want := range map[string]bool{"cm": true, "sec": true, "data": false, "none": false} {
+		if got := readOnlyVolume(pod, name); got != want {
+			t.Errorf("readOnlyVolume(%s) = %v, want %v", name, got, want)
+		}
 	}
 }

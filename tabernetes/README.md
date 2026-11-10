@@ -40,6 +40,8 @@ browser tab (single wasm binary)                     docker run tabernetes
   (`grep`, `head`, `wc`, `xargs`, ...) live in `k8s/tabernetes/coreutils.go`, and
   `join`, `logs` and `clear` are JavaScript. Files land in the in-memory file
   system, so `kubectl get cm x -o yaml > cm.yaml` works.
+  `tar` and `gzip` (`k8s/tabernetes/coreutils_tar.go`) work in the terminal and
+  in containers, so `kubectl cp` works in both directions.
   Tab completes commands and files, and kubectl through its own `__complete`
   command, so resource types and names come from the cluster.
   `wget` downloads through the `fetch()` of the browser, so it only works for
