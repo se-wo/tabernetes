@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -23,7 +25,7 @@ func sh(t *testing.T, script string) (string, int) {
 	handler := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		self = func(ctx context.Context, args []string) error {
 			if u := coreutils[args[0]]; u != nil {
-				return u(ctx, interp.HandlerCtx(ctx), args[1:], self)
+				return sigpipe(u(ctx, interp.HandlerCtx(ctx), args[1:], self))
 			}
 			return next(ctx, args)
 		}
@@ -50,6 +52,10 @@ func sh(t *testing.T, script string) (string, int) {
 func TestCoreutils(t *testing.T) {
 	for _, tc := range []struct{ script, want string }{
 		{"seq 3", "1\n2\n3\n"},
+		{"seq 3 | tr -d '\\n'", "123"},
+		{"echo Hello | tr '[:lower:]' '[:upper:]'", "HELLO\n"},
+		{"echo abcdef | head -c 3", "abc"},
+		{"echo abcdef | cut -c 2-4", "bcd\n"},
 		{"seq 3 | wc -l", "3\n"},
 		{"seq 10 | head -3", "1\n2\n3\n"},
 		{"seq 10 | head -n 2", "1\n2\n"},
@@ -206,5 +212,19 @@ func TestClusterURLs(t *testing.T) {
 		if got := noSuchHost(context.Background(), host); got != want {
 			t.Errorf("noSuchHost(%q) = %v, want %v", host, got, want)
 		}
+	}
+}
+
+func TestLsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
+	os.Symlink("f", filepath.Join(dir, "l"))
+	out, code := sh(t, "ls -l "+dir)
+	if code != 0 || !strings.Contains("\n"+out, "\nlrwx") || !strings.Contains(out, " l -> f") {
+		t.Errorf("ls -l: %q (exit %d)", out, code)
+	}
+	out, _ = sh(t, "ls -lL "+dir)
+	if strings.Contains(out, "->") || strings.Contains(out, "lrwx") {
+		t.Errorf("ls -lL: %q", out)
 	}
 }

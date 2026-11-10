@@ -38,7 +38,6 @@ import (
 	"strings"
 	"sync"
 	"syscall/js"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 )
@@ -186,6 +185,8 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 	stdout, stderr := logs.writer("stdout"), logs.writer("stderr")
 	h.Call("onStdout", cb(func(a []js.Value) { stdout.Write(jsBytes(a[0])) }))
 	h.Call("onStderr", cb(func(a []js.Value) { stderr.Write(jsBytes(a[0])) }))
+	// The linear memory of the module counts for limits.memory.
+	h.Call("onMem", cb(func(a []js.Value) { go c.chargeMem(p, "wasm", int64(a[0].Int())) }))
 	h.Call("onExit", cb(func(a []js.Value) {
 		if len(a) > 1 && a[1].Type() == js.TypeString {
 			stderr.Write([]byte(a[1].String() + "\n"))
@@ -231,38 +232,19 @@ func (c *ctr) runtimeClass() string {
 // pullWasm resolves the image and loads its module. Pull errors are
 // retried with a back-off like the kubelet does (ErrImagePull,
 // ImagePullBackOff), so the error is a non-pull error or the end of ctx.
-func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (*wasmImage, js.Value, error) {
-	delay := 10 * time.Second
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			c.w.ctrEvent(c, v1.EventTypeNormal, "Pulling", "Pulling image %q", c.spec.Image)
-		}
-		img, mod, err := c.pullWasmOnce(ctx, rt)
-		if err == nil || ctx.Err() != nil {
-			return img, mod, err
-		}
+func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (img *wasmImage, mod js.Value, err error) {
+	err = c.pullWithBackOff(ctx, func() error {
+		var err error
+		img, mod, err = c.pullWasmOnce(ctx, rt)
+		return err
+	}, func(err error) bool {
 		var unsupported unsupportedError
-		if errors.As(err, &unsupported) {
-			return nil, js.Undefined(), err
-		}
-		msg := err.Error()
-		c.setWaiting("ErrImagePull", msg)
-		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Failed to pull image %q: %s", c.spec.Image, msg)
-		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: ErrImagePull")
-		select {
-		case <-ctx.Done():
-			return nil, js.Undefined(), ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-		c.setWaiting("ImagePullBackOff", fmt.Sprintf("Back-off pulling image %q: ErrImagePull: %s", c.spec.Image, msg))
-		c.w.ctrEvent(c, v1.EventTypeNormal, "BackOff", "Back-off pulling image %q", c.spec.Image)
-		select {
-		case <-ctx.Done():
-			return nil, js.Undefined(), ctx.Err()
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, 5*time.Minute)
+		return !errors.As(err, &unsupported)
+	})
+	if err != nil {
+		return nil, js.Undefined(), err
 	}
+	return img, mod, nil
 }
 
 type unsupportedError struct{ msg string }
@@ -718,7 +700,13 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 		p.files.Call("push", jsArray(rel, arr))
 		return nil
 	}
-	walk := func(p *pre, dir string) error {
+	// A volume is links (key -> ..data/key, ..data -> ..<ts>): follow them and
+	// skip the ".." entries, which are the plumbing of the atomic writer.
+	var walk func(p *pre, dir, prefix string) error
+	walk = func(p *pre, dir, prefix string) error {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = r
+		}
 		return filepath.WalkDir(dir, func(real string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -728,6 +716,30 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
+			if strings.HasPrefix(d.Name(), "..") {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if prefix != "" {
+				rel = prefix + "/" + rel
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				st, err := os.Stat(real)
+				if err != nil {
+					return err
+				}
+				if st.IsDir() {
+					r, err := filepath.EvalSymlinks(real)
+					if err != nil {
+						return err
+					}
+					p.dirs.Call("push", rel)
+					return walk(p, r, rel)
+				}
+				return addFile(p, rel, real)
+			}
 			if d.IsDir() {
 				p.dirs.Call("push", rel)
 				return nil
@@ -736,7 +748,7 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 		})
 	}
 	rootPre := newPre("/", false)
-	if err := walk(rootPre, root.base); err != nil {
+	if err := walk(rootPre, root.base, ""); err != nil {
 		return js.Undefined(), err
 	}
 	// A module finds the preopen with the longest prefix of a path.
@@ -752,7 +764,7 @@ func wasmPreopens(root *rootFS) (js.Value, error) {
 			}
 			continue
 		}
-		if err := walk(newPre(m.path, m.readOnly), m.real); err != nil {
+		if err := walk(newPre(m.path, m.readOnly), m.real, ""); err != nil {
 			return js.Undefined(), err
 		}
 	}

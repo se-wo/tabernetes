@@ -17,7 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"regexp"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -35,15 +35,17 @@ import (
 // simple: the common flags, no locale, no options nobody types.
 type util func(ctx context.Context, hc interp.HandlerContext, args []string, exec interp.ExecHandlerFunc) error
 
-var coreutils map[string]util
+// coreutils is filled by the init functions of coreutils*.go: each file adds
+// its own tools.
+var coreutils = map[string]util{}
 
 func init() {
-	coreutils = map[string]util{
-		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free, "grep": grep,
+	maps.Copy(coreutils, map[string]util{
+		"base64": base64Cmd, "cat": cat, "curl": curl, "cut": cut, "env": env, "free": free,
 		"head": head, "host": hostCmd, "ls": ls, "mkdir": mkdir, "nslookup": nslookup, "rm": rm, "seq": seq, "sleep": sleepCmd,
 		"sort": sortCmd, "tail": tail, "tee": tee, "touch": touch, "tr": tr,
 		"uniq": uniq, "vi": viCmd, "vim": viCmd, "wc": wc, "wget": wget, "xargs": xargs,
-	}
+	})
 }
 
 // opts parses short flags. spec lists the flags, a trailing ":" marks a flag
@@ -127,8 +129,8 @@ func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []
 		if r == nil {
 			r = strings.NewReader("")
 		}
-		if f == "/dev/null" {
-			r = strings.NewReader("")
+		if d := devFile(f); d != nil {
+			r = d
 		} else if f != "-" {
 			fh, err := os.Open(abs(ctx, hc, f))
 			if err != nil {
@@ -180,79 +182,22 @@ func cat(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	})
 }
 
-func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("grep", args, "ivcnEFoqwe:", map[string]string{"ignore-case": "i", "invert-match": "v", "count": "c", "regexp": "e"})
-	if err != nil {
-		return fail(hc, 2, "%v", err)
-	}
-	pat, ok := o["e"]
-	if !ok {
-		if len(args) == 0 {
-			return fail(hc, 2, "usage: grep [-ivcnoqwFE] pattern [file...]")
-		}
-		pat, args = args[0], args[1:]
-	}
-	if has(o, "F") {
-		pat = regexp.QuoteMeta(pat)
-	} else if !has(o, "E") {
-		// basic regular expressions: \| \( \) \+ are the special ones
-		pat = strings.NewReplacer(`\|`, `|`, `\(`, `(`, `\)`, `)`, `\+`, `+`, `\?`, `?`, `|`, `\|`, `(`, `\(`, `)`, `\)`, `+`, `\+`, `?`, `\?`).Replace(pat)
-	}
-	if has(o, "w") {
-		pat = `\b(?:` + pat + `)\b`
-	}
-	if has(o, "i") {
-		pat = "(?i)" + pat
-	}
-	re, err := regexp.Compile(pat)
-	if err != nil {
-		return fail(hc, 2, "grep: %v", err)
-	}
-	found := false
-	err = inputs(ctx, hc, "grep", args, func(file string, r io.Reader) error {
-		prefix := ""
-		if len(args) > 1 {
-			prefix = file + ":"
-		}
-		n := 0
-		sc := bufio.NewScanner(r)
-		sc.Buffer(nil, 16<<20)
-		for i := 1; sc.Scan(); i++ {
-			l := sc.Text()
-			if re.MatchString(l) == has(o, "v") {
-				continue
-			}
-			found, n = true, n+1
-			switch {
-			case has(o, "q"), has(o, "c"):
-			case has(o, "o") && !has(o, "v"):
-				for _, m := range re.FindAllString(l, -1) {
-					fmt.Fprintln(hc.Stdout, prefix+m)
-				}
-			case has(o, "n"):
-				fmt.Fprintf(hc.Stdout, "%s%d:%s\n", prefix, i, l)
-			default:
-				fmt.Fprintln(hc.Stdout, prefix+l)
-			}
-		}
-		if has(o, "c") {
-			fmt.Fprintf(hc.Stdout, "%s%d\n", prefix, n)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if !found {
-		return interp.ExitStatus(1)
-	}
-	return nil
-}
-
 func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("head", args, "n:#", map[string]string{"lines": "n"})
+	o, args, err := opts("head", args, "n:c:#", map[string]string{"lines": "n", "bytes": "c"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
+	}
+	if v, ok := o["c"]; ok {
+		c, err := parseSize(v)
+		if err != nil {
+			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
+		}
+		return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
+			// No draining: the shell closes the pipe when head ends, which
+			// stops the writer, like SIGPIPE (cat /dev/zero | head -c 4).
+			io.CopyN(hc.Stdout, r, c)
+			return nil
+		})
 	}
 	n, err := count(o, 10)
 	if err != nil {
@@ -264,8 +209,6 @@ func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		for i := 0; i < n && sc.Scan(); i++ {
 			fmt.Fprintln(hc.Stdout, sc.Text())
 		}
-		// keep draining, so the writer of a pipe does not block forever
-		io.Copy(io.Discard, r)
 		return nil
 	})
 }
@@ -398,12 +341,19 @@ func uniq(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 }
 
 func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("cut", args, "d:f:", map[string]string{"delimiter": "d", "fields": "f"})
+	o, args, err := opts("cut", args, "d:f:c:b:", map[string]string{"delimiter": "d", "fields": "f", "characters": "c", "bytes": "b"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
+	// -c and -b select characters: the same list, applied to the runes.
+	chars := false
+	for _, k := range []string{"c", "b"} {
+		if v, ok := o[k]; ok {
+			o["f"], chars = v, true
+		}
+	}
 	if !has(o, "f") {
-		return fail(hc, 2, "usage: cut -f list [-d delim] [file...]")
+		return fail(hc, 2, "usage: cut -f list [-d delim] | -c list [file...]")
 	}
 	d := "\t"
 	if v, ok := o["d"]; ok {
@@ -430,6 +380,19 @@ func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	}
 	return inputs(ctx, hc, "cut", args, func(_ string, r io.Reader) error {
 		for _, l := range lines(r) {
+			if chars {
+				var b strings.Builder
+				for i, c := range []rune(l) {
+					for _, rg := range fields {
+						if i+1 >= rg[0] && i+1 <= rg[1] {
+							b.WriteRune(c)
+							break
+						}
+					}
+				}
+				fmt.Fprintln(hc.Stdout, b.String())
+				continue
+			}
 			f := strings.Split(l, d)
 			if len(f) == 1 {
 				fmt.Fprintln(hc.Stdout, l)
@@ -457,6 +420,12 @@ func tr(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	}
 	set := func(s string) []rune {
 		var out []rune
+		// [:class:] and the escapes \n \t \r \\ of POSIX tr
+		for class, chars := range map[string]string{"[:upper:]": "A-Z", "[:lower:]": "a-z", "[:digit:]": "0-9",
+			"[:alpha:]": "a-zA-Z", "[:alnum:]": "a-zA-Z0-9", "[:space:]": " \t\n\r\v\f", "[:blank:]": " \t"} {
+			s = strings.ReplaceAll(s, class, chars)
+		}
+		s = strings.NewReplacer(`\n`, "\n", `\t`, "\t", `\r`, "\r", `\\`, `\`).Replace(s)
 		r := []rune(s)
 		for i := 0; i < len(r); i++ {
 			if i+2 < len(r) && r[i+1] == '-' {
@@ -530,7 +499,7 @@ func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 }
 
 func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("ls", args, "la1Ad", nil)
+	o, args, err := opts("ls", args, "la1AdL", nil)
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
@@ -539,7 +508,11 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 	}
 	code := 0
 	for n, a := range args {
-		fi, err := os.Lstat(abs(ctx, hc, a))
+		stat := os.Lstat
+		if has(o, "L") || strings.HasSuffix(a, "/") {
+			stat = os.Stat
+		}
+		fi, err := stat(abs(ctx, hc, a))
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "ls: %s: %v\n", a, unwrap(err))
 			code = 2
@@ -552,7 +525,11 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 					continue
 				}
-				if info, err := de.Info(); err == nil {
+				info, err := de.Info()
+				if has(o, "L") {
+					info, err = os.Stat(filepath.Join(abs(ctx, hc, a), de.Name()))
+				}
+				if err == nil {
 					entries = append(entries, info)
 				}
 			}
@@ -574,7 +551,16 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 				name = "\x1b[1;34m" + name + "\x1b[0m"
 			}
 			if has(o, "l") {
-				fmt.Fprintf(hc.Stdout, "%s 1 root root %8d %s %s\n", e.Mode(), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
+				if e.Mode()&fs.ModeSymlink != 0 {
+					p := abs(ctx, hc, a)
+					if fi.IsDir() && !has(o, "d") {
+						p = filepath.Join(p, e.Name())
+					}
+					if t, err := os.Readlink(p); err == nil {
+						name += " -> " + t
+					}
+				}
+				fmt.Fprintf(hc.Stdout, "%s 1 root root %8d %s %s\n", lsMode(e.Mode()), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
 			} else {
 				fmt.Fprintln(hc.Stdout, name)
 			}
@@ -702,20 +688,45 @@ func seq(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Ex
 	return nil
 }
 
+// sleepCmd sleeps for the sum of its arguments: numbers with the suffixes
+// s, m, h and d of GNU sleep (fractions too), Go durations like 1m30s, and
+// infinity.
 func sleepCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	if len(args) != 1 {
-		return fail(hc, 1, "usage: sleep seconds")
+	if len(args) == 0 {
+		return fail(hc, 1, "usage: sleep NUMBER[smhd]... | infinity")
 	}
-	d, err := time.ParseDuration(args[0])
-	if err != nil {
-		f, err2 := strconv.ParseFloat(args[0], 64)
-		if err2 != nil {
-			return fail(hc, 1, "sleep: invalid time %q", args[0])
+	var total time.Duration
+	forever := false
+	for _, a := range args {
+		if a == "infinity" || a == "inf" {
+			forever = true
+			continue
 		}
-		d = time.Duration(f * float64(time.Second))
+		if a == "" {
+			return fail(hc, 1, "sleep: invalid time interval ''")
+		}
+		unit := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour}
+		num, mult := a, time.Second
+		if u, ok := unit[a[len(a)-1]]; ok {
+			num, mult = a[:len(a)-1], u
+		}
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil || f < 0 {
+			d, err := time.ParseDuration(a)
+			if err != nil || d < 0 {
+				return fail(hc, 1, "sleep: invalid time interval '%s'", a)
+			}
+			total += d
+			continue
+		}
+		total += time.Duration(f * float64(mult))
+	}
+	var done <-chan time.Time
+	if !forever {
+		done = time.After(total)
 	}
 	select {
-	case <-time.After(d):
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return interp.ExitStatus(130)
@@ -787,7 +798,18 @@ func xargs(ctx context.Context, hc interp.HandlerContext, args []string, exec in
 // names and cluster IPs of services, pod and node IPs (tabnode_dial.go).
 func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	flags, urls := splitWgetArgs(args)
-	o, _, err := opts("wget", flags, "qvsO:T:", map[string]string{
+	var headers, rest []string
+	for i := 0; i < len(flags); i++ {
+		if h, ok := strings.CutPrefix(flags[i], "--header="); ok {
+			headers = append(headers, h)
+		} else if flags[i] == "--header" && i+1 < len(flags) {
+			i++
+			headers = append(headers, flags[i])
+		} else {
+			rest = append(rest, flags[i])
+		}
+	}
+	o, _, err := opts("wget", rest, "qvsO:T:", map[string]string{
 		"quiet": "q", "verbose": "v", "output-document": "O", "timeout": "T", "spider": "s",
 	})
 	if err != nil {
@@ -823,7 +845,7 @@ func wget(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		if has(o, "s") {
 			name = ""
 		}
-		if err := download(ctx, hc, u.String(), name, has(o, "q")); err != nil {
+		if err := download(ctx, hc, u.String(), name, has(o, "q"), headers...); err != nil {
 			return err
 		}
 	}
@@ -838,7 +860,7 @@ func splitWgetArgs(args []string) (flags, urls []string) {
 		switch {
 		case a == "--":
 			return flags, append(urls, args[i+1:]...)
-		case a == "-O" || a == "--output-document" || a == "-T" || a == "--timeout":
+		case a == "-O" || a == "--output-document" || a == "-T" || a == "--timeout" || a == "--header":
 			flags = append(flags, a)
 			if i+1 < len(args) {
 				i++
@@ -917,29 +939,63 @@ func dialLocal(ctx context.Context, network, addr string) (net.Conn, error) {
 // network for the cluster, to fetch() for the rest. A redirect may cross
 // from one to the other.
 type cmdTransport struct {
-	tlsConfig *tls.Config // for the cluster only, fetch() has its own
+	tlsConfig *tls.Config       // for the cluster only, fetch() has its own
+	resolve   map[string]string // curl --resolve: host:port -> address
+}
+
+// resolved is the address of curl --resolve for the host and port of u.
+func (t cmdTransport) resolved(u *url.URL) (string, bool) {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	a, ok := t.resolve[strings.ToLower(u.Hostname())+":"+port]
+	return a, ok
 }
 
 func (t cmdTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	c := httpClientFor(req.Context(), req.URL.Hostname())
+	addr, resolved := t.resolved(req.URL)
+	host := req.URL.Hostname()
+	if resolved {
+		host = addr
+	}
+	c := httpClientFor(req.Context(), host)
 	rt := c.Transport
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
-	if c != http.DefaultClient && t.tlsConfig != nil {
+	if c != http.DefaultClient && (t.tlsConfig != nil || resolved) {
 		if tr, ok := rt.(*http.Transport); ok {
 			tr = tr.Clone()
-			tr.TLSClientConfig = t.tlsConfig
+			if t.tlsConfig != nil {
+				tr.TLSClientConfig = t.tlsConfig
+			}
+			if resolved {
+				// The URL keeps the name, for Host and SNI.
+				dial := tr.DialContext
+				tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+					_, port, _ := net.SplitHostPort(a)
+					return dial(ctx, network, net.JoinHostPort(addr, port))
+				}
+			}
 			rt = tr
 		}
 	}
 	return rt.RoundTrip(req)
 }
 
-func download(ctx context.Context, hc interp.HandlerContext, u, name string, quiet bool) error {
+func download(ctx context.Context, hc interp.HandlerContext, u, name string, quiet bool, headers ...string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fail(hc, 1, "wget: %v", err)
+	}
+	for _, h := range headers {
+		k, v, _ := strings.Cut(h, ":")
+		if k, v = strings.TrimSpace(k), strings.TrimSpace(v); strings.EqualFold(k, "Host") {
+			req.Host = v
+		} else {
+			req.Header.Add(k, v)
+		}
 	}
 	if noSuchHost(ctx, req.URL.Hostname()) {
 		return fail(hc, 4, "wget: bad address '%s'", req.URL.Host)
@@ -1018,6 +1074,7 @@ type curlArgs struct {
 	silent, showErr, fail, include, head, location, verbose, insecure, get bool
 	outputs                                                                []string // -o file, or "" for -O, in the order of the urls
 	method, writeOut, user, cacert                                         string
+	resolve                                                                []string // --resolve host:port:addr
 	data                                                                   []string
 	dataSet                                                                bool
 	headers                                                                []string
@@ -1031,13 +1088,13 @@ var curlLong = map[string]string{
 	"verbose": "v", "insecure": "k", "output": "o", "remote-name": "O", "request": "X", "data": "d",
 	"data-ascii": "d", "data-raw": "d+", "data-binary": "d+", "header": "H", "max-time": "m",
 	"write-out": "w", "user": "u", "user-agent": "A", "get": "G", "url": "url", "cacert": "cacert",
-	"connect-timeout": "connect-timeout", "compressed": "", "no-progress-meter": "", "progress-bar": "", "http1.1": "",
+	"connect-timeout": "connect-timeout", "resolve": "resolve", "compressed": "", "no-progress-meter": "", "progress-bar": "", "http1.1": "",
 }
 
 // curlValue lists the options that take a value.
 var curlValue = map[string]bool{
 	"o": true, "X": true, "d": true, "d+": true, "H": true, "m": true, "w": true, "u": true, "A": true,
-	"url": true, "cacert": true, "connect-timeout": true, "e": true,
+	"url": true, "cacert": true, "connect-timeout": true, "e": true, "resolve": true,
 }
 
 func parseCurl(ctx context.Context, hc interp.HandlerContext, args []string) (*curlArgs, error) {
@@ -1107,6 +1164,8 @@ func parseCurl(ctx context.Context, hc interp.HandlerContext, args []string) (*c
 			c.urls = append(c.urls, v)
 		case "cacert":
 			c.cacert = v
+		case "resolve":
+			c.resolve = append(c.resolve, v)
 		}
 		return nil
 	}
@@ -1176,7 +1235,18 @@ func curl(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		fmt.Fprintln(hc.Stderr, "curl: no URL specified\ncurl: try 'curl --help' for more information")
 		return interp.ExitStatus(2)
 	}
-	tr := cmdTransport{}
+	tr := cmdTransport{resolve: map[string]string{}}
+	for _, r := range c.resolve {
+		hp := strings.SplitN(r, ":", 3)
+		if len(hp) != 3 {
+			fmt.Fprintf(hc.Stderr, "curl: (49) Couldn't parse CURLOPT_RESOLVE entry '%s'\n", r)
+			return interp.ExitStatus(49)
+		}
+		tr.resolve[strings.ToLower(hp[0])+":"+hp[1]] = strings.Trim(strings.Split(hp[2], ",")[0], "[]")
+		if c.verbose {
+			fmt.Fprintf(hc.Stderr, "* Added %s to DNS cache\n", r)
+		}
+	}
 	if c.insecure || c.cacert != "" {
 		tr.tlsConfig = &tls.Config{InsecureSkipVerify: c.insecure}
 		if c.cacert != "" {
@@ -1273,6 +1343,9 @@ func (c *curlArgs) do(ctx context.Context, hc interp.HandlerContext, tr cmdTrans
 		req.SetBasicAuth(user, pass)
 	}
 	host := req.URL.Hostname()
+	if a, ok := tr.resolved(req.URL); ok {
+		host = a
+	}
 	if noSuchHost(ctx, host) {
 		return c.errorf(hc, 6, "Could not resolve host: %s", host)
 	}
@@ -1298,7 +1371,7 @@ func (c *curlArgs) do(ctx context.Context, hc interp.HandlerContext, tr cmdTrans
 		} else {
 			fmt.Fprintf(hc.Stderr, "* Using fetch() of the browser for %s\n", host)
 		}
-		fmt.Fprintf(hc.Stderr, "> %s %s HTTP/1.1\n> Host: %s\n", method, req.URL.RequestURI(), req.URL.Host)
+		fmt.Fprintf(hc.Stderr, "> %s %s HTTP/1.1\n> Host: %s\n", method, req.URL.RequestURI(), req.Host)
 		for _, k := range slices.Sorted(maps.Keys(req.Header)) {
 			for _, v := range req.Header[k] {
 				fmt.Fprintf(hc.Stderr, "> %s: %s\n", k, v)
@@ -1450,7 +1523,8 @@ func dnsLookup(ctx context.Context, name string) (a dnsAnswer, found bool) {
 }
 
 // nslookup answers like the nslookup of busybox, from the cluster DNS of
-// the service proxy (tabnode_net.go): there is no CoreDNS on the tab node.
+// the service proxy (tabnode_net.go), which is also what the CoreDNS of the
+// tab node (tabnode_coredns.go) answers from.
 func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	var names []string
 	for _, a := range args {

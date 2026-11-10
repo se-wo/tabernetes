@@ -118,6 +118,7 @@ func runKubectl(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		ConfigFlags: flags,
 		IOStreams:   streams,
 	})
+	addConvert(cmd, flags, streams)
 	if pre := cmd.PersistentPreRunE; pre != nil {
 		cmd.PersistentPreRunE = func(c *cobra.Command, args []string) error {
 			err := pre(c, args)

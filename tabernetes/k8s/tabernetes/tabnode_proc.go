@@ -29,7 +29,8 @@ type procEnv struct {
 	root *rootFS
 	ip   string
 	cpu  *throttle
-	tty  *pty // the terminal of the process, if it has one
+	tty  *pty     // the terminal of the process, if it has one
+	proc *process // the process of the container, nil in the terminal
 }
 
 type procKey struct{}
@@ -137,12 +138,13 @@ func newPodRunner(env []string, dir string, stdin io.Reader, stdout, stderr io.W
 
 func podOpen(ctx context.Context, p string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
 	switch p {
-	case "/dev/null":
-		return devNull{}, nil
 	case "/dev/stdout":
 		return nopCloser{interp.HandlerCtx(ctx).Stdout}, nil
 	case "/dev/stderr", "/dev/termination-log":
 		return nopCloser{interp.HandlerCtx(ctx).Stderr}, nil
+	}
+	if d := devFile(p); d != nil {
+		return d, nil
 	}
 	rp := realPath(ctx, interp.HandlerCtx(ctx).Dir, p)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE) != 0 {
@@ -176,9 +178,11 @@ func (r *rootFS) readOnlyAt(p, dir string) bool {
 // control plane included. The throttle lets the rest of the tab run.
 func podCall(ctx context.Context, args []string) ([]string, error) {
 	if pe := procOf(ctx); pe != nil && pe.cpu != nil {
-		if err := pe.cpu.tick(ctx); err != nil {
+		busy, err := pe.cpu.tick(ctx)
+		if err != nil {
 			return nil, err
 		}
+		acctOf(pe.c).ChargeCPU(busy)
 	}
 	return args, nil
 }
@@ -211,26 +215,32 @@ const (
 	idleGap = 2 * time.Millisecond
 )
 
-func (t *throttle) tick(ctx context.Context) error {
+// tick runs before every command. It returns the CPU time the container
+// used since the previous command (tabnode_acct.go): the time in between
+// when the container kept the thread, commandCost after a pause.
+func (t *throttle) tick(ctx context.Context) (time.Duration, error) {
 	// wasm has no preemption: without this, a busy container keeps the
 	// thread for the whole slice and the apiserver waits.
 	runtime.Gosched()
 	now := time.Now()
-	if now.Sub(t.last) > idleGap {
+	busy := commandCost
+	if gap := now.Sub(t.last); gap > idleGap {
 		t.streak = now
+	} else {
+		busy = max(gap, commandCost)
 	}
 	t.last = now
 	if now.Sub(t.streak) < slice {
-		return nil
+		return busy, nil
 	}
 	pause := max(time.Duration(float64(slice)*(1-t.share)/t.share), time.Millisecond)
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return busy, ctx.Err()
 	case <-time.After(pause):
 	}
 	t.streak, t.last = time.Now(), time.Now()
-	return nil
+	return busy, nil
 }
 
 var shells = map[string]bool{"sh": true, "bash": true, "ash": true, "dash": true, "zsh": true, "ksh": true}
@@ -259,7 +269,7 @@ func podExec(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		case podTools[name] != nil:
 			return podTools[name](ctx, hc, args[1:], self)
 		case coreutils[name] != nil:
-			return coreutils[name](ctx, hc, args[1:], self)
+			return sigpipe(coreutils[name](ctx, hc, args[1:], self))
 		case interp.IsBuiltin(name):
 			err := hc.Builtin(ctx, append([]string{name}, args[1:]...))
 			if err != nil {
@@ -446,6 +456,9 @@ func statusOf(err error) error {
 // apiserver through the kubernetes service.
 func podKubectl(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	pe := procOf(ctx)
+	acct := acctFrom(ctx)
+	acct.AddMemory(25 << 20) // kubectl is a Go program with a client
+	defer acct.AddMemory(-25 << 20)
 	const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 	token := pe.root.real(saDir + "/token")
 	if _, err := os.Stat(token); err != nil {
@@ -503,7 +516,7 @@ var podTools = map[string]func(ctx context.Context, hc interp.HandlerContext, ar
 	"uname": func(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 		if len(args) > 0 && (args[0] == "-a" || args[0] == "--all") {
 			b, _ := os.ReadFile(procOf(ctx).root.real("/etc/hostname"))
-			fmt.Fprintf(hc.Stdout, "Linux %s 6.0.0-tabernetes #1 SMP WebAssembly wasm32 GNU/Linux\n", strings.TrimSpace(string(b)))
+			fmt.Fprintf(hc.Stdout, "Linux %s %s #1 SMP WebAssembly wasm32 GNU/Linux\n", strings.TrimSpace(string(b)), kernelVersion)
 			return nil
 		}
 		fmt.Fprintln(hc.Stdout, "Linux")

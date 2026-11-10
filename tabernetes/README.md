@@ -36,16 +36,28 @@ browser tab (single wasm binary)                     docker run tabernetes
 - The terminal runs a real POSIX shell: [mvdan.cc/sh](https://github.com/mvdan/sh),
   a shell interpreter in Go, compiled into the same binary. Pipes, variables,
   loops, `$(...)`, redirects and here-documents work. There are no processes,
-  so every command is a function: kubectl runs in-process, a few coreutils
-  (`grep`, `head`, `wc`, `xargs`, ...) live in `k8s/tabernetes/coreutils.go`, and
+  so every command is a function: kubectl runs in-process, the shell tools
+  live in `k8s/tabernetes/coreutils*.go`, and
   `join`, `logs` and `clear` are JavaScript. Files land in the in-memory file
   system, so `kubectl get cm x -o yaml > cm.yaml` works.
+  `tar` and `gzip` (`k8s/tabernetes/coreutils_tar.go`) work in the terminal and
+  in containers, so `kubectl cp` works in both directions.
   Tab completes commands and files, and kubectl through its own `__complete`
   command, so resource types and names come from the cluster.
   `wget` downloads through the `fetch()` of the browser, so it only works for
   servers that allow CORS, for example `raw.githubusercontent.com`.
   `localhost` and `127.0.0.1` stay in the in-process network of the Wasm, so
   `k port-forward deploy/web 8080:80 &` and `wget -qO- localhost:8080` work.
+- The shell tools are small Go versions with the common flags: `cp`, `mv`,
+  `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
+  ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
+  ([gojq](https://github.com/itchyny/gojq)), `date`, `watch`, `less`, `df`,
+  `du`, `mount`, `nc`, `ping`, `telnet`, `openssl` and more; `help` lists them
+  all. They work in the terminal and in `kubectl exec` of tab node
+  containers, where paths go through the root of the container and `nc`,
+  `ping` and `telnet` dial from the pod IP. `openssl` covers keys, requests,
+  signing and `x509 -text` for the CertificateSigningRequest exercise.
+  `kubectl convert` is compiled in, because plugins cannot run in Wasm.
 - `history` lists the command lines of the tab, and Ctrl-R searches them
   backwards like Bash. The history ends with the tab.
 - `cmd &` runs in the background, `jobs` lists the jobs, `kill %1` stops one.
@@ -106,10 +118,31 @@ browser tab (single wasm binary)                     docker run tabernetes
 `k8s/tabernetes/tabnode*.go` is a kubelet inside the tab. It registers the
 Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
 `tabernetes.io/tab=true`, `tabernetes.io/wasm=true`) as `system:node:tab`,
-keeps its Lease and runs the pods the scheduler binds to it. It has the taint
-`tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
-everything lands here; once a Docker node joins, the scheduler prefers that
-one. flannel, kube-proxy and CoreDNS stay off it (node affinity).
+keeps its Lease and runs the pods the scheduler binds to it. Like the first
+node of kubeadm, `tab` is the control plane node: it has the role label
+`node-role.kubernetes.io/control-plane` (set with the admin credentials, as
+NodeRestriction forbids a kubelet to set it) and two taints,
+`node-role.kubernetes.io/control-plane:PreferNoSchedule` and
+`tabernetes.io/tab=true:PreferNoSchedule`. Both are soft, not NoSchedule:
+while `tab` is the only node, everything lands here. With two taints, the
+scheduler prefers a node in a Web Worker (one taint) over `tab`, and a Docker
+node (none) over both. flannel and kube-proxy stay off it (the tab has a
+kube-proxy of its own). CoreDNS runs here as a built-in image until a Docker
+node is Ready, then moves there.
+
+`kubectl get pods -n kube-system` shows the control plane as static pods, as
+on a kubeadm node: `kube-apiserver-tab`, `kube-controller-manager-tab`,
+`kube-scheduler-tab` and `etcd-tab` (`tabnode_static.go`). They are mirror
+pods of the kubelet, with the manifests in `/etc/kubernetes/manifests`, the
+certificates in `/etc/kubernetes/pki` and the kubeconfigs in
+`/etc/kubernetes/*.conf`. The command of a pod is the real command line of
+its component. `kubectl logs` shows the lines of that component only: a hook
+in the shared logger sorts them by the pprof labels of the goroutine
+(`complogs.go`). Ready comes from the health endpoints of the components.
+`kubectl delete pod` creates the mirror pod again, with the start time of
+the running component. `kubectl exec` is refused, like on a distroless image.
+The node info shows Tabernetes as the OS and `6.0.0-tabernetes` as the
+kernel, as `uname -r` does in a container.
 
 A container is not a process:
 
@@ -118,11 +151,18 @@ A container is not a process:
   kubectl (with the service account of the pod, through 10.96.0.1) and the
   programs of the built-in images (`tabnode_images*.go`): nginx (it reads
   nginx.conf and conf.d), httpd, pause, whoami, http-echo, echo-server,
-  agnhost, podinfo, hello-app, redis with redis-cli, the `busybox`/`alpine`/`ubuntu`
+  agnhost, podinfo, hello-app, redis with redis-cli, the ingress-nginx
+  controller, the `busybox`/`alpine`/`ubuntu`
   family, `curlimages/curl`, `bitnami/kubectl`. Any other image runs its command
-  in the shell; an unknown image without a command waits as
-  `UnsupportedImage`. Each container sees its own root directory with the
-  files of its image and its volume mounts.
+  in the shell. A wrong image fails like on a real node: an unknown Docker Hub
+  name such as `ngnix` or a tag such as `nginx:doesnotexist` waits in
+  `ErrImagePull` and `ImagePullBackOff` (`tabnode_pull.go`). The tab cannot
+  ask a registry, so it knows the official images of Docker Hub and the tags
+  of the built-in images; other images pull, unless their name is a typo of a
+  built-in one (`curlimages/crul`). Such an image without a command fails with
+  `CreateContainerError`. A new image in the pod spec (`kubectl set image`)
+  restarts the container with it. Each container sees its own root directory
+  with the files of its image and its volume mounts.
 - **WebAssembly containers** (`runtimeClassName: wasmtime`, the RuntimeClass
   of runwasi's wasmtime shim) run a WASI preview 1 module in a Web Worker of
   their own (`tabnode_wasi.go`, `web/src/wasi*.js`, with
@@ -136,10 +176,24 @@ A container is not a process:
 What works like on a real node: init and sidecar containers, restart
 policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/
 downwardAPI/hostPath volumes (hostPath is the file system of the terminal),
+persistentVolumeClaim and generic ephemeral volumes (see below),
 env from ConfigMaps, Secrets and the downward API, service links, probes,
 graceful deletion, events, `kubectl logs/exec/attach/port-forward`
 (`tabnode_server.go` serves the kubelet API on 10.0.0.1:10250 with the CRI
 streaming library of Kubernetes).
+configMap, secret, projected and downwardAPI volumes look like on a real
+node (`tabnode_volwriter.go`): the files sit in a `..<timestamp>` directory,
+`..data` links to it and every key links into `..data`. They get `defaultMode`
+or `items[].mode`, so `ls -lL` shows `-r--------` for `defaultMode: 0400`.
+Every minute the node writes them again (`tabnode_volrefresh.go`), so
+`kubectl edit cm` reaches a running pod within about a minute. `subPath`
+mounts and immutable objects keep their content, like on a real node.
+Projected service account tokens are renewed at 80 % of their lifetime.
+- `grpc` probes call `grpc.health.v1.Health/Check` with the gRPC prober of
+  the kubelet, so a closed port or `NOT_SERVING` fails with the same
+  `Unhealthy` event. `agnhost grpc-health-checking` (`--port`, `--http-port`,
+  `--service`, `--delay-unhealthy-sec`; `/make-not-serving` and
+  `/make-serving` on the HTTP port) and `podinfo --grpc-port` serve it.
 `tabnode_lifecycle.go` adds what the kubelet drives on its own: `postStart`
 and `preStop` hooks with `exec`, `httpGet` and `sleep` (a failed postStart
 kills the container, preStop counts against the grace period),
@@ -148,6 +202,26 @@ ephemeral containers: `kubectl debug -i <pod> --image=busybox` starts one,
 and `kubectl logs/exec/attach -c` reach it. `kubectl debug node/tab` runs its
 pod with hostNetwork on the node IP and the file system of the terminal under
 `/host`.
+
+The kubelet serves `/stats/summary` and `/metrics/resource`, so
+`kubectl get --raw /api/v1/nodes/tab/proxy/stats/summary` shows numbers, and
+a metrics-server can scrape the node. The numbers are a model
+(`tabnode_acct.go`): CPU comes from the commands of the shell and the work of
+the built-in programs, `limits.cpu` works like the CFS quota, and the memory
+of a container is the size of its image plus what its programs allocate. The
+memory of the node comes from the Go runtime. The endpoints take a client
+certificate of the cluster CA or a bearer token that the apiserver allows to
+get `nodes/stats` or `nodes/metrics`.
+
+The addon metrics-server (`addons/metrics-server.yaml`, the manifest of the
+upstream release) serves `metrics.k8s.io`, so `kubectl top` and
+HorizontalPodAutoscalers work. The image is a built-in image
+(`tabnode_images_metrics.go`, `metricsserver*.go`): an extension apiserver of
+`k8s.io/apiserver` behind the aggregator, with delegated authentication and
+authorization. Every 15 seconds it scrapes `/metrics/resource` of every
+kubelet with its service account token. Unlike upstream, the Deployment stays
+on the node `tab`: only its network reaches the kubelets of all nodes. HTTPS
+probes skip the certificate check, like the ones of the kubelet.
 
 A claim binds without a PersistentVolume that you make first. The addon
 `k8s/tabernetes/addons/local-path-storage.yaml` installs
@@ -170,8 +244,41 @@ kube-proxy and DNS of the tab: it listens on every cluster IP and node port
 and forwards to ready endpoints (endpoints on a Docker node through the
 port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service names
 with the search path of the pod, in pods and in the terminal:
-`k expose deploy web --port 80; wget -qO- web`. The apiserver dials pods
+`k expose deploy web --port 80; wget -qO- web`. Endpoints rotate, but with
+`sessionAffinity: ClientIP` a client IP (a pod, or the node IP for the
+terminal) keeps its endpoint for `timeoutSeconds`, and
+`internalTrafficPolicy: Local` uses the endpoints on the tab node only. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
+
+`tabnode_coredns.go` is the CoreDNS of the tab: the built-in image
+`registry.k8s.io/coredns/coredns` logs like the real one, serves `/health`,
+`/ready` and `/metrics` as the Corefile asks, and answers DNS over TCP from
+the same service proxy. There is no UDP in the tab. `hosts` entries and
+`rewrite name` rules of `kubectl edit cm coredns -n kube-system` apply to the
+names of the tab at once. `forward` and the other plugins are ignored: the
+browser has no DNS. Pods on a Docker node need UDP, so once a Docker node is
+Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
+two minutes) and the real CoreDNS runs there.
+
+### Persistent volumes
+
+kube-controller-manager binds claims to PersistentVolumes, and the scheduler
+places a pod with a claim on a node that fits the node affinity of the volume.
+The kubelet then follows the claim to its volume (`tabnode_pvc.go`):
+
+- A `hostPath` or `local` volume is a directory in the file system of the
+  node. The data outlives the pod, and pods on the same node share it. A node
+  in a Web Worker has a file system of its own, so give a volume there node
+  affinity for that node.
+- `hostPath` creates its directory unless its type is `Directory`. A `local`
+  path must exist, as on a real node.
+- `readOnly: true` in the claim source makes every mount of the volume
+  read-only.
+- A claim that is not bound keeps the pod in `ContainerCreating`, with the
+  `FailedMount` event of a real kubelet. Other volume sources (NFS, CSI) fail
+  with an event.
+- `persistentVolumeReclaimPolicy` is handled by the controller-manager, as on a
+  real cluster.
 
 ### More nodes in Web Workers
 
@@ -202,6 +309,13 @@ Wasm has no preemption: a busy loop in a goroutine would freeze the tab.
 Every command of a native container yields, and a container that runs 10ms
 without blocking sleeps as long, so it gets half of the thread at most (less
 with `limits.cpu` below 500m).
+
+`limits.memory` works like the memory cgroup: a container that passes it ends
+with `OOMKilled` and exit code 137, and restarts by its restart policy. What
+counts: the base size of its image, the memory `stress` and `stress-ng` hold
+(`polinux/stress`, `progrium/stress`, `alexeiled/stress-ng`), files in
+`emptyDir` volumes with `medium: Memory`, and the linear memory of a
+WebAssembly container. A container without a limit is never killed.
 
 ### WebGPU through DRA
 
@@ -408,6 +522,37 @@ Not covered: UDP (the tab nodes have none), rules on domain names (egress
 to the internet goes through `fetch()`, without an IP), and an exact
 `except` of `ipBlock` for internet egress.
 
+## Ingress
+
+The addons install ingress-nginx (`k8s/tabernetes/addons/ingress-nginx.yaml`):
+the upstream bare-metal manifest without the admission webhook. It has the
+namespace `ingress-nginx`, the IngressClass `nginx`, and the NodePort service
+`ingress-nginx-controller` on 30080 (http) and 30443 (https). Unlike the
+upstream manifest, the class is the default class, so an Ingress without
+`ingressClassName` works, and the node ports are fixed. On the tab node the controller is a built-in image
+(`tabnode_images_ingress.go`). It watches Ingresses with the service account
+of its pod, renders `/etc/nginx/nginx.conf` like ingress-nginx and reloads
+the built-in nginx. On a Docker node the same manifest runs the real image.
+
+What works: hosts and wildcard hosts, the path types `Exact`, `Prefix` and
+`ImplementationSpecific`, `defaultBackend`, TLS with a Secret of type
+`kubernetes.io/tls` (SNI, redirect to https), the status address, events, and
+the annotations `rewrite-target`, `use-regex`, `ssl-redirect`,
+`force-ssl-redirect`, `backend-protocol` and `service-upstream`. A service
+without ready endpoints answers 503, an unknown host 404.
+
+```bash
+k create deploy web --image=nginxdemos/hello:plain-text --replicas=2; k expose deploy web --port 80
+k create ingress web --rule="demo.local/*=web:80"
+k get ingress                                # ADDRESS 10.0.0.1
+curl -H 'Host: demo.local' 10.0.0.1:30080    # also from pods
+k -n ingress-nginx logs deploy/ingress-nginx-controller   # access log
+```
+
+Not covered: the admission webhook, most other annotations and the ConfigMap
+options, and TCP/UDP services. Gateway API is not provided, although
+ingress-nginx is retired upstream: the CKAD material still uses it.
+
 ## Patches
 
 `k8s/patch.go` patches a Kubernetes checkout. It is plain Go, so it works the
@@ -420,10 +565,15 @@ same on macOS and Linux:
 - A sleep in the APF bootstrap ensurer. It busy-loops until the informer
   catches up, and Wasm has no preemption, so the informer never gets the CPU.
 - An idempotent `SetupSignalContext`, because all components share one process.
+- A settable default stream for the text logger of `component-base/logs`.
+  All components share one klog; the stream sorts the lines into the logs of
+  the control plane pods.
 - mvdan.cc/sh is vendored into the checkout at `MVDAN_SH_VERSION` from
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
   their command line.
+- gojq (with timefmt-go) and goawk are vendored the same way
+  (`GOJQ_VERSION`, `TIMEFMT_GO_VERSION`, `GOAWK_VERSION`).
 - The decision packages of kube-network-policies and the client of
   network-policy-api are vendored the same way
   (`KUBE_NETWORK_POLICIES_VERSION`, `NETWORK_POLICY_API_VERSION`), without
@@ -549,6 +699,14 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
+- The static pod manifests in `/etc/kubernetes/manifests` are not watched:
+  an edit changes nothing. A component that exits stays down, its pod shows
+  `CrashLoopBackOff`. The `etcd-tab` pod is the etcd shim.
+- `yq` runs jq expressions on YAML with gojq: the yq v4 commands and flags
+  work, its own functions mostly do not (`strenv` and `env` do). `jq` and
+  `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes), and
+  `ping` has no ICMP: a TCP connection to the host stands in for it.
+  `less` and `more` print the whole input.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
   Docker node, so service proxy URLs work only for pods on the tab node.

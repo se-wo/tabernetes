@@ -83,6 +83,7 @@ RUN set -eux; \
 # containerd from this OCI image layout (agent/imagemirror.go). The images come
 # from the addon manifests of the control plane, so they always match:
 #   docker build --build-context addons=k8s/tabernetes/addons node
+# Not the ingress-nginx controller: it is big, and not every join needs it.
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS images
 ARG TARGETARCH
 ARG KUBERNETES_VERSION
@@ -92,7 +93,7 @@ COPY --from=addons *.yaml /addons/
 COPY --from=download /pause-image /pause-image
 # One crane call per image in a fixed order, so index.json is the same on every build.
 RUN set -eux; \
-    sed -n 's/^ *image: *//p' /addons/*.yaml | sed "s/KUBERNETES_VERSION/${KUBERNETES_VERSION}/" | cat /pause-image - | sort -u > /images; \
+    sed -n 's/^ *image: *//p' /addons/*.yaml | grep -v /ingress-nginx/ | sed "s/KUBERNETES_VERSION/${KUBERNETES_VERSION}/" | cat /pause-image - | sort -u > /images; \
     out=/out/usr/share/tabernetes/images; \
     while read -r image; do \
       crane pull --platform "linux/${TARGETARCH}" --format oci --annotate-ref "${image}" "${out}"; \

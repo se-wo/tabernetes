@@ -84,13 +84,13 @@ func TestClaimHostPathTypes(t *testing.T) {
 		client := fake.NewClientset(boundClaim("c", "pv"), pv)
 		pod := claimPod(pvcVolume("d", "c", false))
 		_, err := resolveClaim(context.Background(), client, pod, &pod.Spec.Volumes[0], true)
-		if got := errText(err); got != tc.want {
+		if got := claimErrText(err); got != tc.want {
 			t.Errorf("type %s: got %q, want %q", tc.typ, got, tc.want)
 		}
 	}
 }
 
-func errText(err error) string {
+func claimErrText(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -113,7 +113,7 @@ func TestClaimLocal(t *testing.T) {
 		client := fake.NewClientset(boundClaim("c", "pv"), local(tc.path))
 		pod := claimPod(pvcVolume("d", "c", false))
 		m, err := resolveClaim(context.Background(), client, pod, &pod.Spec.Volumes[0], true)
-		if got := errText(err); got != tc.want {
+		if got := claimErrText(err); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.path, got, tc.want)
 		}
 		if err == nil && m.dir != tc.path {
@@ -161,7 +161,7 @@ func TestClaimErrors(t *testing.T) {
 	} {
 		pod := claimPod(pvcVolume("d", tc.claim, false))
 		_, err := resolveClaim(context.Background(), client, pod, &pod.Spec.Volumes[0], tc.mounted)
-		if got := errText(err); got != tc.want {
+		if got := claimErrText(err); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.claim, got, tc.want)
 		}
 	}
@@ -195,7 +195,7 @@ func TestResolveClaims(t *testing.T) {
 	want := "Unable to attach or mount volumes: unmounted volumes=[b c], unattached volumes=[], failed to process volumes=[b c]: " +
 		"error processing PVC ns/unbound: PVC is not bound; " +
 		`error processing PVC ns/missing: failed to fetch PVC from API server: persistentvolumeclaims "missing" not found`
-	if got := errText(err); got != want {
+	if got := claimErrText(err); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
 	if d, ok := w.volumeDir("a"); !ok || d != dir {
