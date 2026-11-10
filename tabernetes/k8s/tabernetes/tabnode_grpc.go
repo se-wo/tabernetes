@@ -85,4 +85,3 @@ func agnhostGRPCHealth(ctx context.Context, hc interp.HandlerContext, fs *pflag.
 	})
 	return serveHTTP(ctx, hc, "agnhost", mux, fmt.Sprintf(":%d", *httpPort))
 }
-
