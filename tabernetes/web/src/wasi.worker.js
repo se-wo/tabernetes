@@ -189,13 +189,22 @@ async function run({ module, args, env, preopens, stdin: withStdin, gpu }) {
   };
   funcs.poll_oneoff = (inPtr, outPtr, nsubs, neventsPtr) => poll(mem, w.fds, inPtr, outPtr, nsubs, neventsPtr);
 
+  // The linear memory counts for limits.memory. The module runs without
+  // timers, so its size is reported from the imports it calls.
+  let memory = null, reported = -1;
+  const report = () => {
+    const n = memory?.buffer.byteLength;
+    if (n !== reported && n !== undefined) { reported = n; postMessage({ type: "mem", data: n }); }
+  };
+  const watched = (fn) => (...a) => { report(); return fn(...a); };
+
   const imports = {};
   let gpuFuncs = null;
   for (const imp of WebAssembly.Module.imports(module)) {
     const ns = (imports[imp.module] ??= {});
     if (imp.kind !== "function") throw new Error(`the module imports ${imp.kind} ${imp.module}.${imp.name}: threads and other imports are not supported in the browser`);
     if (imp.module === "wasi_snapshot_preview1" || imp.module === "wasi_unstable") {
-      let fn = funcs[imp.name] ?? (() => wasi.ERRNO_NOSYS);
+      let fn = watched(funcs[imp.name] ?? (() => wasi.ERRNO_NOSYS));
       if (jspi && (imp.name === "fd_read" || imp.name === "poll_oneoff")) fn = new WebAssembly.Suspending(fn);
       ns[imp.name] = fn;
     } else if (imp.module === "tabernetes_webgpu") {
@@ -211,10 +220,14 @@ async function run({ module, args, env, preopens, stdin: withStdin, gpu }) {
   if (!instance.exports.memory) throw new Error("the module exports no memory");
   if (typeof instance.exports._start !== "function") throw new Error("the module has no _start: it is a library (reactor), not a command");
   w.inst = instance;
+  memory = instance.exports.memory;
+  report();
   try {
     await (jspi ? WebAssembly.promising(instance.exports._start) : instance.exports._start)();
+    report();
     return 0;
   } catch (e) {
+    report();
     if (e instanceof WASIProcExit) return e.code;
     // A trap: like wasmtime, report it and exit like an abort.
     postMessage({ type: "stderr", data: new TextEncoder().encode(`wasm trap: ${e?.message ?? e}\n`) });
