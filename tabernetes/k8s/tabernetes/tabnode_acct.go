@@ -99,11 +99,12 @@ type ctrAcct struct {
 	limit   float64 // limits.cpu in cores, 0 without a limit
 	profile imageProfile
 
-	cpu      time.Duration // since start
-	idleAt   time.Time     // idle CPU is counted up to here
-	period   time.Time     // start of the current CFS period
-	inPeriod time.Duration // CPU of the current period
-	alloc    int64         // AddMemory
+	cpu      time.Duration    // since start
+	idleAt   time.Time        // idle CPU is counted up to here
+	period   time.Time        // start of the current CFS period
+	inPeriod time.Duration    // CPU of the current period
+	alloc    int64            // AddMemory
+	sources  map[string]int64 // SetMemory, by name
 
 	samples []cpuSample // for UsageNanoCores, oldest first
 }
@@ -285,8 +286,38 @@ func (a *ctrAcct) WorkingSet() uint64 {
 }
 
 func (a *ctrAcct) workingSetLocked() uint64 {
-	return a.profile.memory + uint64(a.alloc)
+	total := a.profile.memory + uint64(a.alloc)
+	for _, b := range a.sources {
+		total += uint64(b)
+	}
+	return total
 }
+
+// SetMemory sets the bytes one named source of memory holds ("wasm",
+// "stress", "tmpfs", ...); 0 or less drops the source. It returns the working
+// set after it.
+func (a *ctrAcct) SetMemory(source string, bytes int64) uint64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if bytes <= 0 {
+		delete(a.sources, source)
+	} else {
+		if a.sources == nil {
+			a.sources = map[string]int64{}
+		}
+		a.sources[source] = bytes
+	}
+	return a.workingSetLocked()
+}
+
+// memSet and memUsage are for any goroutine, but never with c.w.mu held
+// (acctOf takes it).
+func (c *ctr) memSet(source string, bytes int64) { acctOf(c).SetMemory(source, bytes) }
+
+func (c *ctr) memUsage() int64 { return int64(acctOf(c).WorkingSet()) }
 
 // Usage samples the counters at now. running says whether the container
 // runs: only then does its idle CPU count.

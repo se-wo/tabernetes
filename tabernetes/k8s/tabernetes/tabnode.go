@@ -167,6 +167,7 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 		return fmt.Errorf("kubelet server: %w", err)
 	}
 	go n.heartbeat(ctx)
+	go n.sampleStats(ctx)
 	// The WebGPU adapter of the browser as a DRA device (tabnode_gpu.go).
 	// Nothing of the node waits for the probe.
 	go n.syncGPU(ctx)
