@@ -93,14 +93,24 @@ func TestPullWithBackOff(t *testing.T) {
 }
 
 func TestImagesChanged(t *testing.T) {
-	w := testWorker(t, v1.PodSpec{Containers: []v1.Container{{Name: "app", Image: "ngnix"}, {Name: "web", Image: "nginx"}}})
-	app, web := w.ctrs[0], w.ctrs[1]
+	w := testWorker(t, v1.PodSpec{Containers: []v1.Container{
+		{Name: "app", Image: "ngnix"}, {Name: "web", Image: "nginx"}, {Name: "loop", Image: "nginx"},
+		{Name: "eph", Image: "nginx"}, {Name: "done", Image: "nginx"}}})
+	app, web, loop, eph, done := w.ctrs[0], w.ctrs[1], w.ctrs[2], w.ctrs[3], w.ctrs[4]
 	app.state = v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}
 	web.state = v1.ContainerState{Running: &v1.ContainerStateRunning{}}
+	proc := newProcess(func() {})
+	web.proc = proc
+	loop.state = v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+	eph.ephemeral, eph.proc = true, newProcess(func() {})
+	done.finished, done.proc = true, newProcess(func() {})
 	pod := w.pod.DeepCopy()
-	pod.Spec.Containers[0].Image, pod.Spec.Containers[1].Image = "nginx:1.27", "nginx:1.28"
+	for i := range pod.Spec.Containers {
+		pod.Spec.Containers[i].Image = "nginx:1.28"
+	}
+	pod.Spec.Containers[0].Image = "nginx:1.27"
 	w.mu.Lock()
-	w.imagesChangedLocked(pod)
+	kill := w.imagesChangedLocked(pod)
 	w.mu.Unlock()
 	if app.spec.Image != "nginx:1.27" {
 		t.Errorf("waiting container has image %q, want nginx:1.27", app.spec.Image)
@@ -110,8 +120,37 @@ func TestImagesChanged(t *testing.T) {
 	default:
 		t.Error("waiting container not woken")
 	}
-	if web.spec.Image != "nginx" || web.newImage != nil {
-		t.Errorf("running container changed: %q", web.spec.Image)
+	if app.specRestart || app.reprepare {
+		t.Error("waiting container is restarted")
+	}
+	if web.spec.Image != "nginx:1.28" || !web.specRestart || !web.reprepare || web.newImage != nil {
+		t.Errorf("running container: %q restart %v reprepare %v", web.spec.Image, web.specRestart, web.reprepare)
+	}
+	if len(kill) != 1 || kill[0].c != web || kill[0].proc != proc {
+		t.Errorf("kill list %v, want the running container", kill)
+	}
+	if loop.spec.Image != "nginx:1.28" || loop.specRestart || !loop.reprepare {
+		t.Errorf("back-off container: %q restart %v reprepare %v", loop.spec.Image, loop.specRestart, loop.reprepare)
+	}
+	for _, c := range []*ctr{eph, done} {
+		if c.spec.Image != "nginx" || c.specRestart || c.reprepare {
+			t.Errorf("%s changed: %q", c.spec.Name, c.spec.Image)
+		}
+	}
+}
+
+func TestRestartForSpec(t *testing.T) {
+	w := testWorker(t, v1.PodSpec{Containers: []v1.Container{{Name: "web", Image: "nginx"}}})
+	c := w.ctrs[0]
+	if c.restartForSpec() || c.restarts != 0 {
+		t.Fatal("restart without a new image")
+	}
+	c.specRestart = true
+	if !c.restartForSpec() || c.restarts != 1 || c.specRestart {
+		t.Fatalf("restarts %d, flag %v", c.restarts, c.specRestart)
+	}
+	if c.restartForSpec() || c.restarts != 1 {
+		t.Fatal("restarted twice")
 	}
 }
 

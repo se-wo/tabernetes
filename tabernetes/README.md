@@ -126,8 +126,9 @@ A container is not a process:
   ask a registry, so it knows the official images of Docker Hub and the tags
   of the built-in images; other images pull, unless their name is a typo of a
   built-in one (`curlimages/crul`). Such an image without a command fails with
-  `CreateContainerError`. Each container sees its own root directory with the
-  files of its image and its volume mounts.
+  `CreateContainerError`. A new image in the pod spec (`kubectl set image`)
+  restarts the container with it. Each container sees its own root directory
+  with the files of its image and its volume mounts.
 - **WebAssembly containers** (`runtimeClassName: wasmtime`, the RuntimeClass
   of runwasi's wasmtime shim) run a WASI preview 1 module in a Web Worker of
   their own (`tabnode_wasi.go`, `web/src/wasi*.js`, with

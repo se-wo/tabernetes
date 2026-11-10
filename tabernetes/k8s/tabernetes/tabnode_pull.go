@@ -420,9 +420,17 @@ func (c *ctr) waitsForImage() bool {
 	return false
 }
 
-// imagesChangedLocked takes the new images of the containers that wait for
-// theirs from the updated pod. w.mu is held.
-func (w *podWorker) imagesChangedLocked(pod *v1.Pod) {
+// imageKill is a running container that is killed for a new image.
+type imageKill struct {
+	c    *ctr
+	proc *process
+}
+
+// imagesChangedLocked takes the new images of the containers from the updated
+// pod. A container that waits for its image starts over with the new one at
+// once; a running one is returned to be killed and started again (the caller
+// passes it to restartForNewImage once w.mu is released). w.mu is held.
+func (w *podWorker) imagesChangedLocked(pod *v1.Pod) []imageKill {
 	specs := map[string]v1.Container{}
 	for _, s := range pod.Spec.InitContainers {
 		specs[s.Name] = s
@@ -430,18 +438,85 @@ func (w *podWorker) imagesChangedLocked(pod *v1.Pod) {
 	for _, s := range pod.Spec.Containers {
 		specs[s.Name] = s
 	}
+	var kill []imageKill
 	for _, c := range w.ctrs {
 		s, ok := specs[c.spec.Name]
-		if !ok || s.Image == c.spec.Image || !c.waitsForImage() {
+		if !ok || c.ephemeral || c.finished || s.Image == c.spec.Image {
 			continue
 		}
-		c.spec.Image, c.spec.ImagePullPolicy = s.Image, s.ImagePullPolicy
-		if c.newImage == nil {
-			c.newImage = make(chan struct{}, 1)
-		}
-		select {
-		case c.newImage <- struct{}{}:
+		switch {
+		case c.waitsForImage():
+			c.spec.Image, c.spec.ImagePullPolicy = s.Image, s.ImagePullPolicy
+			if c.newImage == nil {
+				c.newImage = make(chan struct{}, 1)
+			}
+			select {
+			case c.newImage <- struct{}{}:
+			default:
+			}
+		case c.proc != nil && (!c.init || c.sidecar):
+			c.spec.Image, c.spec.ImagePullPolicy = s.Image, s.ImagePullPolicy
+			c.specRestart, c.reprepare = true, true
+			kill = append(kill, imageKill{c, c.proc})
 		default:
+			c.spec.Image, c.spec.ImagePullPolicy = s.Image, s.ImagePullPolicy
+			c.reprepare = true
+		}
+	}
+	return kill
+}
+
+// restartForNewImage kills the running containers whose image changed, like
+// the kubelet: the Killing event, the preStop hook, the kill. The supervisor
+// starts them again with the new image.
+func (w *podWorker) restartForNewImage(kill []imageKill) {
+	if len(kill) == 0 {
+		return
+	}
+	pod, _ := w.podInfo()
+	by := time.Now().Add(killGrace(pod, nil))
+	for _, k := range kill {
+		go k.c.stopProc(k.proc, by, fmt.Sprintf("Container %s definition changed, will be restarted", k.c.spec.Name), false)
+	}
+}
+
+// restartForSpec says whether the run that ended was killed for a new image:
+// the container restarts at once, without back-off and whatever the restart
+// policy says.
+func (c *ctr) restartForSpec() bool {
+	c.w.mu.Lock()
+	defer c.w.mu.Unlock()
+	if !c.specRestart {
+		return false
+	}
+	c.specRestart = false
+	c.restarts++
+	return true
+}
+
+// applyNewImage prepares the container again after its image changed. false:
+// the pod stops.
+func (c *ctr) applyNewImage() bool {
+	c.w.mu.Lock()
+	again := c.reprepare
+	// A kill for a new image that came after the run had ended is moot:
+	// this run starts with the new image anyway.
+	c.reprepare, c.specRestart = false, false
+	c.w.mu.Unlock()
+	if !again {
+		return true
+	}
+	for {
+		err := c.prepare()
+		if err == nil {
+			return true
+		}
+		c.setWaiting("CreateContainerConfigError", err.Error())
+		c.w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: %v", err)
+		select {
+		case <-c.w.ctx.Done():
+			return false
+		case <-time.After(5 * time.Second):
 		}
 	}
 }

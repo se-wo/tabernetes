@@ -45,6 +45,9 @@ type ctr struct {
 	didStart  bool
 	newImage  chan struct{} // the image changed while the container waits for it (tabnode_pull.go)
 
+	specRestart bool // killed for a new image: restart at once (tabnode_pull.go)
+	reprepare   bool // the image changed: prepare again before the next run
+
 	// set by prepare
 	image *builtinImage
 	wasm  bool
@@ -187,6 +190,9 @@ func (c *ctr) prepare() error {
 func (c *ctr) runOnce() (code int, ok bool) {
 	ctx := c.w.ctx
 	if ctx.Err() != nil {
+		return 0, false
+	}
+	if !c.applyNewImage() {
 		return 0, false
 	}
 	c.w.mu.Lock()
