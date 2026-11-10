@@ -434,6 +434,18 @@ func (r *rootFS) real(p string) string {
 	return r.base + p
 }
 
+// readOnlyVolume reports whether the kubelet mounts the volume read-only,
+// whatever the mount says: configMap, secret, downwardAPI and projected.
+func readOnlyVolume(pod *v1.Pod, name string) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == name {
+			s := v.VolumeSource
+			return s.ConfigMap != nil || s.Secret != nil || s.DownwardAPI != nil || s.Projected != nil
+		}
+	}
+	return false
+}
+
 // rootFS builds the file system of a container: the files of its image, a
 // few files every container has, and its volume mounts.
 func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
@@ -475,7 +487,7 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 		if m.SubPath != "" {
 			real = filepath.Join(real, m.SubPath)
 		}
-		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly})
+		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly || readOnlyVolume(pod, m.Name)})
 	}
 	// longest first, so /a/b wins over /a
 	for i := 1; i < len(root.mounts); i++ {

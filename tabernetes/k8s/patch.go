@@ -214,6 +214,14 @@ var BackgroundContext = func(ctx context.Context, stmt *syntax.Stmt) (context.Co
 }
 `)
 
+	// kubectl cp from a pod calls CheckErr in a goroutine of its own. Here that
+	// is a panic nobody recovers, which ends the whole tab. Hand the error to
+	// the reader of the pipe instead: the command reports it.
+	edit("staging/src/k8s.io/kubectl/pkg/cmd/cp/cp.go",
+		"\t\tdefer t.outStream.Close()\n\t\tcmdutil.CheckErr(t.o.execute(options))",
+		"\t\tt.outStream.CloseWithError(t.o.execute(options)) // tabernetes: no CheckErr in a goroutine",
+	)
+
 	// port-forward and proxy serve until the process ends. Here the process is
 	// the browser tab, so stop them with the command's context (Ctrl-C,
 	// kill %1). port-forward has RunPortForwardContext, the command does not
