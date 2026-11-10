@@ -146,6 +146,7 @@ func (w *podWorker) run() {
 	for {
 		err := w.setupVolumes(w.ctx)
 		if err == nil {
+			w.chownVolumes() // tabnode_security.go
 			break
 		}
 		w.event(v1.EventTypeWarning, "FailedMount", "%v", err)

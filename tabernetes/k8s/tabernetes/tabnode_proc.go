@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -122,8 +121,7 @@ func newPodRunner(env []string, dir string, stdin io.Reader, stdout, stderr io.W
 			return os.Lstat(rp)
 		}),
 		interp.AccessHandler(func(ctx context.Context, p string, mode interp.AccessMode) error {
-			_, err := os.Stat(realPath(ctx, interp.HandlerCtx(ctx).Dir, p))
-			return err
+			return podAccess(ctx, interp.HandlerCtx(ctx).Dir, p, mode)
 		}),
 	)
 	if err != nil {
@@ -144,32 +142,13 @@ func podOpen(ctx context.Context, p string, flag int, perm os.FileMode) (io.Read
 	case "/dev/stderr", "/dev/termination-log":
 		return nopCloser{interp.HandlerCtx(ctx).Stderr}, nil
 	}
-	rp := realPath(ctx, interp.HandlerCtx(ctx).Dir, p)
-	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE) != 0 {
-		if pe := procOf(ctx); pe != nil && pe.root.readOnlyAt(p, interp.HandlerCtx(ctx).Dir) {
-			return nil, &fs.PathError{Op: "open", Path: p, Err: errors.New("read-only file system")}
-		}
-	}
-	return os.OpenFile(rp, flag, perm)
+	return podOpenFile(ctx, interp.HandlerCtx(ctx).Dir, p, flag, perm)
 }
 
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Read([]byte) (int, error) { return 0, io.EOF }
 func (nopCloser) Close() error             { return nil }
-
-func (r *rootFS) readOnlyAt(p, dir string) bool {
-	if !path.IsAbs(p) {
-		p = path.Join(dir, p)
-	}
-	p = path.Clean(p)
-	for _, m := range r.mounts {
-		if p == m.path || strings.HasPrefix(p, m.path+"/") {
-			return m.readOnly
-		}
-	}
-	return false
-}
 
 // podCall runs before every simple command. js/wasm has no preemption: a
 // shell loop without a blocking command would freeze the whole tab, the
@@ -312,7 +291,7 @@ func runShell(ctx context.Context, hc interp.HandlerContext, args []string) erro
 		}
 		return runScript(ctx, hc, name, []byte(*script), rest)
 	case len(rest) > 0 && rest[0] != "-":
-		b, err := os.ReadFile(realPath(ctx, hc.Dir, rest[0]))
+		b, err := readFileAs(ctx, hc.Dir, rest[0])
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "%s: can't open '%s': %v\n", args[0], rest[0], unwrap(err))
 			return interp.ExitStatus(2)
@@ -393,9 +372,11 @@ func shellPrompt(ctx context.Context, shell string, r *interp.Runner) string {
 		if pe := procOf(ctx); pe != nil && pe.w != nil {
 			host = pe.w.name
 		}
-		return "root@" + host + ":" + dir + "# "
+		user, sign := promptUser(ctx)
+		return user + "@" + host + ":" + dir + sign + " "
 	}
-	return dir + " # "
+	_, sign := promptUser(ctx)
+	return dir + " " + sign + " "
 }
 
 func stdinOf(hc interp.HandlerContext) io.Reader {
@@ -509,21 +490,15 @@ var podTools = map[string]func(ctx context.Context, hc interp.HandlerContext, ar
 		fmt.Fprintln(hc.Stdout, "Linux")
 		return nil
 	},
-	"id": func(_ context.Context, hc interp.HandlerContext, _ []string, _ interp.ExecHandlerFunc) error {
-		fmt.Fprintln(hc.Stdout, "uid=0(root) gid=0(root) groups=0(root)")
-		return nil
-	},
-	"whoami": func(_ context.Context, hc interp.HandlerContext, _ []string, _ interp.ExecHandlerFunc) error {
-		fmt.Fprintln(hc.Stdout, "root")
-		return nil
-	},
+	"id":     idCmd,     // tabnode_security.go
+	"whoami": whoamiCmd, // tabnode_security.go
 	"ps": func(ctx context.Context, hc interp.HandlerContext, _ []string, _ interp.ExecHandlerFunc) error {
 		pe := procOf(ctx)
 		pe.w.mu.Lock()
 		argv := strings.Join(pe.c.argv, " ")
 		pe.w.mu.Unlock()
 		fmt.Fprintln(hc.Stdout, "PID   USER     COMMAND")
-		fmt.Fprintf(hc.Stdout, "    1 root     %s\n", argv)
+		fmt.Fprintf(hc.Stdout, "    1 %-8s %s\n", procUser(ctx), argv)
 		return nil
 	},
 }

@@ -130,7 +130,7 @@ func inputs(ctx context.Context, hc interp.HandlerContext, name string, files []
 		if f == "/dev/null" {
 			r = strings.NewReader("")
 		} else if f != "-" {
-			fh, err := os.Open(abs(ctx, hc, f))
+			fh, err := openAs(ctx, hc, f, os.O_RDONLY, 0)
 			if err != nil {
 				fmt.Fprintf(hc.Stderr, "%s: %s: %v\n", name, f, unwrap(err))
 				code = 1
@@ -547,7 +547,12 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		}
 		var entries []fs.FileInfo
 		if fi.IsDir() && !has(o, "d") {
-			des, _ := os.ReadDir(abs(ctx, hc, a))
+			des, err := readDirAs(ctx, hc, a)
+			if err != nil {
+				fmt.Fprintf(hc.Stderr, "ls: can't open '%s': %v\n", a, unwrap(err))
+				code = 2
+				continue
+			}
 			for _, de := range des {
 				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 					continue
@@ -574,7 +579,7 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 				name = "\x1b[1;34m" + name + "\x1b[0m"
 			}
 			if has(o, "l") {
-				fmt.Fprintf(hc.Stdout, "%s 1 root root %8d %s %s\n", e.Mode(), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
+				fmt.Fprintf(hc.Stdout, "%s 1 %s %8d %s %s\n", lsMode(e.Mode()), lsOwner(ctx, e), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
 			} else {
 				fmt.Fprintln(hc.Stdout, name)
 			}
@@ -589,12 +594,7 @@ func mkdir(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 		return fail(hc, 2, "%v", err)
 	}
 	for _, a := range args {
-		if has(o, "p") {
-			err = os.MkdirAll(abs(ctx, hc, a), 0o755)
-		} else {
-			err = os.Mkdir(abs(ctx, hc, a), 0o755)
-		}
-		if err != nil {
+		if err := mkdirAs(ctx, hc, a, has(o, "p")); err != nil {
 			return fail(hc, 1, "mkdir: %s: %v", a, unwrap(err))
 		}
 	}
@@ -616,12 +616,7 @@ func rm(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 			}
 			continue
 		}
-		if has(o, "r") || has(o, "R") {
-			err = os.RemoveAll(p)
-		} else {
-			err = os.Remove(p)
-		}
-		if err != nil {
+		if err := removeAs(ctx, hc, a, has(o, "r") || has(o, "R")); err != nil {
 			fmt.Fprintf(hc.Stderr, "rm: %s: %v\n", a, unwrap(err))
 			code = 1
 		}
@@ -631,7 +626,7 @@ func rm(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 
 func touch(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	for _, a := range args {
-		f, err := os.OpenFile(abs(ctx, hc, a), os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := openAs(ctx, hc, a, os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return fail(hc, 1, "touch: %s: %v", a, unwrap(err))
 		}
@@ -651,7 +646,7 @@ func tee(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	}
 	ws := []io.Writer{hc.Stdout}
 	for _, a := range args {
-		f, err := os.OpenFile(abs(ctx, hc, a), flag, 0o644)
+		f, err := openAs(ctx, hc, a, flag, 0o644)
 		if err != nil {
 			return fail(hc, 1, "tee: %s: %v", a, unwrap(err))
 		}
@@ -981,7 +976,7 @@ func createOutput(ctx context.Context, hc interp.HandlerContext, name string) (i
 	case "/dev/null":
 		return nopCloser{io.Discard}, nil
 	}
-	return os.Create(abs(ctx, hc, name))
+	return openAs(ctx, hc, name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 }
 
 // refused reports a refused connection. The in-process network flattens

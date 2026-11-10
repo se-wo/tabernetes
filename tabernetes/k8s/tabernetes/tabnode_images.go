@@ -162,6 +162,7 @@ var imageDefs = []*imageDef{
 			cmd:        []string{"nginx", "-g", "daemon off;"},
 			env:        []string{"NGINX_VERSION=1.29.3", "NJS_VERSION=0.9.4", "NJS_RELEASE=1~trixie", "PKG_RELEASE=1~trixie", "DYNPKG_RELEASE=1~trixie"},
 			files:      nginxFiles,
+			passwd:     []string{"nginx:x:101:101:nginx user:/nonexistent:/bin/false"}, group: []string{"nginx:x:101:"},
 		},
 		repos: []string{"nginx"}, short: true, tag: "latest", size: 72_324_501,
 		tune: versionEnv("NGINX_VERSION"),
@@ -294,7 +295,7 @@ HOME_URL="https://www.opensuse.org/"
 		repos: []string{"traefik/whoami", "containous/whoami"}, tag: "v1.11.0", size: 3_617_002,
 	},
 	{
-		img:   builtinImage{name: "hashicorp/http-echo", entrypoint: []string{"/http-echo"}},
+		img:   builtinImage{name: "hashicorp/http-echo", entrypoint: []string{"/http-echo"}, user: "65532:65532"},
 		repos: []string{"hashicorp/http-echo"}, tag: "1.0.0", size: 3_642_517,
 	},
 	{
@@ -317,15 +318,17 @@ HOME_URL="https://www.opensuse.org/"
 		registry: "registry.k8s.io", tag: "2.53", size: 50_826_141,
 	},
 	{
-		img:   builtinImage{name: "podinfo", cmd: []string{"./podinfo"}, workdir: "/home/app", files: alpineFiles},
+		img: builtinImage{name: "podinfo", cmd: []string{"./podinfo"}, workdir: "/home/app", files: alpineFiles,
+			user: "app", passwd: []string{"app:x:100:101:Linux User,,,:/home/app:/sbin/nologin"}, group: []string{"app:x:101:app"}},
 		repos: []string{"stefanprodan/podinfo"}, registry: "ghcr.io", tag: "6.9.2", size: 23_154_710,
 	},
 	{
-		img:   builtinImage{name: "curlimages/curl", entrypoint: []string{"/entrypoint.sh"}, cmd: []string{"curl"}, workdir: "/home/curl_user", files: alpineFiles},
+		img: builtinImage{name: "curlimages/curl", entrypoint: []string{"/entrypoint.sh"}, cmd: []string{"curl"}, workdir: "/home/curl_user", files: alpineFiles,
+			user: "curl_user", passwd: []string{"curl_user:x:100:101:Linux User,,,:/home/curl_user:/sbin/nologin"}, group: []string{"curl_group:x:101:curl_user"}},
 		repos: []string{"curlimages/curl"}, tag: "8.16.0", size: 24_811_204,
 	},
 	{
-		img:   builtinImage{name: "bitnami/kubectl", entrypoint: []string{"kubectl"}, cmd: []string{"--help"}, files: debianFiles},
+		img:   builtinImage{name: "bitnami/kubectl", entrypoint: []string{"kubectl"}, cmd: []string{"--help"}, files: debianFiles, user: "1001"},
 		repos: []string{"bitnami/kubectl"}, tag: "latest", size: 98_017_610,
 	},
 	{
@@ -338,7 +341,8 @@ HOME_URL="https://www.opensuse.org/"
 		registry: "gcr.io", tag: "v1", size: 211_336_459,
 	},
 	{
-		img:   builtinImage{name: "hello-app", cmd: []string{"/hello-app"}},
+		img: builtinImage{name: "hello-app", cmd: []string{"/hello-app"}, user: "nonroot:nonroot",
+			passwd: []string{"nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin"}, group: []string{"nonroot:x:65532:"}},
 		repos: []string{"google-samples/hello-app", "google-samples/containers/gke/hello-app"}, short: true,
 		registry: "us-docker.pkg.dev", tag: "1.0", size: 9_978_428,
 	},

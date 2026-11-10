@@ -149,6 +149,33 @@ and `kubectl logs/exec/attach -c` reach it. `kubectl debug node/tab` runs its
 pod with hostNetwork on the node IP and the file system of the terminal under
 `/host`.
 
+`tabnode_security.go` reads `securityContext` of the pod and the container.
+It is emulation: the commands of the tab node check on behalf of the
+container.
+
+- `runAsUser`, `runAsGroup`, `supplementalGroups` and `fsGroup` show in `id`,
+  `whoami`, `ps` and `/proc/1/status`. Without them, the user of the image
+  counts: most built-in images run as root, `curlimages/curl` as `curl_user`.
+  A uid without an entry in `/etc/passwd` shows as
+  `uid=1000 gid=0(root) groups=0(root)`.
+- Files have an owner and a mode. A user who is not root cannot write to
+  `/etc`, but to `/tmp`, an emptyDir and its home (`Permission denied`).
+  New files belong to the user, `ls -l` shows it. With `fsGroup`, volumes
+  belong to that group and have the setgid bit.
+- `readOnlyRootFilesystem: true`: writes outside volume mounts fail with
+  `Read-only file system`.
+- `runAsNonRoot: true` with a root image: `CreateContainerConfigError` with
+  the message of the kubelet.
+- `capabilities`, `privileged` and `allowPrivilegeEscalation` show in
+  `CapPrm`, `CapEff`, `CapBnd` and `NoNewPrivs` of `/proc/1/status`. Root
+  without `DAC_OVERRIDE` passes no permission check.
+- nginx fails like the real image as another user or with a read-only root
+  file system, until emptyDir volumes cover `/var/cache/nginx` and `/var/run`.
+
+Only the shell and the coreutils check permissions. The servers of the
+built-in images write their own files as before, and nothing checks the
+execute bit, ports below 1024 or `seccompProfile`.
+
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port

@@ -279,7 +279,7 @@ func (w *podWorker) containerEnv(pod *v1.Pod, ip string, c *v1.Container, img *b
 	}
 	set("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	set("HOSTNAME", hostname)
-	set("HOME", "/root")
+	set("HOME", secHome(pod, c, img))
 	if img != nil {
 		for _, kv := range img.env {
 			k, v, _ := strings.Cut(kv, "=")

@@ -327,6 +327,8 @@ func nginxEntrypoint(ctx context.Context, hc interp.HandlerContext) {
 	const def = "/etc/nginx/conf.d/default.conf"
 	if b, err := os.ReadFile(real(def)); err != nil {
 		say("10-listen-on-ipv6-by-default.sh: info: %s is not a file or does not exist", def)
+	} else if fsAccess(ctx, "/", def, accWrite) != nil { // securityContext, tabnode_security.go
+		say("10-listen-on-ipv6-by-default.sh: info: can not modify %s (read-only file system?)", def)
 	} else if string(b) != nginxPackagedDefault {
 		say("10-listen-on-ipv6-by-default.sh: info: Getting the checksum of %s", def)
 		say("10-listen-on-ipv6-by-default.sh: info: %s differs from the packaged version", def)
@@ -1217,6 +1219,9 @@ func nginxProg(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	if err != nil {
 		fmt.Fprintf(hc.Stderr, "%s [emerg] 1#1: %v\nnginx: [emerg] %v\n", time.Now().UTC().Format("2006/01/02 15:04:05"), err, err)
 		return interp.ExitStatus(1)
+	}
+	if err := nginxStartChecks(ctx, hc, real, file); err != nil { // tabnode_security.go
+		return err
 	}
 	// daemon on (without -g "daemon off;") would fork into the background;
 	// here nginx always stays in the foreground.
