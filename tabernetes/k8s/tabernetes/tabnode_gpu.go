@@ -200,60 +200,70 @@ func webgpuSlice(node string, nodeUID types.UID, a *gpuAdapter, browser string, 
 
 // syncGPU probes the adapter and publishes it, or removes the slice when the
 // adapter is gone. It runs at the start and with every node status update.
+// This node is the only writer of its slice, so it talks to the apiserver
+// only when the device differs from what it published last; a node without
+// WebGPU never does (the cluster starts fresh with the page, there is no old
+// slice to remove).
 func (n *tabNode) syncGPU(ctx context.Context) {
 	if !gpuOffered {
 		return
 	}
+	n.gpuSync.Lock()
+	defer n.gpuSync.Unlock()
 	a, err := probeGPU(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tab node: probing WebGPU:", err)
 		return // keep what is published
 	}
 	n.gpuMu.Lock()
-	had := n.gpu
 	n.gpu = a
 	n.gpuMu.Unlock()
+	rs := n.client.ResourceV1().ResourceSlices()
+	name := tabNodeName + webgpuSliceSuffix
 	if a == nil {
-		if had != nil {
-			fmt.Fprintln(os.Stderr, "tab node: the WebGPU adapter is gone")
+		if n.gpuPublished == nil {
+			return
 		}
-		err := n.client.ResourceV1().ResourceSlices().Delete(ctx, tabNodeName+webgpuSliceSuffix, metav1.DeleteOptions{})
-		if err != nil && !k8serrors.IsNotFound(err) && had != nil {
+		fmt.Fprintln(os.Stderr, "tab node: the WebGPU adapter is gone")
+		err := rs.Delete(ctx, name, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
 			fmt.Fprintln(os.Stderr, "tab node: deleting the WebGPU slice:", err)
+			return // try again next time
 		}
+		n.gpuPublished = nil
 		return
 	}
 	ua, _, _ := browserInfo()
-	rs := n.client.ResourceV1().ResourceSlices()
-	if had == nil {
-		_, err = rs.Create(ctx, webgpuSlice(tabNodeName, n.nodeUID, a, ua, 1), metav1.CreateOptions{})
+	want := webgpuSlice(tabNodeName, n.nodeUID, a, ua, 1)
+	dev := &want.Spec.Devices[0]
+	if n.gpuPublished != nil && equality.Semantic.DeepEqual(n.gpuPublished, dev) {
+		return
+	}
+	if n.gpuPublished == nil {
+		_, err = rs.Create(ctx, want, metav1.CreateOptions{})
 		if err == nil {
+			n.gpuPublished = dev
 			fmt.Fprintf(os.Stderr, "tab node: offers %s as %s/%s/%s\n", a, webgpuDriver, tabNodeName, webgpuDevice)
 			return
 		}
 		if !k8serrors.IsAlreadyExists(err) {
 			fmt.Fprintln(os.Stderr, "tab node: publishing the WebGPU slice:", err)
-			n.gpuMu.Lock()
-			n.gpu = nil // try again next time
-			n.gpuMu.Unlock()
-			return
+			return // try again next time
 		}
 	}
-	old, err := rs.Get(ctx, tabNodeName+webgpuSliceSuffix, metav1.GetOptions{})
+	old, err := rs.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tab node: reading the WebGPU slice:", err)
 		return
 	}
-	want := webgpuSlice(tabNodeName, n.nodeUID, a, ua, old.Spec.Pool.Generation)
-	if equality.Semantic.DeepEqual(old.Spec, want.Spec) {
-		return
-	}
 	// A new generation tells the scheduler that the pool changed.
+	want.Spec.Pool.Generation = old.Spec.Pool.Generation + 1
 	old.Spec = want.Spec
-	old.Spec.Pool.Generation++
 	if _, err := rs.Update(ctx, old, metav1.UpdateOptions{}); err != nil {
 		fmt.Fprintln(os.Stderr, "tab node: updating the WebGPU slice:", err)
+		return
 	}
+	n.gpuPublished = dev
 }
 
 func (n *tabNode) gpuAdapter() *gpuAdapter {
@@ -346,11 +356,26 @@ func claimDevices(pod *v1.Pod, claims map[string]*resourceapi.ResourceClaim, nod
 // w. Errors are retried by the caller.
 func (w *podWorker) prepareDevices(ctx context.Context) error {
 	pod, _ := w.podInfo()
+	// A claim of a template exists once the resourceclaim controller wrote
+	// its name into the pod status. Until then, wait like the kubelet does
+	// (resourceclaim.PodClaims would skip it).
+	for i := range pod.Spec.ResourceClaims {
+		if _, _, err := resourceclaim.Name(pod, &pod.Spec.ResourceClaims[i]); err != nil {
+			return fmt.Errorf("claim %s of the pod: %w", pod.Spec.ResourceClaims[i].Name, err)
+		}
+	}
 	claims := map[string]*resourceapi.ResourceClaim{}
-	for name := range resourceclaim.PodClaims(pod) {
+	for name, mustCheckOwner := range resourceclaim.PodClaims(pod) {
 		claim, err := w.n.client.ResourceV1().ResourceClaims(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("reading ResourceClaim %s: %w", name, err)
+		}
+		// A claim made for the pod must belong to it, not to an older pod
+		// of the same name.
+		if mustCheckOwner {
+			if err := resourceclaim.IsForPod(pod, claim, false); err != nil {
+				return err
+			}
 		}
 		claims[name] = claim
 	}
@@ -359,11 +384,11 @@ func (w *podWorker) prepareDevices(ctx context.Context) error {
 		return err
 	}
 	a := w.n.gpuAdapter()
-	for _, ds := range devs {
-		for _, d := range ds {
-			if a == nil {
-				return fmt.Errorf("%s: the WebGPU adapter of this browser is gone", d.id())
-			}
+	for _, claim := range claims {
+		// claimDevices made sure every device of the claims is ours, also
+		// those of claims that no container lists.
+		if a == nil && len(claim.Status.Allocation.Devices.Results) > 0 {
+			return fmt.Errorf("%s/%s/%s: the WebGPU adapter of this browser is gone", webgpuDriver, tabNodeName, webgpuDevice)
 		}
 	}
 	for name, claim := range claims {

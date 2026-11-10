@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/resource"
 	_ "k8s.io/kubernetes/pkg/apis/resource/install"
@@ -173,5 +175,52 @@ func TestClaimDevices(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.err) {
 			t.Errorf("%s: error %v, want %q", name, err, tc.err)
 		}
+	}
+}
+
+// prepareDevices waits for claims that do not exist yet, refuses claims of
+// another pod and does not prepare anything while the adapter is gone, also
+// for a claim that no container lists.
+func TestPrepareDevices(t *testing.T) {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "pod-uid"},
+		Spec: v1.PodSpec{
+			ResourceClaims: []v1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("gpu-template")}},
+			Containers:     []v1.Container{{Name: "a"}}, // the claim is pod-level only
+		},
+	}
+	claim := allocated("p-gpu-1", pod, result("gpu", webgpuDriver, tabNodeName))
+	claim.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "p", UID: "pod-uid", Controller: ptr.To(true)}}
+	n := &tabNode{client: fake.NewClientset(claim), admin: fake.NewClientset(claim)}
+	w := &podWorker{n: n, pod: pod}
+	ctx := context.Background()
+
+	if err := w.prepareDevices(ctx); err == nil || !strings.Contains(err.Error(), "not created yet") {
+		t.Errorf("before the claim is in the pod status: %v", err)
+	}
+
+	pod.Status.ResourceClaimStatuses = []v1.PodResourceClaimStatus{{Name: "gpu", ResourceClaimName: ptr.To("p-gpu-1")}}
+	if err := w.prepareDevices(ctx); err == nil || !strings.Contains(err.Error(), "adapter of this browser is gone") {
+		t.Errorf("without the adapter: %v", err)
+	}
+
+	n.gpu = testAdapter
+	if err := w.prepareDevices(ctx); err != nil {
+		t.Fatalf("with the adapter: %v", err)
+	}
+	got, err := n.admin.ResourceV1().ResourceClaims("ns").Get(ctx, "p-gpu-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.Devices) != 1 || got.Status.Devices[0].Conditions[0].Type != webgpuReadyCond {
+		t.Errorf("claim status %+v", got.Status.Devices)
+	}
+
+	other := pod.DeepCopy()
+	other.UID = "another-pod"
+	claim.Status.ReservedFor[0].UID = "another-pod"
+	w2 := &podWorker{n: &tabNode{client: fake.NewClientset(claim), admin: fake.NewClientset(claim), gpu: testAdapter}, pod: other}
+	if err := w2.prepareDevices(ctx); err == nil || !strings.Contains(err.Error(), "Pod is not owner") {
+		t.Errorf("claim of another pod: %v", err)
 	}
 }

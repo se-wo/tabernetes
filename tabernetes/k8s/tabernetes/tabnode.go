@@ -30,6 +30,7 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,8 +77,10 @@ type tabNode struct {
 
 	net *serviceProxy
 
-	gpuMu sync.Mutex
-	gpu   *gpuAdapter // the WebGPU adapter it offers (tabnode_gpu.go), nil for none
+	gpuMu        sync.Mutex
+	gpu          *gpuAdapter         // the WebGPU adapter it offers (tabnode_gpu.go), nil for none
+	gpuSync      sync.Mutex          // one syncGPU at a time
+	gpuPublished *resourceapi.Device // the device in the slice, nil without a slice; under gpuSync
 }
 
 var theTabNode *tabNode
@@ -161,7 +164,8 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 	}
 	go n.heartbeat(ctx)
 	// The WebGPU adapter of the browser as a DRA device (tabnode_gpu.go).
-	n.syncGPU(ctx)
+	// Nothing of the node waits for the probe.
+	go n.syncGPU(ctx)
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
