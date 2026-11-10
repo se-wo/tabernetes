@@ -55,6 +55,7 @@ type ctr struct {
 	argv  []string
 	root  *rootFS
 	dir   string
+	sec   *secInfo // nil for WebAssembly pods (tabnode_security.go)
 }
 
 func newCtr(w *podWorker, spec v1.Container, init, sidecar bool) *ctr {
@@ -146,6 +147,10 @@ func (c *ctr) prepare() error {
 	if !c.wasm {
 		c.image = lookupImage(c.spec.Image)
 	}
+	sec, err := c.resolveSec(pod)
+	if err != nil {
+		return err
+	}
 	env, err := c.w.containerEnv(pod, ip, &c.spec, c.image)
 	if err != nil {
 		return err
@@ -177,10 +182,10 @@ func (c *ctr) prepare() error {
 	if dir == "" {
 		dir = "/"
 	}
-	os.MkdirAll(root.real(dir), 0o755)
+	prepareRootFS(root, c.image, sec, argv, dir)
 
 	c.w.mu.Lock()
-	c.env, c.argv, c.root, c.dir = env, argv, root, dir
+	c.env, c.argv, c.root, c.dir, c.sec = env, argv, root, dir, sec
 	c.w.mu.Unlock()
 	return nil
 }
@@ -460,7 +465,8 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 		"/etc/hosts":       fmt.Sprintf("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n%s\t%s\n", ip, hostname),
 		"/etc/resolv.conf": fmt.Sprintf("search %s.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.96.0.10\noptions ndots:5\n", pod.Namespace),
 		"/etc/os-release":  "NAME=\"Tabernetes\"\nPRETTY_NAME=\"Tabernetes (a browser tab)\"\nID=tabernetes\n",
-		"/etc/passwd":      "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n",
+		"/etc/passwd":      imagePasswd(c.image),
+		"/etc/group":       imageGroup(c.image),
 	}
 	if c.image != nil {
 		for p, s := range c.image.files {
@@ -543,4 +549,7 @@ type builtinImage struct {
 	workdir    string            // like the WORKDIR of the image
 	env        []string          // like the ENV of the image, "K=V"
 	files      map[string]string // files of the image: path in the container -> content
+	user       string            // like the USER of the image: "name", "uid", "name:group"; "" is root
+	passwd     []string          // lines of /etc/passwd and /etc/group beyond root and nobody
+	group      []string
 }

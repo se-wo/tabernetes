@@ -427,6 +427,10 @@ func (w *podWorker) runEphemeral(c *ctr) {
 			case <-time.After(5 * time.Second):
 			}
 			err = c.prepare()
+			if err != nil { // the kubelet repeats the event with every sync
+				c.setWaiting("CreateContainerConfigError", err.Error())
+				w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: %v", err)
+			}
 		}
 	}
 	if _, ok := c.runOnce(); ok {

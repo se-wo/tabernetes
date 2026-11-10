@@ -90,7 +90,11 @@ func (w *podWorker) syncVolume(ctx context.Context, pod *v1.Pod, ip string, v v1
 func (w *podWorker) writeVolume(v v1.Volume, payload map[string]volFile) (bool, error) {
 	pod, _ := w.podInfo()
 	dir, _ := w.volumeDir(v.Name)
-	return writeAtomic(dir, payload, volumeHasSubPath(pod, v.Name))
+	changed, err := writeAtomic(dir, payload, volumeHasSubPath(pod, v.Name))
+	if err == nil && changed {
+		w.chownVolume(pod, v) // fsGroup, tabnode_security.go
+	}
+	return changed, err
 }
 
 // volumeHasSubPath: a subPath mount keeps pointing into the directory it
@@ -356,7 +360,7 @@ func (w *podWorker) containerEnv(pod *v1.Pod, ip string, c *v1.Container, img *b
 	}
 	set("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	set("HOSTNAME", hostname)
-	set("HOME", "/root")
+	set("HOME", secHome(pod, c, img))
 	if img != nil {
 		for _, kv := range img.env {
 			k, v, _ := strings.Cut(kv, "=")

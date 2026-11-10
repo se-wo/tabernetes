@@ -83,7 +83,7 @@ func ddOpen(ctx context.Context, hc interp.HandlerContext, name string, flag int
 	if d := devFile(name); d != nil {
 		return d, nil
 	}
-	return os.OpenFile(abs(ctx, hc, name), flag, 0o644)
+	return openAs(ctx, hc, name, flag, 0o644)
 }
 
 // ddCmd is dd with if=, of=, bs=, ibs=, obs=, count=, skip=, seek=,

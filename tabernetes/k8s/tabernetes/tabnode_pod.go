@@ -148,6 +148,7 @@ func (w *podWorker) run() {
 	for {
 		err := w.setupVolumes(w.ctx)
 		if err == nil {
+			w.chownVolumes() // tabnode_security.go
 			break
 		}
 		w.event(v1.EventTypeWarning, "FailedMount", "%v", err)
@@ -170,6 +171,10 @@ func (w *podWorker) run() {
 				case <-time.After(5 * time.Second):
 				}
 				err = c.prepare()
+				if err != nil { // the kubelet repeats the event with every sync
+					c.setWaiting("CreateContainerConfigError", err.Error())
+					w.ctrEvent(c, v1.EventTypeWarning, "Failed", "Error: %v", err)
+				}
 			}
 		}
 	}

@@ -25,15 +25,15 @@ func init() { coreutils["sed"] = sedCmd }
 
 // Every file sed opens goes through these three helpers (one place for checks).
 func sedReadFile(ctx context.Context, hc interp.HandlerContext, name string) ([]byte, error) {
-	return os.ReadFile(abs(ctx, hc, name))
+	return readFileAs(ctx, hc.Dir, name)
 }
 
 func sedWriteFile(ctx context.Context, hc interp.HandlerContext, name string, data []byte, mode os.FileMode) error {
-	return os.WriteFile(abs(ctx, hc, name), data, mode)
+	return writeFileAs(ctx, hc, name, data, mode)
 }
 
 func sedCreate(ctx context.Context, hc interp.HandlerContext, name string) (io.WriteCloser, error) {
-	return os.Create(abs(ctx, hc, name))
+	return openAs(ctx, hc, name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 }
 
 type sedErr string

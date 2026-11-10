@@ -48,7 +48,7 @@ func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 			v := args[i+1]
 			i++
 			if a == "-f" || a == "--file" {
-				b, err := os.ReadFile(abs(ctx, hc, v))
+				b, err := readFileAs(ctx, hc.Dir, v)
 				if err != nil {
 					return fail(hc, 2, "grep: %s: %v", v, unwrap(err))
 				}
@@ -195,7 +195,7 @@ func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 		if f.name == "-" {
 			label = "(standard input)"
 		} else {
-			fh, err := os.Open(abs(ctx, hc, f.name))
+			fh, err := openAs(ctx, hc, f.name, os.O_RDONLY, 0)
 			if err != nil {
 				if !has(o, "s") {
 					fmt.Fprintf(hc.Stderr, "grep: %s: %v\n", f.name, unwrap(err))

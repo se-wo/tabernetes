@@ -169,7 +169,7 @@ func (s *ssl) read(path string) ([]byte, error) {
 		}
 		return io.ReadAll(s.hc.Stdin)
 	}
-	b, err := os.ReadFile(abs(s.ctx, s.hc, path))
+	b, err := readFileAs(s.ctx, s.hc.Dir, path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: Can't open %q for reading: %v", s.cmd, path, unwrap(err))
 	}
@@ -181,7 +181,7 @@ func (s *ssl) write(path string, data []byte, perm os.FileMode) error {
 		_, err := s.hc.Stdout.Write(data)
 		return err
 	}
-	if err := os.WriteFile(abs(s.ctx, s.hc, path), data, perm); err != nil {
+	if err := writeFileAs(s.ctx, s.hc, path, data, perm); err != nil {
 		return fmt.Errorf("%s: Can't open %q for writing: %v", s.cmd, path, unwrap(err))
 	}
 	return nil

@@ -398,7 +398,7 @@ func tarRead(ctx context.Context, hc interp.HandlerContext, o *tarOpts) (bool, e
 		in = strings.NewReader("")
 	}
 	if o.hasFile && o.file != "-" {
-		f, err := os.Open(abs(ctx, hc, o.file))
+		f, err := openAs(ctx, hc, o.file, os.O_RDONLY, 0)
 		if err != nil {
 			return false, fmt.Errorf("%s: Cannot open: %s", o.file, errText(err))
 		}
@@ -526,7 +526,8 @@ func tarRead(ctx context.Context, hc interp.HandlerContext, o *tarOpts) (bool, e
 // of the container (readOnly: true, configMap, secret).
 func readOnlyAt(ctx context.Context, hc interp.HandlerContext, p string) bool {
 	if pe := procOf(ctx); pe != nil && pe.root != nil {
-		return pe.root.readOnlyAt(p, hc.Dir)
+		sec := secOf(ctx)
+		return pe.root.readOnlyPlace(containerPath(hc.Dir, p), sec != nil && sec.readOnlyRoot)
 	}
 	return false
 }
@@ -571,6 +572,14 @@ func (f tarFS) real(virtual string) (string, error) {
 	if readOnlyAt(f.ctx, f.hc, virtual) {
 		return "", errReadOnly
 	}
+	// A new entry needs a writable directory, an existing file write access.
+	err := fsAccess(f.ctx, f.hc.Dir, virtual, accMkdir)
+	if fi, serr := os.Stat(abs(f.ctx, f.hc, virtual)); err == nil && serr == nil && !fi.IsDir() {
+		err = fsAccess(f.ctx, f.hc.Dir, virtual, accWrite)
+	}
+	if err != nil {
+		return "", unwrap(err)
+	}
 	return abs(f.ctx, f.hc, virtual), nil
 }
 
@@ -579,7 +588,11 @@ func (f tarFS) Create(virtual string, perm fs.FileMode) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.OpenFile(real, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	fh, err := os.OpenFile(real, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err == nil {
+		fsOwn(f.ctx, f.hc.Dir, virtual)
+	}
+	return fh, err
 }
 
 func (f tarFS) MkdirAll(virtual string, perm fs.FileMode) error {
@@ -587,7 +600,14 @@ func (f tarFS) MkdirAll(virtual string, perm fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return os.MkdirAll(real, perm)
+	if exists(real) {
+		return nil
+	}
+	if err := os.MkdirAll(real, perm); err != nil {
+		return err
+	}
+	fsOwn(f.ctx, f.hc.Dir, virtual)
+	return nil
 }
 
 func (f tarFS) Symlink(target, virtual string) error {
@@ -595,7 +615,11 @@ func (f tarFS) Symlink(target, virtual string) error {
 	if err != nil {
 		return err
 	}
-	return os.Symlink(target, real)
+	if err := os.Symlink(target, real); err != nil {
+		return err
+	}
+	fsOwn(f.ctx, f.hc.Dir, virtual)
+	return nil
 }
 
 func (f tarFS) Link(oldVirtual, virtual string) error {
@@ -627,7 +651,9 @@ func (f tarFS) Attrs(virtual string, h *tar.Header, mtime bool) error {
 			return err
 		}
 	}
-	os.Lchown(real, h.Uid, h.Gid)
+	if sec := secOf(f.ctx); sec == nil || sec.hasCap(capChown) {
+		os.Lchown(real, h.Uid, h.Gid) // like tar: only root restores the owner
+	}
 	if mtime && h.Typeflag != tar.TypeSymlink {
 		os.Chtimes(real, h.ModTime, h.ModTime)
 	}

@@ -42,7 +42,7 @@ func init() {
 // All file access of jq and yq goes through these four helpers (a place for
 // permission checks). p is the user's path.
 func jqOpen(ctx context.Context, hc interp.HandlerContext, p string) (*os.File, error) {
-	return os.Open(abs(ctx, hc, p))
+	return openAs(ctx, hc, p, os.O_RDONLY, 0)
 }
 
 func jqStat(ctx context.Context, hc interp.HandlerContext, p string) (os.FileInfo, error) {
@@ -50,7 +50,7 @@ func jqStat(ctx context.Context, hc interp.HandlerContext, p string) (os.FileInf
 }
 
 func jqReadFile(ctx context.Context, hc interp.HandlerContext, p string) ([]byte, error) {
-	return os.ReadFile(abs(ctx, hc, p))
+	return readFileAs(ctx, hc.Dir, p)
 }
 
 // jqWriteFile replaces the content of an existing file, keeping its mode.
@@ -59,7 +59,7 @@ func jqWriteFile(ctx context.Context, hc interp.HandlerContext, p string, data [
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(abs(ctx, hc, p), data, st.Mode().Perm())
+	return writeFileAs(ctx, hc, p, data, st.Mode().Perm())
 }
 
 func envList(hc interp.HandlerContext) []string {

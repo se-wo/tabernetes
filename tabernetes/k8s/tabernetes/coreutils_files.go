@@ -28,8 +28,8 @@ import (
 )
 
 // File tools: cp mv ln chmod chown chgrp stat find diff rmdir basename
-// dirname realpath readlink mktemp and the md5/sha*sum family. Permissions
-// are only stored, never checked.
+// dirname realpath readlink mktemp and the md5/sha*sum family. In a
+// container they check permissions like its user (tabnode_security.go).
 func init() {
 	maps.Copy(coreutils, map[string]util{
 		"cp": cpCmd, "mv": mvCmd, "ln": lnCmd, "chmod": chmodCmd, "chown": chownCmd, "chgrp": chgrpCmd,
@@ -43,7 +43,7 @@ func init() {
 // filesOpen is the one place where these tools open or create files (flag
 // and perm as for os.OpenFile); p is the user's path.
 func filesOpen(ctx context.Context, hc interp.HandlerContext, p string, flag int, perm os.FileMode) (*os.File, error) {
-	return os.OpenFile(abs(ctx, hc, p), flag, perm)
+	return openAs(ctx, hc, p, flag, perm)
 }
 
 func filesRead(ctx context.Context, hc interp.HandlerContext, p string) ([]byte, error) {
@@ -191,12 +191,17 @@ func (c *fcCopier) copy(s, d string, top bool) {
 			fmt.Fprintf(c.hc.Stdout, "'%s' -> '%s'\n", s, d)
 		}
 		if derr != nil {
-			if err := os.Mkdir(dst, 0o755); err != nil {
+			err := createAs(c.ctx, c.hc, d)
+			if err == nil {
+				err = os.Mkdir(dst, 0o755)
+			}
+			if err != nil {
 				c.errf("cannot create directory '%s': %s", d, fcErr(err))
 				return
 			}
+			fsOwn(c.ctx, c.hc.Dir, d)
 		}
-		ents, err := os.ReadDir(src)
+		ents, err := readDirAs(c.ctx, c.hc, s)
 		if err != nil {
 			c.errf("cannot open directory '%s': %s", s, fcErr(err))
 			return
@@ -210,10 +215,15 @@ func (c *fcCopier) copy(s, d string, top bool) {
 	case fi.Mode()&fs.ModeSymlink != 0:
 		t, err := os.Readlink(src)
 		if err == nil {
+			err = createAs(c.ctx, c.hc, d)
+		}
+		if err == nil {
 			if derr == nil {
 				os.Remove(dst)
 			}
-			err = os.Symlink(t, dst)
+			if err = os.Symlink(t, dst); err == nil {
+				fsOwn(c.ctx, c.hc.Dir, d)
+			}
 		}
 		if err != nil {
 			c.errf("cannot create symbolic link '%s': %s", d, fcErr(err))
@@ -235,7 +245,7 @@ func (c *fcCopier) copy(s, d string, top bool) {
 		}
 		defer in.Close()
 		out, err := filesOpen(c.ctx, c.hc, d, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
-		if err != nil && c.force {
+		if err != nil && c.force && removeCheck(c.ctx, c.hc, d) == nil {
 			os.Remove(dst)
 			out, err = filesOpen(c.ctx, c.hc, d, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
 		}
@@ -340,6 +350,15 @@ func mvCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 			code = 1
 			continue
 		}
+		err = removeCheck(ctx, hc, s)
+		if err == nil {
+			err = createAs(ctx, hc, d)
+		}
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "mv: cannot move '%s' to '%s': %s\n", s, d, fcErr(err))
+			code = 1
+			continue
+		}
 		if err := os.Rename(sr, dr); err != nil {
 			c := &fcCopier{ctx: ctx, hc: hc, name: "mv", recursive: true, keep: true, noFollow: true}
 			c.copy(s, d, true)
@@ -396,12 +415,18 @@ func lnCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 				code = 1
 				continue
 			}
-			os.Remove(lr)
+			if removeCheck(ctx, hc, l) == nil {
+				os.Remove(lr)
+			}
 		}
-		if has(o, "s") {
+		if err = createAs(ctx, hc, l); err != nil {
+		} else if has(o, "s") {
 			err = os.Symlink(t, lr)
 		} else {
 			err = os.Link(abs(ctx, hc, t), lr)
+		}
+		if err == nil && has(o, "s") {
+			fsOwn(ctx, hc.Dir, l)
 		}
 		if err != nil {
 			if kind == "hard" {
@@ -553,6 +578,9 @@ func chmodCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ in
 	apply := func(real, user string) {
 		fi, err := os.Stat(real)
 		if err == nil {
+			err = attrCheck(ctx, hc, user, capFowner, -1, -1)
+		}
+		if err == nil {
 			m := uint32(octal)
 			if oerr != nil {
 				m, _ = fcSymMode(spec, fcPerm(fi.Mode()), fi.IsDir())
@@ -681,8 +709,9 @@ func fcChown(ctx context.Context, hc interp.HandlerContext, name string, args []
 	}
 	code := 0
 	apply := func(real, user string, link bool) {
-		var err error
-		if link {
+		err := attrCheck(ctx, hc, user, capChown, uid, gid)
+		if err != nil {
+		} else if link {
 			err = os.Lchown(real, uid, gid)
 		} else {
 			err = os.Chown(real, uid, gid)
@@ -1165,7 +1194,11 @@ func (f *fcFind) primary() func(*fcEnt) bool {
 	case "-delete":
 		f.action, f.depthFirst = true, true
 		return func(e *fcEnt) bool {
-			if err := os.Remove(e.real); err != nil {
+			err := removeCheck(f.ctx, f.hc, e.user)
+			if err == nil {
+				err = os.Remove(e.real)
+			}
+			if err != nil {
 				fmt.Fprintf(f.hc.Stderr, "find: cannot delete '%s': %s\n", e.user, fcErr(err))
 				f.code = 1
 				return false
@@ -1834,7 +1867,7 @@ func rmdirCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ in
 		fi, err := os.Lstat(r)
 		if err == nil && !fi.IsDir() {
 			err = syscall.ENOTDIR
-		} else if err == nil {
+		} else if err = removeCheck(ctx, hc, p); err == nil {
 			err = os.Remove(r)
 		}
 		if err != nil {
@@ -2050,7 +2083,13 @@ func mktempCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 				continue
 			}
 		case has(o, "d"):
-			if err := os.Mkdir(abs(ctx, hc, p), 0o700); err != nil {
+			err := createAs(ctx, hc, p)
+			if err == nil {
+				if err = os.Mkdir(abs(ctx, hc, p), 0o700); err == nil {
+					fsOwn(ctx, hc.Dir, p)
+				}
+			}
+			if err != nil {
 				if os.IsExist(err) {
 					continue
 				}

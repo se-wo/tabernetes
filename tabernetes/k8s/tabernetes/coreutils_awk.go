@@ -26,15 +26,15 @@ type awkFS struct {
 }
 
 func (f awkFS) Open(name string) (fs.File, error) {
-	return os.Open(abs(f.ctx, f.hc, name))
+	return openAs(f.ctx, f.hc, name, os.O_RDONLY, 0)
 }
 
 func (f awkFS) Create(name string) (io.WriteCloser, error) {
-	return os.OpenFile(abs(f.ctx, f.hc, name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	return openAs(f.ctx, f.hc, name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 }
 
 func (f awkFS) Append(name string) (io.WriteCloser, error) {
-	return os.OpenFile(abs(f.ctx, f.hc, name), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	return openAs(f.ctx, f.hc, name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 }
 
 // awkCmd is awk on github.com/benhoyt/goawk: -F fs, -v var=value, -f progfile,
@@ -89,7 +89,7 @@ func awkCmd(ctx context.Context, hc shinterp.HandlerContext, args []string, _ sh
 		args = args[1:]
 	}
 	for _, p := range progs {
-		b, err := os.ReadFile(abs(ctx, hc, p))
+		b, err := readFileAs(ctx, hc.Dir, p)
 		if err != nil {
 			return fail(hc, 2, "awk: %s: %v", p, unwrap(err))
 		}

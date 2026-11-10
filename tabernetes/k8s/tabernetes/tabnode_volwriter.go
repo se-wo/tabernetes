@@ -150,11 +150,3 @@ func sameVolPayload(tsDir string, payload map[string]volFile) bool {
 	})
 	return ok && n == len(payload)
 }
-
-// lsMode is the mode column of ls -l: "l" for a symlink where Go prints "L".
-func lsMode(m fs.FileMode) string {
-	if m&fs.ModeSymlink != 0 {
-		return "l" + (m & fs.ModePerm).String()[1:]
-	}
-	return m.String()
-}
