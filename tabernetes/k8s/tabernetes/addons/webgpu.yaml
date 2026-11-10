@@ -1,0 +1,20 @@
+# WebGPU through Dynamic Resource Allocation (tabnode_gpu.go). The kubelets in
+# the browser (the tab node, and nodes in Web Workers started with
+# "addnode --gpu") publish the WebGPU adapter of the browser as the device gpu-0
+# of the driver webgpu.tabernetes.io, one ResourceSlice per node:
+#
+#   kubectl get resourceslices
+#
+# A ResourceClaim (or ResourceClaimTemplate) of this class gets one share of
+# the adapter; capacity.requests.shares: 8 takes all of it. Pods that only ask
+# for the extended resource tabernetes.io/webgpu get a claim of this class from
+# the scheduler.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: webgpu.tabernetes.io
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "webgpu.tabernetes.io"
+  extendedResourceName: tabernetes.io/webgpu

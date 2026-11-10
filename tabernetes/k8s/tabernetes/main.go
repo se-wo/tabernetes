@@ -339,6 +339,8 @@ func main() {
 	// proxy(port, method, path, headers, body): Promise<{status, statusText, headers, body}>, see proxy.go
 	api.Set("proxy", js.FuncOf(func(this js.Value, a []js.Value) any { return proxyJS(a) }))
 	api.Set("proxyService", js.FuncOf(func(this js.Value, a []js.Value) any { return proxyServiceJS(a) }))
+	// tabernetes.dial(port, onData, onClose) for the VNC viewer, see dial.go.
+	api.Set("dial", js.FuncOf(func(this js.Value, a []js.Value) any { return dialJS(a) }))
 
 	// prepareJoin(open: (label: string) => Promise<RTCDataChannel>): Promise<{name, ip, token, ca, caHash}>
 	api.Set("prepareJoin", js.FuncOf(func(this js.Value, a []js.Value) any {
@@ -350,15 +352,15 @@ func main() {
 			return c.prepareJoin(open)
 		})
 	}))
-	// prepareWorkerNode(open: (label: string) => Promise<channel>): Promise<config>
+	// prepareWorkerNode(open: (label: string) => Promise<channel>, gpu: boolean): Promise<config>
 	// for a node in a Web Worker (web/src/nodes.js, nodeworker.go).
 	api.Set("prepareWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
-		open := a[0]
+		open, gpu := a[0], len(a) > 1 && a[1].Truthy()
 		return promise(func() (any, error) {
 			if c == nil {
 				return nil, fmt.Errorf("cluster is not ready yet")
 			}
-			return c.prepareWorkerNode(open)
+			return c.prepareWorkerNode(open, gpu)
 		})
 	}))
 	// drainNode(name, write): Promise<number>, kubectl drain before rmnode

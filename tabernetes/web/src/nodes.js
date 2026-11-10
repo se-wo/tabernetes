@@ -24,11 +24,11 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
     }));
   };
 
-  async function addOne(write) {
+  async function addOne(write, gpu) {
     const module = globalThis.tabernetesModule;
     if (!module) throw new Error("the WebAssembly module is not loaded yet");
     const worker = new Worker(workerURL);
-    const config = await globalThis.tabernetes.prepareWorkerNode((label) => Promise.resolve(openChannel(worker, label)));
+    const config = await globalThis.tabernetes.prepareWorkerNode((label) => Promise.resolve(openChannel(worker, label)), gpu);
     const entry = { worker, state: "starting" };
     workers.set(config.name, entry);
     const set = (state) => { entry.state = state; render(); };
@@ -45,19 +45,28 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
     worker.onerror = (e) => { console.error(`${config.name}:`, e.message); set("stopped"); };
     worker.postMessage({ type: "start", module, config, wasi });
     render();
-    write(`${config.name} (${config.ip}) starts in a Web Worker\n`);
+    write(`${config.name} (${config.ip}) starts in a Web Worker${gpu ? ", it offers the WebGPU adapter of the browser if there is one" : ""}\n`);
   }
 
   return {
-    // addnode [n] starts n nodes in Web Workers.
+    // addnode [--gpu] [n] starts n nodes in Web Workers. With --gpu each one
+    // probes WebGPU in its worker and publishes the adapter as a DRA device
+    // (ResourceSlice of webgpu.tabernetes.io), like the tab node does. All of
+    // them share the one GPU of the browser.
     async addnode(args, { write }) {
-      const n = Math.max(1, Number(args[0]) || 1);
+      const gpu = args.includes("--gpu");
+      const rest = args.filter((a) => a !== "--gpu");
+      if (rest.some((a) => a.startsWith("-"))) {
+        write("usage: addnode [--gpu] [n]\n");
+        return 2;
+      }
+      const n = Math.max(1, Number(rest[0]) || 1);
       for (let i = 0; i < n; i++) {
         if (workers.size >= MAX_WORKERS) {
           write(`addnode: at most ${MAX_WORKERS} nodes in workers\n`);
           return 1;
         }
-        await addOne(write);
+        await addOne(write, gpu);
       }
       write("They are Ready in a few seconds: k get nodes -w\n");
     },
