@@ -516,7 +516,7 @@ var podTools = map[string]func(ctx context.Context, hc interp.HandlerContext, ar
 	"uname": func(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 		if len(args) > 0 && (args[0] == "-a" || args[0] == "--all") {
 			b, _ := os.ReadFile(procOf(ctx).root.real("/etc/hostname"))
-			fmt.Fprintf(hc.Stdout, "Linux %s 6.0.0-tabernetes #1 SMP WebAssembly wasm32 GNU/Linux\n", strings.TrimSpace(string(b)))
+			fmt.Fprintf(hc.Stdout, "Linux %s %s #1 SMP WebAssembly wasm32 GNU/Linux\n", strings.TrimSpace(string(b)), kernelVersion)
 			return nil
 		}
 		fmt.Fprintln(hc.Stdout, "Linux")
