@@ -175,6 +175,16 @@ and `kubectl logs/exec/attach -c` reach it. `kubectl debug node/tab` runs its
 pod with hostNetwork on the node IP and the file system of the terminal under
 `/host`.
 
+The kubelet serves `/stats/summary` and `/metrics/resource`, so
+`kubectl get --raw /api/v1/nodes/tab/proxy/stats/summary` shows numbers, and
+a metrics-server can scrape the node. The numbers are a model
+(`tabnode_acct.go`): CPU comes from the commands of the shell and the work of
+the built-in programs, `limits.cpu` works like the CFS quota, and the memory
+of a container is the size of its image plus what its programs allocate. The
+memory of the node comes from the Go runtime. The endpoints take a client
+certificate of the cluster CA or a bearer token that the apiserver allows to
+get `nodes/stats` or `nodes/metrics`.
+
 Pods listen on their pod IP in the in-process network of the Wasm. There is
 no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port

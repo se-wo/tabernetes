@@ -356,6 +356,7 @@ func (w *podWorker) gone() {
 	go func() {
 		w.wg.Wait()
 		w.ewg.Wait()
+		w.forgetAccts()
 		if ip != "" && ownIP {
 			w.n.releaseIP(ip)
 		}
