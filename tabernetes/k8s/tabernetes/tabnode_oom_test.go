@@ -34,9 +34,9 @@ func TestParseSize(t *testing.T) {
 		{"-1", "bkmg", 0, true},
 		{"1.5G", "bkmg", 0, true},
 	} {
-		got, err := parseSize(tc.in, tc.units)
+		got, err := parseStressSize(tc.in, tc.units)
 		if (err != nil) != tc.bad || got != tc.want {
-			t.Errorf("parseSize(%q, %q) = %d, %v; want %d, bad=%v", tc.in, tc.units, got, err, tc.want, tc.bad)
+			t.Errorf("parseStressSize(%q, %q) = %d, %v; want %d, bad=%v", tc.in, tc.units, got, err, tc.want, tc.bad)
 		}
 	}
 }
