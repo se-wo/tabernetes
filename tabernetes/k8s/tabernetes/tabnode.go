@@ -173,6 +173,7 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 
 	n.net = newServiceProxy(admin)
 	go n.net.run(ctx)
+	go n.handoverCoreDNS(ctx) // tabnode_coredns.go
 	// CRDs do not speak protobuf: a client of its own for them.
 	npa, err := npaclient.NewForConfig(adminCfg)
 	if err != nil {

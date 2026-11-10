@@ -42,6 +42,7 @@ data:
             lameduck 5s
         }
         ready
+        prometheus :9153
         kubernetes cluster.local in-addr.arpa ip6.arpa {
             pods insecure
             fallthrough in-addr.arpa ip6.arpa
@@ -64,7 +65,7 @@ metadata:
   labels:
     k8s-app: kube-dns
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       k8s-app: kube-dns
@@ -82,12 +83,15 @@ spec:
         operator: Exists
       nodeSelector:
         kubernetes.io/os: linux
-      # Not on the tab node (tabnode.go): it runs no real containers.
+      # Prefers Docker nodes, where the real CoreDNS runs (it needs UDP).
+      # Without one, the built-in image runs on the tab node
+      # (tabnode_coredns.go) and leaves once a Docker node is Ready.
       affinity:
         nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
               - key: tabernetes.io/tab
                 operator: DoesNotExist
       containers:
