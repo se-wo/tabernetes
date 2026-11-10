@@ -211,7 +211,7 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 	}
 	ep := endpoint{ip: dst.IP.String(), port: int32(dst.Port)}
 	if n.net != nil {
-		e, ok, err := n.net.endpointFor(addr)
+		e, ok, err := n.net.endpointFor(addr, srcIP)
 		switch {
 		case ok && err != nil:
 			return nil, refusedError(dst)

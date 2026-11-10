@@ -9,6 +9,7 @@ This version also has a node inside the tab: `kubectl get nodes` shows the node 
 Try `k create deploy web --image=nginxdemos/hello --replicas=3`, `k expose deploy web --port 80` and `proxy svc/web`: the page of the service opens next to the terminal, and every reload shows the next replica.
 `addnode 2` starts two more nodes, each in a Web Worker of its own.
 `helm` works, too: `helm repo add bitnami https://charts.bitnami.com/bitnami` and `helm install web bitnami/nginx`.
+`k create ingress web --rule="demo.local/*=web:80"` works, too: ingress-nginx runs on the tab, and `curl -H 'Host: demo.local' 10.0.0.1:30080` goes through it.
 Pods with `runtimeClassName: wasmtime` run WebAssembly (WASI) images in Web Workers, and the same manifest runs on a Docker node with [runwasi](https://github.com/containerd/runwasi).
 With WebGPU in your browser, `k get resourceslices` shows its adapter as a Dynamic Resource Allocation device (`webgpu.tabernetes.io`), and WebAssembly pods with a ResourceClaim for it run compute shaders on your GPU.
 Type `join` and start the printed `docker run` command to add a real node. The container runs a kubelet and containerd and connects to your browser with WebRTC. Then `kubectl get pods -A` shows flannel, kube-proxy and CoreDNS on a real node.

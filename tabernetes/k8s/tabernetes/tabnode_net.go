@@ -51,11 +51,13 @@ type serviceProxy struct {
 	slices   cache.Indexer
 	synced   atomic.Bool
 	kick     chan struct{}
+	corefile atomic.Pointer[corefileState] // kube-system/coredns (tabnode_coredns.go)
 
 	mu        sync.Mutex
 	listeners map[string]*svcListener // by ip:port
 	failed    map[string]string       // addresses that could not listen, by error
 	next      map[string]uint32       // round robin of each service port
+	sticky    map[string]*stickyEP    // sessionAffinity: service port and client IP
 
 	restOnce sync.Once
 	rest     *rest.Config
@@ -66,6 +68,14 @@ type serviceProxy struct {
 type svcPort struct {
 	namespace, name string
 	portName        string
+	affinity        time.Duration // sessionAffinity ClientIP: how long a client sticks to an endpoint, 0 for none
+	local           bool          // internalTrafficPolicy Local, on cluster IPs only
+}
+
+// stickyEP is the endpoint a client IP is bound to by sessionAffinity.
+type stickyEP struct {
+	addr string // ip:port of the endpoint
+	last time.Time
 }
 
 type svcListener struct {
@@ -80,12 +90,14 @@ func newServiceProxy(client kubernetes.Interface) *serviceProxy {
 		listeners: map[string]*svcListener{},
 		failed:    map[string]string{},
 		next:      map[string]uint32{},
+		sticky:    map[string]*stickyEP{},
 	}
 	return s
 }
 
 // run watches services and endpoint slices until ctx ends.
 func (s *serviceProxy) run(ctx context.Context) {
+	s.watchCorefile(ctx)
 	factory := informers.NewSharedInformerFactory(s.client, 0)
 	svcInformer := factory.Core().V1().Services()
 	sliceInformer := factory.Discovery().V1().EndpointSlices().Informer()
@@ -150,9 +162,17 @@ func (s *serviceProxy) sync() {
 			if p.Protocol != "" && p.Protocol != v1.ProtocolTCP {
 				continue // UDP and SCTP have no place in the in-process network
 			}
-			t := svcPort{svc.Namespace, svc.Name, p.Name}
+			t := svcPort{namespace: svc.Namespace, name: svc.Name, portName: p.Name}
+			if svc.Spec.SessionAffinity == v1.ServiceAffinityClientIP {
+				t.affinity = 10800 * time.Second // the default of kube-proxy
+				if c := svc.Spec.SessionAffinityConfig; c != nil && c.ClientIP != nil && c.ClientIP.TimeoutSeconds != nil {
+					t.affinity = time.Duration(*c.ClientIP.TimeoutSeconds) * time.Second
+				}
+			}
+			tc := t
+			tc.local = svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == v1.ServiceInternalTrafficPolicyLocal
 			for _, ip := range clusterIPs(svc) {
-				want[net.JoinHostPort(ip, strconv.Itoa(int(p.Port)))] = t
+				want[net.JoinHostPort(ip, strconv.Itoa(int(p.Port)))] = tc
 			}
 			if p.NodePort > 0 && (svc.Spec.Type == v1.ServiceTypeNodePort || svc.Spec.Type == v1.ServiceTypeLoadBalancer) {
 				// The node IP, and localhost: on a real node, a node port
@@ -167,6 +187,12 @@ func (s *serviceProxy) sync() {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
+	for k, st := range s.sticky {
+		if now.Sub(st.last) > 24*time.Hour { // the longest timeout of the API; pick checks the real one
+			delete(s.sticky, k)
+		}
+	}
 	for addr, l := range s.listeners {
 		if _, ok := want[addr]; !ok {
 			l.ln.Close()
@@ -220,7 +246,11 @@ func (s *serviceProxy) serve(l *svcListener) {
 		if err != nil {
 			return
 		}
-		go s.forward(c, *l.target.Load())
+		client := ""
+		if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+			client = a.IP.String()
+		}
+		go s.forward(c, *l.target.Load(), client)
 	}
 }
 
@@ -237,13 +267,13 @@ type endpoint struct {
 // endpoints like kube-proxy, the ones on this node directly, the ones on
 // other nodes (Docker, Web Workers) through the apiserver. If one cannot be
 // reached, the next one is tried.
-func (s *serviceProxy) forward(c net.Conn, t svcPort) {
+func (s *serviceProxy) forward(c net.Conn, t svcPort, client string) {
 	eps := s.endpoints(t)
 	if len(eps) == 0 {
 		c.Close() // like a REJECT rule of kube-proxy: no endpoints
 		return
 	}
-	start := s.rotate(t)
+	start := s.pick(t, client, eps)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -272,13 +302,41 @@ func (s *serviceProxy) rotate(t svcPort) uint32 {
 	return start
 }
 
+// pick is the index in eps for a new connection of client: the endpoint it is
+// bound to by sessionAffinity, else the next one in round robin.
+func (s *serviceProxy) pick(t svcPort, client string, eps []endpoint) int {
+	if t.affinity <= 0 || client == "" {
+		return int(s.rotate(t)) % len(eps)
+	}
+	key := t.namespace + "/" + t.name + ":" + t.portName + "|" + client
+	now := time.Now()
+	s.mu.Lock()
+	st := s.sticky[key]
+	s.mu.Unlock()
+	if st != nil && now.Sub(st.last) <= t.affinity {
+		for i, e := range eps {
+			if net.JoinHostPort(e.ip, strconv.Itoa(int(e.port))) == st.addr {
+				s.mu.Lock()
+				st.last = now
+				s.mu.Unlock()
+				return i
+			}
+		}
+	}
+	i := int(s.rotate(t)) % len(eps)
+	s.mu.Lock()
+	s.sticky[key] = &stickyEP{addr: net.JoinHostPort(eps[i].ip, strconv.Itoa(int(eps[i].port))), last: now}
+	s.mu.Unlock()
+	return i
+}
+
 var errNoEndpoints = errors.New("service has no ready endpoints")
 
 // endpointFor is the DNAT of kube-proxy for a pod (tabnode_netpol.go): the
 // endpoint that a connection to addr, a cluster IP or node port, goes to.
 // ok is false when addr is not a service; err is errNoEndpoints when the
 // service has no endpoint (kube-proxy rejects those connections).
-func (s *serviceProxy) endpointFor(addr string) (e endpoint, ok bool, err error) {
+func (s *serviceProxy) endpointFor(addr, client string) (e endpoint, ok bool, err error) {
 	s.mu.Lock()
 	l := s.listeners[addr]
 	s.mu.Unlock()
@@ -290,7 +348,7 @@ func (s *serviceProxy) endpointFor(addr string) (e endpoint, ok bool, err error)
 	if len(eps) == 0 {
 		return endpoint{}, true, errNoEndpoints
 	}
-	return eps[int(s.rotate(t))%len(eps)], true, nil
+	return eps[s.pick(t, client, eps)], true, nil
 }
 
 // dialEndpoint connects to an endpoint: on this node directly, from src if
@@ -373,10 +431,14 @@ func (s *serviceProxy) endpoints(t svcPort) []endpoint {
 			}
 		}
 	}
-	if len(ready) > 0 {
-		return ready
+	if len(ready) == 0 {
+		ready = serving
 	}
-	return serving
+	if t.local {
+		// internalTrafficPolicy Local: the endpoints on the node of the client.
+		ready = slices.DeleteFunc(ready, func(e endpoint) bool { return e.remote })
+	}
+	return ready
 }
 
 func deref(p *string) string {
@@ -511,10 +573,11 @@ func (s *serviceProxy) lookup(host, namespace string) (dnsAnswer, bool) {
 		if namespace != "" {
 			candidates = append(candidates, host+"."+namespace+".svc."+clusterDomain)
 		}
-		candidates = append(candidates, host+".svc."+clusterDomain, host+"."+clusterDomain)
+		// The name as given last, for hosts of the Corefile.
+		candidates = append(candidates, host+".svc."+clusterDomain, host+"."+clusterDomain, host)
 	}
 	for _, name := range candidates {
-		if a, ok := s.lookupFQDN(name, 0); ok {
+		if a, ok := s.lookupName(name); ok {
 			return a, true
 		}
 	}

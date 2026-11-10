@@ -51,10 +51,11 @@ func newShell() *shell {
 	return s
 }
 
-// openHandler adds /dev/null, which the in-memory file system does not have.
+// openHandler adds /dev/null, /dev/zero and friends (devFile), which the
+// in-memory file system does not have.
 func openHandler(ctx context.Context, path string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
-	if path == "/dev/null" {
-		return devNull{}, nil
+	if d := devFile(path); d != nil {
+		return d, nil
 	}
 	return interp.DefaultOpenHandler()(ctx, path, flag, perm)
 }
@@ -190,7 +191,7 @@ func (s *shell) exec(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			}
 			return nil
 		case coreutils[name] != nil:
-			return coreutils[name](ctx, hc, args[1:], self)
+			return sigpipe(coreutils[name](ctx, hc, args[1:], self))
 		case s.jsBuiltins.Type() == js.TypeObject && s.jsBuiltins.Get(name).Type() == js.TypeFunction:
 			return s.callJS(ctx, hc, name, args[1:])
 		}
