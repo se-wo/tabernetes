@@ -128,3 +128,42 @@ func TestUnwrapStdin(t *testing.T) {
 		t.Fatal("unwrapStdin changed termStdin")
 	}
 }
+
+// An interactive shell on a TTY: Ctrl-C ends the running command but not
+// the shell, exit ends the shell with its status.
+func TestInteractiveShellOnTTY(t *testing.T) {
+	in, keys := io.Pipe()
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pe := &procEnv{}
+	pe.tty = newPty(ctx, in, &out, cancel)
+	done := make(chan int, 1)
+	go func() { done <- runArgv(ctx, pe, []string{"sh"}, nil, "/", pe.tty, pe.tty, pe.tty) }()
+
+	waitFor := func(s string) {
+		t.Helper()
+		for range 500 {
+			if strings.Contains(out.String(), s) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("no %q in the output %q", s, out.String())
+	}
+	waitFor("/ # ")
+	io.WriteString(keys, "sleep 60\r")
+	time.Sleep(100 * time.Millisecond)
+	io.WriteString(keys, "\x03")
+	io.WriteString(keys, "echo still here\r")
+	waitFor("still here\r\n/ # ")
+	io.WriteString(keys, "exit 3\r")
+	select {
+	case code := <-done:
+		if code != 3 {
+			t.Fatalf("exit 3: status %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("exit did not end the shell; output %q", out.String())
+	}
+}

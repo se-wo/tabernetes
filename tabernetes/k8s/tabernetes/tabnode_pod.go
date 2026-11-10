@@ -43,7 +43,8 @@ type podWorker struct {
 	stopBy      time.Time // end of the grace period of the stop
 	failReason  string    // the kubelet failed the pod (DeadlineExceeded)
 	failMessage string
-	sent        *v1.PodStatus // last status written
+	sent        *v1.PodStatus               // last status written
+	devices     map[string][]preparedDevice // DRA devices by container (tabnode_gpu.go)
 
 	kick        chan struct{}
 	specChanged chan struct{}  // wakes the active deadline
@@ -122,6 +123,24 @@ func (w *podWorker) run() {
 	w.ip = ip
 	w.mu.Unlock()
 	w.markDirty()
+
+	// Dynamic resources: the devices of the claims of the pod are prepared
+	// before anything of it starts, like PrepareDynamicResources of the
+	// kubelet. The scheduler bound the pod after it allocated the claims.
+	if pod, _ := w.podInfo(); podHasClaims(pod) {
+		for {
+			err := w.prepareDevices(w.ctx)
+			if err == nil {
+				break
+			}
+			w.event(v1.EventTypeWarning, "FailedPrepareDynamicResources", "%v", err)
+			select {
+			case <-w.ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
 
 	// Volumes may wait for a ConfigMap or Secret that is not there yet.
 	for {
@@ -419,10 +438,12 @@ func (w *podWorker) buildStatus() v1.PodStatus {
 		st.PodIPs = []v1.PodIP{{IP: w.ip}}
 	}
 
+	gpuHealthy := len(w.devices) == 0 || w.n.gpuAdapter() != nil
 	allReady, anyRunning, regular := true, false, 0
 	allDone, allSucceeded := true, true
 	for _, c := range w.ctrs {
 		cs := c.status()
+		cs.AllocatedResourcesStatus = w.devicesHealthLocked(c.spec.Name, gpuHealthy)
 		if c.init || c.sidecar {
 			st.InitContainerStatuses = append(st.InitContainerStatuses, cs)
 			if c.sidecar && !cs.Ready {
