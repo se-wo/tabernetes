@@ -575,12 +575,26 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 }
 
 func mkdir(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("mkdir", args, "p", map[string]string{"parents": "p"})
+	o, args, err := opts("mkdir", args, "pm:", map[string]string{"parents": "p", "mode": "m"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
+	mode := os.FileMode(0o755)
+	if m, ok := o["m"]; ok {
+		n, perr := strconv.ParseUint(m, 8, 32)
+		if perr != nil {
+			return fail(hc, 1, "mkdir: invalid mode '%s'", m)
+		}
+		mode = os.FileMode(n)
+	}
 	for _, a := range args {
-		if err := mkdirAs(ctx, hc, a, has(o, "p")); err != nil {
+		err := mkdirAs(ctx, hc, a, has(o, "p"))
+		if err == nil && has(o, "m") {
+			if err = attrCheck(ctx, hc, a, capFowner, -1, -1); err == nil {
+				err = os.Chmod(abs(ctx, hc, a), mode)
+			}
+		}
+		if err != nil {
 			return fail(hc, 1, "mkdir: %s: %v", a, unwrap(err))
 		}
 	}
