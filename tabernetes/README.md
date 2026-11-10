@@ -118,12 +118,31 @@ browser tab (single wasm binary)                     docker run tabernetes
 `k8s/tabernetes/tabnode*.go` is a kubelet inside the tab. It registers the
 Node `tab` (InternalIP 10.0.0.1, labels `kubernetes.io/arch=wasm`,
 `tabernetes.io/tab=true`, `tabernetes.io/wasm=true`) as `system:node:tab`,
-keeps its Lease and runs the pods the scheduler binds to it. It has the taint
-`tabernetes.io/tab=true:PreferNoSchedule`: while it is the only node,
-everything lands here; once a Docker node joins, the scheduler prefers that
-one. flannel and kube-proxy stay off it (the tab has a kube-proxy of its
-own). CoreDNS runs here as a built-in image until a Docker node is Ready,
-then moves there.
+keeps its Lease and runs the pods the scheduler binds to it. Like the first
+node of kubeadm, `tab` is the control plane node: it has the role label
+`node-role.kubernetes.io/control-plane` (set with the admin credentials, as
+NodeRestriction forbids a kubelet to set it) and two taints,
+`node-role.kubernetes.io/control-plane:PreferNoSchedule` and
+`tabernetes.io/tab=true:PreferNoSchedule`. Both are soft, not NoSchedule:
+while `tab` is the only node, everything lands here. With two taints, the
+scheduler prefers a node in a Web Worker (one taint) over `tab`, and a Docker
+node (none) over both. flannel and kube-proxy stay off it (the tab has a
+kube-proxy of its own). CoreDNS runs here as a built-in image until a Docker
+node is Ready, then moves there.
+
+`kubectl get pods -n kube-system` shows the control plane as static pods, as
+on a kubeadm node: `kube-apiserver-tab`, `kube-controller-manager-tab`,
+`kube-scheduler-tab` and `etcd-tab` (`tabnode_static.go`). They are mirror
+pods of the kubelet, with the manifests in `/etc/kubernetes/manifests`, the
+certificates in `/etc/kubernetes/pki` and the kubeconfigs in
+`/etc/kubernetes/*.conf`. The command of a pod is the real command line of
+its component. `kubectl logs` shows the lines of that component only: a hook
+in the shared logger sorts them by the pprof labels of the goroutine
+(`complogs.go`). Ready comes from the health endpoints of the components.
+`kubectl delete pod` creates the mirror pod again, with the start time of
+the running component. `kubectl exec` is refused, like on a distroless image.
+The node info shows Tabernetes as the OS and `6.0.0-tabernetes` as the
+kernel, as `uname -r` does in a container.
 
 A container is not a process:
 
@@ -523,6 +542,9 @@ same on macOS and Linux:
 - A sleep in the APF bootstrap ensurer. It busy-loops until the informer
   catches up, and Wasm has no preemption, so the informer never gets the CPU.
 - An idempotent `SetupSignalContext`, because all components share one process.
+- A settable default stream for the text logger of `component-base/logs`.
+  All components share one klog; the stream sorts the lines into the logs of
+  the control plane pods.
 - mvdan.cc/sh is vendored into the checkout at `MVDAN_SH_VERSION` from
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
@@ -654,6 +676,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
 - No persistence: a reload starts a new cluster.
+- The static pod manifests in `/etc/kubernetes/manifests` are not watched:
+  an edit changes nothing. A component that exits stays down, its pod shows
+  `CrashLoopBackOff`. The `etcd-tab` pod is the etcd shim.
 - `yq` runs jq expressions on YAML with gojq: the yq v4 commands and flags
   work, its own functions mostly do not (`strenv` and `env` do). `jq` and
   `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes), and

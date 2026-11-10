@@ -95,6 +95,7 @@ func (n *tabNode) getPods(w http.ResponseWriter, r *http.Request) {
 		pod, _ := pw.podInfo()
 		list.Items = append(list.Items, *pod)
 	}
+	list.Items = append(list.Items, n.static.podList()...) // tabnode_static.go
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(&list)
 }
@@ -169,6 +170,9 @@ func (n *tabNode) getLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("unable to return the given log stream: %q", s), http.StatusBadRequest)
 		return
 	}
+	if n.static.serveLogs(w, r, o, previous) { // a control plane pod
+		return
+	}
 
 	pw := n.lookup(w, r)
 	if pw == nil {
@@ -234,6 +238,9 @@ func (n *tabNode) getStream(verb string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if n.static.serveStream(w, r, verb, opts) { // a control plane pod
+			return
+		}
 		pw := n.lookup(w, r)
 		if pw == nil {
 			return
@@ -275,6 +282,9 @@ func (n *tabNode) getPortForward(w http.ResponseWriter, r *http.Request) {
 	opts, err := portforward.NewV4Options(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if n.static.servePortForward(w, r, opts) { // a control plane pod
 		return
 	}
 	pw := n.lookup(w, r)

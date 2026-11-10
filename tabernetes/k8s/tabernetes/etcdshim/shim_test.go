@@ -54,3 +54,46 @@ func TestWatch(t *testing.T) {
 	tx, err := c.Txn(ctx).If(clientv3.Compare(clientv3.ModRevision("/a/x"), "=", r.Header.Revision)).Then(clientv3.OpPut("/a/x", "3")).Else(clientv3.OpGet("/a/x")).Commit()
 	t.Logf("txn ok=%v err=%v", tx.Succeeded, err)
 }
+
+func TestLogfOnCompact(t *testing.T) {
+	type entry struct {
+		level, msg string
+		kv         []any
+	}
+	logged := make(chan entry, 10)
+	Logf = func(level, msg string, kv ...any) { logged <- entry{level, msg, kv} }
+	defer func() { Logf = nil }()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go Serve(l)
+	c, err := clientv3.New(clientv3.Config{Endpoints: []string{l.Addr().String()}, DialTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r, err := c.Put(ctx, "/a", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Compact(ctx, r.Header.Revision); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case e := <-logged:
+			if e.msg != "finished scheduled compaction" {
+				continue
+			}
+			if len(e.kv) < 2 || e.kv[0] != "compact-revision" || e.kv[1] != r.Header.Revision {
+				t.Errorf("compaction entry %v", e.kv)
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal("no log entry for the compaction")
+		}
+	}
+}
