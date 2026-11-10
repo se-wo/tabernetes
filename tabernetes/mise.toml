@@ -21,6 +21,14 @@ NODE_IMAGE = "ghcr.io/jkroepke/tabernetes"
 # The shell of the terminal, vendored into the Kubernetes checkout by k8s/patch.go.
 # renovate: datasource=go depName=mvdan.cc/sh/v3
 MVDAN_SH_VERSION = "v3.14.1"
+# jq and yq (gojq and its dependency timefmt-go) and awk (goawk) of the shell,
+# vendored into the Kubernetes checkout by k8s/patch.go.
+# renovate: datasource=go depName=github.com/itchyny/gojq
+GOJQ_VERSION = "v0.12.20"
+# renovate: datasource=go depName=github.com/itchyny/timefmt-go
+TIMEFMT_GO_VERSION = "v0.1.9"
+# renovate: datasource=go depName=github.com/benhoyt/goawk
+GOAWK_VERSION = "v1.32.0"
 # The NetworkPolicy engine of the tab nodes (docs/networking-policy.md),
 # vendored into the Kubernetes checkout by k8s/patch.go. Its k8s.io modules
 # must match KUBERNETES_VERSION.

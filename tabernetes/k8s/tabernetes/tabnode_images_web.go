@@ -629,6 +629,7 @@ type ngxCommon struct {
 	serverTokens bool
 	internal     bool
 	rewrites     []ngxRewrite
+	sets         [][2]string // set $var value
 }
 
 type ngxErrorPage struct {
@@ -678,7 +679,8 @@ type ngxConf struct {
 	servers    []*ngxServer
 	logFormats map[string]string
 	upstreams  map[string]*ngxUpstream
-	dump       string // nginx -T
+	dump       string   // nginx -T
+	certs      sync.Map // ssl_certificate + key -> *tls.Certificate
 }
 
 type ngxUpstream struct {
@@ -845,7 +847,7 @@ func (cfg *ngxConf) common(c *ngxCommon, dirs []*ngxDir, httpLevel bool) error {
 }
 
 // local applies the directives that are not inherited: return, try_files,
-// proxy_pass, rewrite, internal.
+// proxy_pass, rewrite, set, internal.
 func (cfg *ngxConf) local(c *ngxCommon, dirs []*ngxDir) error {
 	for _, d := range dirs {
 		switch d.name {
@@ -893,6 +895,14 @@ func (cfg *ngxConf) local(c *ngxCommon, dirs []*ngxDir) error {
 			c.rewrites = append(c.rewrites, rw)
 		case "internal":
 			c.internal = true
+		case "set":
+			if len(d.args) != 2 {
+				return argErr(d)
+			}
+			if !strings.HasPrefix(d.args[0], "$") {
+				return &ngxErr{msg: fmt.Sprintf("invalid variable name %q", d.args[0]), file: d.file, line: d.line}
+			}
+			c.sets = append(c.sets, [2]string{d.args[0][1:], d.args[1]})
 		}
 	}
 	return nil
@@ -982,7 +992,7 @@ func (cfg *ngxConf) location(s *ngxServer, parent ngxCommon, d *ngxDir) error {
 	}
 	l := &ngxLoc{c: parent}
 	// not inherited
-	l.c.ret, l.c.tryFiles, l.c.proxy, l.c.rewrites, l.c.internal = nil, nil, "", nil, false
+	l.c.ret, l.c.tryFiles, l.c.proxy, l.c.rewrites, l.c.sets, l.c.internal = nil, nil, "", nil, nil, false
 	if len(d.args) == 2 {
 		l.mod, l.path = d.args[0], d.args[1]
 	} else if strings.HasPrefix(d.args[0], "@") {
@@ -1340,13 +1350,18 @@ func (n *nginxInst) listen(cfg *ngxConf) error {
 			return err
 		}
 		if t.l.ssl {
-			cert, err := tls.LoadX509KeyPair(n.real(t.srv.cert), n.real(t.srv.certKey))
-			if err != nil {
+			if _, err := n.certFor(cfg, t.l.port, ""); err != nil {
 				ln.Close()
-				fmt.Fprintf(n.errw, "nginx: [emerg] cannot load certificate %q: %v\n", t.srv.cert, err)
+				fmt.Fprintf(n.errw, "nginx: [emerg] %v\n", err)
 				return err
 			}
-			ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}})
+			// The certificate of the server that SNI picks, from the
+			// configuration in use at the handshake: a reload brings new
+			// servers and certificates without opening the port again.
+			port := t.l.port
+			ln = tls.NewListener(ln, &tls.Config{GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return n.certFor(n.cfg.Load(), port, hi.ServerName)
+			}})
 		}
 		opened = append(opened, ln)
 		n.ports[t.l.port] = true
@@ -1356,6 +1371,25 @@ func (n *nginxInst) listen(cfg *ngxConf) error {
 		}), ln)
 	}
 	return nil
+}
+
+// certFor is the certificate of the server for an SNI name on a port: the
+// server by server_name, else the default server of the port.
+func (n *nginxInst) certFor(cfg *ngxConf, port, sni string) (*tls.Certificate, error) {
+	s := cfg.pick(port, sni)
+	if s == nil || s.cert == "" {
+		return nil, fmt.Errorf("no \"ssl_certificate\" is defined for the \"listen ... ssl\" directive on port %s", port)
+	}
+	key := s.cert + "\x00" + s.certKey
+	if c, ok := cfg.certs.Load(key); ok {
+		return c.(*tls.Certificate), nil
+	}
+	c, err := tls.LoadX509KeyPair(n.real(s.cert), n.real(s.certKey))
+	if err != nil {
+		return nil, fmt.Errorf("cannot load certificate %q: %v", s.cert, err)
+	}
+	cfg.certs.Store(key, &c)
+	return &c, nil
 }
 
 // ngxReq is one request in nginx.
@@ -1375,9 +1409,17 @@ type ngxReq struct {
 	depth  int
 	loc    *ngxLoc
 	c      *ngxCommon
-	caps   []string // captures of the regex location or rewrite
-	reqID  string   // $request_id, made on first use
-	file   string   // $request_filename
+	caps   []string          // captures of the regex location or rewrite
+	reqID  string            // $request_id, made on first use
+	file   string            // $request_filename
+	vars   map[string]string // set $var
+	// rewritten: a rewrite changed the URI, proxy_pass without URI sends it
+	rewritten bool
+	// $upstream_addr and friends, once proxied
+	upAddr   string
+	upStatus int
+	upLen    int
+	upTime   time.Duration
 }
 
 func (n *nginxInst) serve(w http.ResponseWriter, r *http.Request, port string, ssl bool) {
@@ -1421,6 +1463,7 @@ func (q *ngxReq) handle() {
 	q.depth++
 	if q.depth == 1 {
 		// the server level runs once: rewrite, return
+		q.set(q.srv.c.sets)
 		if q.rewrite(q.srv.c.rewrites) {
 			return
 		}
@@ -1440,6 +1483,7 @@ func (q *ngxReq) handle() {
 			q.respondError(http.StatusNotFound)
 			return
 		}
+		q.set(q.loc.c.sets)
 		if q.rewrite(q.loc.c.rewrites) {
 			return
 		}
@@ -1459,6 +1503,17 @@ func (q *ngxReq) run() {
 		q.tryFiles(c.tryFiles)
 	default:
 		q.static(q.uri)
+	}
+}
+
+// set runs the set directives of a block. They run before its rewrites,
+// not interleaved with them as in nginx.
+func (q *ngxReq) set(sets [][2]string) {
+	for _, kv := range sets {
+		if q.vars == nil {
+			q.vars = map[string]string{}
+		}
+		q.vars[kv[0]] = q.expand(kv[1])
 	}
 }
 
@@ -1493,7 +1548,7 @@ func (q *ngxReq) rewrite(rules []ngxRewrite) bool {
 				q.args = a
 			}
 		}
-		q.uri = target
+		q.uri, q.rewritten = target, true
 		switch rw.flag {
 		case "last":
 			q.handle()
@@ -1835,7 +1890,8 @@ func (q *ngxReq) autoindex(uri, real string) {
 // ngxClient sends proxied requests: into the cluster through the network of
 // the pod, else with fetch(). Redirects go back to the client.
 var ngxClient = &http.Client{
-	Transport: &http.Transport{DialContext: dialCluster, DisableKeepAlives: true},
+	// proxy_ssl_verify is off by default.
+	Transport: &http.Transport{DialContext: dialCluster, DisableKeepAlives: true, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -1863,8 +1919,15 @@ func (q *ngxReq) proxy(target string) {
 		upstream = net.JoinHostPort(upstream, port)
 	}
 	// With a URI in proxy_pass, the matched part of the location is
-	// replaced by it; without, the request URI goes as it is.
+	// replaced by it; without, the request URI goes as it is, or the URI of
+	// a rewrite.
 	reqURI := q.r.URL.RequestURI()
+	if q.rewritten {
+		reqURI = (&url.URL{Path: q.uri}).EscapedPath()
+		if q.args != "" {
+			reqURI += "?" + q.args
+		}
+	}
 	if u.Path != "" || strings.HasSuffix(target, "/") {
 		rest := q.uri
 		if q.loc != nil && q.loc.re == nil && q.loc.mod != "@" {
@@ -1908,8 +1971,12 @@ func (q *ngxReq) proxy(target string) {
 	if inCluster(q.r.Context(), host) {
 		client = ngxClient
 	}
+	q.upAddr = upstream
+	upStart := time.Now()
 	resp, err := client.Do(out)
+	q.upTime = time.Since(upStart)
 	if err != nil {
+		q.upStatus = http.StatusBadGateway
 		what := "connect() failed (111: Connection refused) while connecting to upstream"
 		code := http.StatusBadGateway
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -1923,6 +1990,8 @@ func (q *ngxReq) proxy(target string) {
 		return
 	}
 	defer resp.Body.Close()
+	q.upStatus = resp.StatusCode
+	defer func() { q.upTime = time.Since(upStart) }()
 	for k, v := range resp.Header {
 		switch k {
 		case "Server", "Date", "Connection", "Keep-Alive", "Transfer-Encoding", "X-Pad":
@@ -1935,6 +2004,7 @@ func (q *ngxReq) proxy(target string) {
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := resp.Body.Read(buf)
+		q.upLen += n
 		if n > 0 {
 			if _, werr := q.w.Write(buf[:n]); werr != nil {
 				return
@@ -1973,6 +2043,9 @@ func (q *ngxReq) expand(s string) string {
 
 func (q *ngxReq) variable(name string) (string, bool) {
 	r := q.r
+	if v, ok := q.vars[name]; ok {
+		return v, true
+	}
 	if n, err := strconv.Atoi(name); err == nil {
 		if n < len(q.caps) {
 			return q.caps[n], true
@@ -2070,6 +2143,16 @@ func (q *ngxReq) variable(name string) (string, bool) {
 		return q.n.version, true
 	case "proxy_host":
 		return "", false
+	case "http_host": // net/http moves the Host header out of the header map
+		return r.Host, r.Host != ""
+	case "upstream_addr", "upstream_status", "upstream_response_length", "upstream_response_time":
+		if q.upAddr == "" {
+			return "", false
+		}
+		return map[string]string{
+			"upstream_addr": q.upAddr, "upstream_status": strconv.Itoa(q.upStatus),
+			"upstream_response_length": strconv.Itoa(q.upLen), "upstream_response_time": fmt.Sprintf("%.3f", q.upTime.Seconds()),
+		}[name], true
 	case "proxy_add_x_forwarded_for":
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			return xff + ", " + remoteHost(r), true
@@ -2130,8 +2213,10 @@ func (q *ngxReq) accessLog() {
 			format = ngxCombined
 		}
 		line := ngxVarRef.ReplaceAllStringFunc(format, func(m string) string {
+			// Like nginx: "-" for a variable without value, an empty
+			// one stays empty.
 			v, ok := q.variable(strings.Trim(m, "${}"))
-			if !ok || v == "" {
+			if !ok {
 				return "-"
 			}
 			return strings.ReplaceAll(v, `"`, `\x22`)

@@ -434,3 +434,68 @@ func TestSecNginxStart(t *testing.T) {
 		t.Errorf("root: %v %q", err, out)
 	}
 }
+
+// The file tools of the shell (coreutils_files.go, sed, tar, dd, awk, jq)
+// check like the user of the container, too.
+func TestSecFileTools(t *testing.T) {
+	pe, _ := secContainer(t, "busybox", &v1.PodSecurityContext{RunAsUser: ptr.To[int64](4242)}, nil)
+	os.WriteFile(pe.root.real("/etc/conf"), []byte("a=1\n"), 0o644)
+	os.WriteFile(pe.root.real("/tmp/theirs"), []byte("x\n"), 0o644)
+	os.WriteFile(pe.root.real("/root/secret"), []byte("x\n"), 0o600)
+	for _, tc := range []struct {
+		script, want string
+		ok           bool
+	}{
+		{"cp /etc/conf /etc/copy", "Permission denied", false},
+		{"cp /etc/conf /tmp/copy && cat /tmp/copy", "a=1", true},
+		{"cp -r /etc /tmp/etc && cat /tmp/etc/conf", "a=1", true},
+		{"mv /etc/conf /tmp/conf", "Permission denied", false},
+		{"mv /tmp/theirs /tmp/mine", "Permission denied", false}, // the sticky bit
+		{"mv /tmp/copy /tmp/copy2 && cat /tmp/copy2", "a=1", true},
+		{"ln -s /etc/conf /etc/link", "Permission denied", false},
+		{"ln -s copy2 /tmp/link && cat /tmp/link", "a=1", true},
+		{"chmod 777 /etc/conf", "Operation not permitted", false},
+		{"chown 4242 /etc/conf", "Operation not permitted", false},
+		{"sed -i s/1/2/ /etc/conf", "Permission denied", false},
+		{"sed s/1/2/ /etc/conf", "a=2", true},
+		{"dd if=/etc/conf of=/etc/dd status=none", "Permission denied", false},
+		{"rmdir /etc", "Permission denied", false},
+		{"mktemp -d /etc/XXXXXX", "Permission denied", false},
+		{"cd /tmp && tar cf a.tar copy2 && mkdir out && tar xf a.tar -C out && cat out/copy2", "a=1", true},
+		{"tar xf /tmp/a.tar -C /etc", "Permission denied", false},
+		{"grep -r x /root", "Permission denied", false},
+		{"awk '{print > \"/etc/awk\"}' /etc/conf", "", false},
+		{"find /tmp/copy2 -delete && ls /tmp/copy2", "No such file", false},
+		{"find /etc/conf -delete", "Permission denied", false},
+	} {
+		got, code := runIn(t, pe, tc.script)
+		if (code == 0) != tc.ok || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: exit %d, %q; want %q (ok %v)", tc.script, code, got, tc.want, tc.ok)
+		}
+	}
+	if b, _ := os.ReadFile(pe.root.real("/etc/conf")); string(b) != "a=1\n" {
+		t.Errorf("/etc/conf changed: %q", b)
+	}
+}
+
+func TestSecFileToolsReadOnlyRoot(t *testing.T) {
+	pe, _ := secContainer(t, "busybox", nil, &v1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}, rootMount{path: "/data", real: t.TempDir()})
+	os.WriteFile(pe.root.real("/etc/conf"), []byte("a=1\n"), 0o644)
+	for _, tc := range []struct {
+		script, want string
+		ok           bool
+	}{
+		{"cp /etc/conf /etc/copy", "Read-only file system", false},
+		{"sed -i s/1/2/ /etc/conf", "Read-only file system", false},
+		{"chmod 600 /etc/conf", "Read-only file system", false},
+		{"mv /etc/conf /data/conf", "Read-only file system", false},
+		{"cp /etc/conf /data/conf && sed -i s/1/2/ /data/conf && cat /data/conf", "a=2", true},
+		{"cd /data && tar cf a.tar conf && tar xf a.tar -C /tmp", "Read-only file system", false},
+		{"mkdir /data/out && tar xf /data/a.tar -C /data/out && cat /data/out/conf", "a=2", true},
+	} {
+		got, code := runIn(t, pe, tc.script)
+		if (code == 0) != tc.ok || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: exit %d, %q; want %q (ok %v)", tc.script, code, got, tc.want, tc.ok)
+		}
+	}
+}

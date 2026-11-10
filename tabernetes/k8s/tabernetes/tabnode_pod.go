@@ -300,6 +300,9 @@ func (w *podWorker) supervise(c *ctr, group *sync.WaitGroup) bool {
 			if !ok {
 				return
 			}
+			if c.restartForSpec() {
+				continue
+			}
 			policy := w.restartPolicy()
 			if c.sidecar {
 				policy = v1.RestartPolicyAlways
@@ -321,11 +324,13 @@ func (w *podWorker) update(pod *v1.Pod) {
 	w.mu.Lock()
 	w.pod = pod.DeepCopy()
 	w.addEphemeralLocked(w.pod)
+	kill := w.imagesChangedLocked(w.pod)
 	start := pod.DeletionTimestamp != nil && !w.terminating
 	if start {
 		w.terminating = true
 	}
 	w.mu.Unlock()
+	w.restartForNewImage(kill)
 	w.startEphemeral()
 	select {
 	case w.specChanged <- struct{}{}:
@@ -356,6 +361,7 @@ func (w *podWorker) gone() {
 	go func() {
 		w.wg.Wait()
 		w.ewg.Wait()
+		w.forgetAccts()
 		if ip != "" && ownIP {
 			w.n.releaseIP(ip)
 		}

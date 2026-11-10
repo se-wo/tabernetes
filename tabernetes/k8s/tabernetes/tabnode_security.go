@@ -863,6 +863,73 @@ func removeAs(ctx context.Context, hc interp.HandlerContext, name string, recurs
 	return os.RemoveAll(real)
 }
 
+// writeFileAs replaces the content of a file with the permissions of the
+// container.
+func writeFileAs(ctx context.Context, hc interp.HandlerContext, name string, data []byte, perm os.FileMode) error {
+	f, err := openAs(ctx, hc, name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// createAs checks that the container may create the entry name (a link, a
+// directory, the target of a rename): w and x on its directory. An entry
+// that is already there must be removable.
+func createAs(ctx context.Context, hc interp.HandlerContext, name string) error {
+	if err := fsAccess(ctx, hc.Dir, name, accRemove); err != nil {
+		return err
+	}
+	return fsAccess(ctx, hc.Dir, name, accMkdir)
+}
+
+// removeCheck checks that the container may remove or rename the entry name.
+func removeCheck(ctx context.Context, hc interp.HandlerContext, name string) error {
+	return fsAccess(ctx, hc.Dir, name, accRemove)
+}
+
+// attrCheck is the rule of chmod and chown: the file system is writable,
+// and the user owns the file or has the capability (CAP_FOWNER for chmod,
+// CAP_CHOWN for chown). A user without CAP_CHOWN may still give its own
+// file to one of its groups.
+func attrCheck(ctx context.Context, hc interp.HandlerContext, name string, capBit int, uid, gid int) error {
+	sec, pe := secOf(ctx), procOf(ctx)
+	if sec == nil || pe.root == nil {
+		return nil
+	}
+	cp := containerPath(hc.Dir, name)
+	deny := func(errno syscall.Errno) error { return &fs.PathError{Op: "chmod", Path: name, Err: errno} }
+	if pe.root.readOnlyPlace(cp, sec.readOnlyRoot) {
+		return deny(syscall.EROFS)
+	}
+	if sec.hasCap(capBit) {
+		return nil
+	}
+	fi, err := os.Lstat(pe.root.real(cp))
+	if err != nil {
+		return nil // the operation itself reports it
+	}
+	fuid, fgid, ok := owner(fi)
+	if !ok {
+		return nil
+	}
+	if fuid != sec.uid {
+		return deny(syscall.EPERM)
+	}
+	if capBit == capChown {
+		sameUser := uid < 0 || int64(uid) == fuid
+		ownGroup := gid < 0 || int64(gid) == fgid || slices.Contains(sec.groups, int64(gid))
+		if !sameUser || !ownGroup {
+			return deny(syscall.EPERM)
+		}
+	}
+	return nil
+}
+
 // podAccess is the access handler of the shell of a container: test -r,
 // -w, -x and cd.
 func podAccess(ctx context.Context, dir, p string, mode interp.AccessMode) error {
