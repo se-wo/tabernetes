@@ -620,12 +620,16 @@ func fcLookup(ctx context.Context, hc interp.HandlerContext, file, s string) (id
 	return 0, 0, false
 }
 
-// fcName maps an id to a name or "UNKNOWN".
+// fcName maps an id to a name or "UNKNOWN". The terminal has no
+// /etc/passwd; its files belong to root there.
 func fcName(rows [][]string, id int) string {
 	for _, r := range rows {
 		if r[2] == strconv.Itoa(id) {
 			return r[0]
 		}
+	}
+	if id == 0 && len(rows) == 0 {
+		return "root"
 	}
 	return "UNKNOWN"
 }

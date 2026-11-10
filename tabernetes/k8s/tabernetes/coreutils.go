@@ -252,9 +252,20 @@ func grep(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 }
 
 func head(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("head", args, "n:#", map[string]string{"lines": "n"})
+	o, args, err := opts("head", args, "n:c:#", map[string]string{"lines": "n", "bytes": "c"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
+	}
+	if v, ok := o["c"]; ok {
+		c, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || c < 0 {
+			return fail(hc, 2, "head: invalid number of bytes: '%s'", v)
+		}
+		return inputs(ctx, hc, "head", args, func(_ string, r io.Reader) error {
+			io.CopyN(hc.Stdout, r, c)
+			io.Copy(io.Discard, r)
+			return nil
+		})
 	}
 	n, err := count(o, 10)
 	if err != nil {
@@ -400,12 +411,19 @@ func uniq(ctx context.Context, hc interp.HandlerContext, args []string, _ interp
 }
 
 func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("cut", args, "d:f:", map[string]string{"delimiter": "d", "fields": "f"})
+	o, args, err := opts("cut", args, "d:f:c:b:", map[string]string{"delimiter": "d", "fields": "f", "characters": "c", "bytes": "b"})
 	if err != nil {
 		return fail(hc, 2, "%v", err)
 	}
+	// -c and -b select characters: the same list, applied to the runes.
+	chars := false
+	for _, k := range []string{"c", "b"} {
+		if v, ok := o[k]; ok {
+			o["f"], chars = v, true
+		}
+	}
 	if !has(o, "f") {
-		return fail(hc, 2, "usage: cut -f list [-d delim] [file...]")
+		return fail(hc, 2, "usage: cut -f list [-d delim] | -c list [file...]")
 	}
 	d := "\t"
 	if v, ok := o["d"]; ok {
@@ -432,6 +450,19 @@ func cut(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.
 	}
 	return inputs(ctx, hc, "cut", args, func(_ string, r io.Reader) error {
 		for _, l := range lines(r) {
+			if chars {
+				var b strings.Builder
+				for i, c := range []rune(l) {
+					for _, rg := range fields {
+						if i+1 >= rg[0] && i+1 <= rg[1] {
+							b.WriteRune(c)
+							break
+						}
+					}
+				}
+				fmt.Fprintln(hc.Stdout, b.String())
+				continue
+			}
 			f := strings.Split(l, d)
 			if len(f) == 1 {
 				fmt.Fprintln(hc.Stdout, l)
@@ -459,6 +490,12 @@ func tr(_ context.Context, hc interp.HandlerContext, args []string, _ interp.Exe
 	}
 	set := func(s string) []rune {
 		var out []rune
+		// [:class:] and the escapes \n \t \r \\ of POSIX tr
+		for class, chars := range map[string]string{"[:upper:]": "A-Z", "[:lower:]": "a-z", "[:digit:]": "0-9",
+			"[:alpha:]": "a-zA-Z", "[:alnum:]": "a-zA-Z0-9", "[:space:]": " \t\n\r\v\f", "[:blank:]": " \t"} {
+			s = strings.ReplaceAll(s, class, chars)
+		}
+		s = strings.NewReplacer(`\n`, "\n", `\t`, "\t", `\r`, "\r", `\\`, `\`).Replace(s)
 		r := []rune(s)
 		for i := 0; i < len(r); i++ {
 			if i+2 < len(r) && r[i+1] == '-' {
