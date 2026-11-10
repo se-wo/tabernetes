@@ -45,6 +45,7 @@ type podWorker struct {
 	failMessage string
 	sent        *v1.PodStatus               // last status written
 	devices     map[string][]preparedDevice // DRA devices by container (tabnode_gpu.go)
+	claims      map[string]claimMount       // persistentVolumeClaim and ephemeral volumes (tabnode_pvc.go)
 
 	kick        chan struct{}
 	specChanged chan struct{}  // wakes the active deadline

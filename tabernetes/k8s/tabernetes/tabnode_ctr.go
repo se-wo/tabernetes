@@ -475,7 +475,7 @@ func (w *podWorker) rootFS(c *ctr, pod *v1.Pod) (*rootFS, error) {
 		if m.SubPath != "" {
 			real = filepath.Join(real, m.SubPath)
 		}
-		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly})
+		root.mounts = append(root.mounts, rootMount{path: path.Clean("/" + m.MountPath), real: real, readOnly: m.ReadOnly || w.claimReadOnly(m.Name)})
 	}
 	// longest first, so /a/b wins over /a
 	for i := 1; i < len(root.mounts); i++ {

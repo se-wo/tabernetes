@@ -25,6 +25,9 @@ func (w *podWorker) volumeDir(name string) (string, bool) {
 		if v.Name != name {
 			continue
 		}
+		if m, ok := w.claimMountFor(name); ok {
+			return m.dir, true
+		}
 		if v.HostPath != nil {
 			// The host is the tab: hostPath is the file system of the terminal.
 			return v.HostPath.Path, true
@@ -35,9 +38,12 @@ func (w *podWorker) volumeDir(name string) (string, bool) {
 }
 
 // setupVolumes writes the contents of every volume. Volume types without
-// meaning in a browser tab (persistentVolumeClaim, nfs, csi, ...) fail with
+// meaning in a browser tab (nfs, csi, ...) fail with
 // an event, like a volume that cannot be attached.
 func (w *podWorker) setupVolumes(ctx context.Context) error {
+	if err := w.resolveClaims(ctx); err != nil {
+		return err
+	}
 	pod, ip := w.podInfo()
 	for _, v := range pod.Spec.Volumes {
 		dir, _ := w.volumeDir(v.Name)
@@ -78,8 +84,10 @@ func (w *podWorker) setupVolumes(ctx context.Context) error {
 					files[k] = b
 				}
 			}
+		case v.PersistentVolumeClaim != nil || v.Ephemeral != nil:
+			continue
 		default:
-			return fmt.Errorf("volume %q: this volume type does not exist in a browser tab (supported: emptyDir, configMap, secret, projected, downwardAPI, hostPath)", v.Name)
+			return fmt.Errorf("volume %q: this volume type does not exist in a browser tab (supported: emptyDir, configMap, secret, projected, downwardAPI, hostPath, persistentVolumeClaim, ephemeral)", v.Name)
 		}
 		if err != nil {
 			return fmt.Errorf("volume %q: %w", v.Name, err)
