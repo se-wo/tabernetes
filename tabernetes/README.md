@@ -159,7 +159,7 @@ uses the claim, the scheduler picks the node, the provisioner starts a
 `helper-pod-create-pvc-...` there that makes the directory
 `/opt/local-path-provisioner/<pv>_<namespace>_<claim>`, and it creates a
 hostPath volume with node affinity. Deleting the claim removes volume and
-directory. On the tab node and in Web Workers the image is built in
+directory. On the tab node and in Web Workers the image is built-in
 (`tabnode_localpath.go`); a Docker node runs the real one. A pod with
 `nodeName` skips the scheduler, so its claim stays `Pending`, as on a real
 cluster; use a `nodeSelector`.
