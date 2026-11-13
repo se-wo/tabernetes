@@ -1,27 +1,40 @@
+{{- /* Based on bitnami/charts nginx 22.1.0, Apache-2.0, Copyright Broadcom, Inc. All Rights Reserved. Modified. */ -}}
 CHART NAME: {{ .Chart.Name }}
 CHART VERSION: {{ .Chart.Version }}
 APP VERSION: {{ .Chart.AppVersion }}
 
-** Please be patient while the chart is being deployed **
+⚠ WARNING: Since August 28th, 2025, only a limited subset of images/charts are available for free.
+    Subscribe to Bitnami Secure Images to receive continued support and security updates.
+    More info at https://bitnami.com and https://github.com/bitnami/containers/issues/83267
 
+** Please be patient while the chart is being deployed **
 NGINX can be accessed through the following DNS name from within your cluster:
 
-    {{ include "nginx.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local (port {{ .Values.service.ports.http }})
+    {{ include "nginx.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }} (port {{ .Values.service.ports.http }})
 
-To access NGINX from the terminal of Tabernetes:
+To access NGINX from outside the cluster, follow the steps below:
 
-    wget -qO- {{ include "nginx.fullname" . }}{{ if ne (int .Values.service.ports.http) 80 }}:{{ .Values.service.ports.http }}{{ end }}
+1. Get the NGINX URL by running these commands:
 
-or show it next to the terminal:
+{{- if contains "LoadBalancer" .Values.service.type }}
 
-    proxy svc/{{ include "nginx.fullname" . }}
-{{- if eq .Values.service.type "NodePort" }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        Watch the status with: 'kubectl get svc --namespace {{ .Release.Namespace }} -w {{ include "nginx.fullname" . }}'
 
-The service listens on a node port as well:
+    export SERVICE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].port}" services {{ include "nginx.fullname" . }})
+    export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "nginx.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    echo "http://${SERVICE_IP}:${SERVICE_PORT}"
+
+{{- else if contains "ClusterIP"  .Values.service.type }}
+
+    export SERVICE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].port}" services {{ include "nginx.fullname" . }})
+    kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "nginx.fullname" . }} ${SERVICE_PORT}:${SERVICE_PORT} &
+    echo "http://127.0.0.1:${SERVICE_PORT}"
+
+{{- else if contains "NodePort" .Values.service.type }}
 
     export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "nginx.fullname" . }})
-{{- else if eq .Values.service.type "LoadBalancer" }}
+    export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+    echo "http://${NODE_IP}:${NODE_PORT}"
 
-The service is of type LoadBalancer. Tabernetes has no load balancer, so its
-EXTERNAL-IP stays <pending>; the cluster IP and the node port work.
 {{- end }}
