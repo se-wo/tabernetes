@@ -1,0 +1,11 @@
+{
+  "name": "wasi-sockets-poc-browser",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 of ../../wasi-sockets.md in the browser: run with ../run.sh browser",
+  "dependencies": {
+    "@bytecodealliance/jco": "1.42.0",
+    "@bytecodealliance/preview2-shim": "0.31.1",
+    "esbuild": "0.28.2"
+  }
+}

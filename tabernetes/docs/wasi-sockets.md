@@ -767,10 +767,10 @@ transpile worker then loads the transpiler. A Go thread without components
 does not load it.
 
 The task `web` of `mise.toml` must bundle the transpile worker in the ESM
-format and start it as a module worker. The task must copy the four core
-modules of `jco-transpile` to `../vendor/`, relative to the bundle (fact
-10). The server must send them with `Content-Type: application/wasm` for
-`WebAssembly.compileStreaming`.
+format, with `--external:node:*`, and start it as a module worker. The task
+must copy the four core modules of `jco-transpile` to `../vendor/`, relative
+to the bundle (fact 10). The server must send them with
+`Content-Type: application/wasm` for `WebAssembly.compileStreaming`.
 
 The pod worker of a component starts from a `data:` URL (decision 13). It
 loads the generated JavaScript from a `Blob` URL that it makes.
@@ -1118,6 +1118,7 @@ the decision and its requirements.
 ### 9.2 Results of phase 0
 
 `docs/wasi-sockets-poc/run.sh` gives these results. The command `run.sh
+browser` runs the browser items in headless Chrome 153. The command `run.sh
 runwasi` runs the test components of `docs/wasi-sockets-poc/components/`
 with the published `containerd-shim-wasmtime` v0.6.1 and containerd 2.4.2.
 It runs without kubelet. So it records the exit status of the task, not the
@@ -1139,6 +1140,13 @@ pod status and not the restart count. The Docker check records these
 | 7, CO4, NL1 | Not examined yet. | |
 | 13 | `std::process::exit` of Rust gives 0 for 0, 1 for 1 and 1 for 3. Rust 1.97 imports only `exit`. A component with an import of `exit-with-code` does not link (status 137). | CO18: exit codes 0 and 1 only. |
 | 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. | PX26. The Docker check records the restart count. |
+| 1 | In Chrome 153, a module worker transpiles the command component and the proxy component. Firefox and Safari: not examined. The test host has only Chromium. | |
+| 2 | The first transpiler run takes 393 to 427 ms, with the load of the transpiler from a local server. A component of 3.4 MB takes 79 to 83 ms. A component of 4.4 MB takes 135 to 165 ms. A component of 12.0 MB from componentize-js takes 593 to 614 ms. | Open question 1: the time in Chrome is far below 10 seconds. |
+| 2 | The generated JavaScript of the proxy component has 785,828 bytes. It contains the runtime of jco for JSPI. | The cache of decision 2 keeps it one time for each key. |
+| 3 | The pod worker loads the generated JavaScript from a `Blob` URL. It runs the command component with `WASIShim`. The JavaScript has no bare module names. | Section 8.2 stays. |
+| 4 | `site/page.html` and `site/terminal.html` have no Content Security Policy. The service worker `web/proxy-sw.js` has only the scope `tabernetes-proxy/`. The headers of the published site: not examined. | |
+| 11 | esbuild bundles the transpile worker as ESM only with `--external:node:*`. jco-transpile has dynamic imports of `node:fs/promises` for Node.js. The bundle has 652,619 bytes. It loads the four core modules from `../vendor/` with `Content-Type: application/wasm`. | Section 8.2 gets the flag. |
+| 13 | In the shim, `exit(3)` of Rust gives 1. A component that calls `exit-with-code(3)` gives 3. | CO18: the pod worker must not give `exit-with-code`. |
 
 ## 10 Tests
 

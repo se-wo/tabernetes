@@ -1,5 +1,5 @@
 #!/bin/bash
-# run.sh components|runwasi
+# run.sh components|runwasi|browser
 # Proofs of concept for phase 0 of ../wasi-sockets.md. They build in
 # components/target and in a temporary directory, and leave the rest of the
 # repository alone.
@@ -7,6 +7,8 @@
 #   components  build the Rust test components (wasm32-wasip2)
 #   runwasi     run them with the published containerd-shim-wasmtime v0.6.1
 #               under a containerd of its own (root, Docker for the images)
+#   browser     transpile them in a transpile worker of headless Chromium and
+#               run the command components in a pod worker (Playwright)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 SHIM_VERSION=containerd-shim-wasmtime/v0.6.1
@@ -16,7 +18,9 @@ components() {
 	(cd "$here/components" && cargo build -q --release --target wasm32-wasip2)
 }
 
-case "${1:-}" in
+cmd="${1:-}"
+shift || true
+case "$cmd" in
 components)
 	components
 	ls -l "$here/components/target/wasm32-wasip2/release/"*.wasm
@@ -94,8 +98,23 @@ runwasi)
 	grep -o 'task px exit with non-zero exit code [0-9]*' "$tmp/containerd.log" || true
 	grep -o 'error running start function: [^"]*' "$tmp/containerd.log" | sort -u
 	;;
+browser)
+	components
+	(cd "$here/components" && cargo build -q --target wasm32-wasip2 -p cmd -p proxy)
+	cd "$here/browser"
+	npm ci --silent 2>/dev/null || npm install --silent
+	# jco-transpile has dynamic imports of node:fs for Node.js only.
+	npx esbuild src/transpile.worker.js src/pod.worker.js --bundle --format=esm \
+		--target=es2022 --external:'node:*' --outdir=site/assets --log-level=warning
+	mkdir -p site/vendor
+	cp node_modules/@bytecodealliance/jco-transpile/vendor/js-component-bindgen-component.core*.wasm site/vendor/
+	cp index.html site/
+	t="$here/components/target/wasm32-wasip2"
+	node driver.mjs "$t/release/cmd.wasm" "$t/release/exitcode.wasm" "$t/release/proxy.wasm" \
+		"$t/debug/cmd.wasm" "$t/debug/proxy.wasm" "$@"
+	;;
 *)
-	sed -n '2,8p' "$0" >&2
+	sed -n '2,10p' "$0" >&2
 	exit 2
 	;;
 esac
