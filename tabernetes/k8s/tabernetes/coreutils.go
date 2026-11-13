@@ -498,78 +498,362 @@ func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	})
 }
 
-func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
-	o, args, err := opts("ls", args, "la1AdL", nil)
+// lsUsage is what BusyBox 1.38 prints after "ls: invalid option -- 'Z'".
+const lsUsage = `BusyBox v1.38.0 (2026-05-13 02:21:49 UTC) multi-call binary.
+
+Usage: ls [-1AaCxdLHRFplinshrSXvctu] [-w WIDTH] [FILE]...
+
+List directory contents
+
+	-1	One column output
+	-a	Include names starting with .
+	-A	Like -a, but exclude . and ..
+	-x	List by lines
+	-d	List directory names, not contents
+	-L	Follow symlinks
+	-H	Follow symlinks on command line
+	-R	Recurse
+	-p	Append / to directory names
+	-F	Append indicator (one of */=@|) to names
+	-l	Long format
+	-i	List inode numbers
+	-n	List numeric UIDs and GIDs instead of names
+	-s	List allocated blocks
+	-lc	List ctime
+	-lu	List atime
+	--full-time	List full date/time
+	-h	Human readable sizes (1K 243M 2G)
+	--group-directories-first
+	-S	Sort by size
+	-X	Sort by extension
+	-v	Sort by version
+	-t	Sort by mtime
+	-tc	Sort by ctime
+	-tu	Sort by atime
+	-r	Reverse sort order
+	-w N	Format N columns wide
+	--color[={always,never,auto}]
+`
+
+// lsEntry is one line of ls: a name and what lstat (or stat with -L) says.
+type lsEntry struct {
+	name string
+	fi   fs.FileInfo
+	dir  string // real directory of the entry, to read the target of a symlink
+}
+
+// lsCfg is the parsed flags of one ls run.
+type lsCfg struct {
+	o     map[string]string
+	long  bool   // -l or -n
+	color string // "always" or "never"
+}
+
+// lsHuman is a size of ls -h like BusyBox: bytes below 1024, then one
+// decimal and K, M, G, T, P, E: 1.0K, 1018.6K, 10.0M. The decimal is rounded,
+// so 1048575 is 1024.0K.
+func lsHuman(n int64) string {
+	if n < 1024 {
+		return strconv.FormatInt(n, 10)
+	}
+	u, unit := uint64(n), uint64(1)
+	idx := 0
+	for u >= unit*1024 && idx < 6 {
+		unit *= 1024
+		idx++
+	}
+	whole := u / unit
+	frac := (u%unit*10 + unit/2) / unit
+	if frac >= 10 {
+		whole++
+		frac -= 10
+	}
+	return fmt.Sprintf("%d.%d%c", whole, frac, "KMGTPE"[idx-1])
+}
+
+// lsTotal is the "total" line of ls -l: the blocks of 1K, or with -h one
+// rounded number with a unit and no decimal ("2M"), padded to 7 characters
+// like BusyBox does.
+func lsTotal(kb int64, human bool) string {
+	if !human {
+		return strconv.FormatInt(kb, 10)
+	}
+	s := "0"
+	if kb > 0 {
+		v, idx := kb, 0
+		for v >= 1024 && idx < 5 {
+			v = (v + 512) / 1024
+			idx++
+		}
+		s = strconv.FormatInt(v, 10) + string("KMGTP"[idx])
+	}
+	return fmt.Sprintf("%-7s", s)
+}
+
+// lsDate is the time of ls -l: "Nov 10 21:10" for the last half year, else
+// (or for a time in the future) "Jan  2  2020".
+func lsDate(t time.Time) string {
+	if age := time.Since(t); age < 0 || age > 182*24*time.Hour {
+		return t.Format("Jan _2  2006")
+	}
+	return t.Format("Jan _2 15:04")
+}
+
+// lsIDs is the numeric uid and gid of a file, like lsOwner without the
+// names: "0 0" in the terminal.
+func lsIDs(ctx context.Context, fi fs.FileInfo) string {
+	pe := procOf(ctx)
+	uid, gid, ok := owner(fi)
+	if pe == nil || pe.root == nil || !ok {
+		return "0 0"
+	}
+	return fmt.Sprintf("%d %d", uid, gid)
+}
+
+// stdoutIsTTY tells whether w, the stdout of a command, is a terminal, as
+// isatty(1) would: the screen of the tab (shell.go gives commands a writer
+// bound to their context around it) or, in a container with a tty, the tty of
+// its process. A pipe, a file or a $(...) is not.
+func stdoutIsTTY(ctx context.Context, w io.Writer) bool {
+	for range 8 {
+		cw, ok := w.(ctxWriter)
+		if !ok {
+			break
+		}
+		w = cw.w
+	}
+	switch w.(type) {
+	case holdWriter, ttyOut, *terminal:
+		return true
+	}
+	pe := procOf(ctx)
+	return pe != nil && pe.tty != nil && w == io.Writer(pe.tty)
+}
+
+// lsColor wraps a name in the escape codes of BusyBox (the colors of its
+// built-in table). The mode is "always" (--color=always or a bare --color:
+// every kind of file gets its color, in a pipe too), "never" (plain names) or
+// "auto" (no --color, or --color=auto, like BusyBox: the same colors, but
+// only when stdout is a terminal; ls decides that and passes "never"
+// otherwise).
+func lsColor(mode, name string, m fs.FileMode, broken bool) string {
+	code := ""
+	switch {
+	case mode == "never":
+		return name
+	case broken:
+		code = "1;31"
+	case m.IsDir():
+		code = "1;34"
+	case m&fs.ModeSymlink != 0:
+		code = "1;36"
+	case m&fs.ModeNamedPipe != 0:
+		code = "0;35"
+	case m&fs.ModeSocket != 0:
+		code = "1;35"
+	case m&fs.ModeDevice != 0:
+		code = "1;33"
+	case m&0o111 != 0:
+		code = "1;32"
+	default:
+		code = "0;0"
+	}
+	return "\x1b[" + code + "m" + name + "\x1b[m"
+}
+
+// lsBlocks is the number of 512 byte blocks a file uses.
+func lsBlocks(fi fs.FileInfo) int64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int64(st.Blocks)
+	}
+	return (fi.Size() + 4095) / 4096 * 8
+}
+
+// lsPrint writes the entries, sorted, one per line. showTotal adds the
+// "total" line of a directory.
+func lsPrint(ctx context.Context, hc interp.HandlerContext, c lsCfg, es []lsEntry, showTotal bool) {
+	o := c.o
+	sort.SliceStable(es, func(i, j int) bool { return es[i].name < es[j].name })
+	switch {
+	case has(o, "S"):
+		sort.SliceStable(es, func(i, j int) bool { return es[i].fi.Size() > es[j].fi.Size() })
+	case has(o, "t"):
+		sort.SliceStable(es, func(i, j int) bool { return es[i].fi.ModTime().After(es[j].fi.ModTime()) })
+	}
+	if has(o, "r") {
+		slices.Reverse(es)
+	}
+	if c.long && showTotal {
+		var blocks int64
+		for _, e := range es {
+			blocks += lsBlocks(e.fi)
+		}
+		fmt.Fprintf(hc.Stdout, "total %s\n", lsTotal(blocks/2, has(o, "h")))
+	}
+	for _, e := range es {
+		var b strings.Builder
+		if has(o, "i") {
+			var ino uint64
+			if st, ok := e.fi.Sys().(*syscall.Stat_t); ok {
+				ino = uint64(st.Ino)
+			}
+			fmt.Fprintf(&b, "%7d ", ino)
+		}
+		name := lsColor(c.color, e.name, e.fi.Mode(), false)
+		if c.long {
+			links := uint64(1)
+			if st, ok := e.fi.Sys().(*syscall.Stat_t); ok {
+				links = uint64(st.Nlink)
+			}
+			ids := lsOwner(ctx, e.fi)
+			if has(o, "n") {
+				ids = lsIDs(ctx, e.fi)
+			}
+			u, g, _ := strings.Cut(ids, " ")
+			size := fmt.Sprintf("%9d", e.fi.Size())
+			if has(o, "h") {
+				size = fmt.Sprintf("%7s", lsHuman(e.fi.Size()))
+			}
+			fmt.Fprintf(&b, "%s %4d %-8s %-8s %s %s ", lsMode(e.fi.Mode()), links, u, g, size, lsDate(e.fi.ModTime()))
+			if e.fi.Mode()&fs.ModeSymlink != 0 {
+				if t, err := os.Readlink(filepath.Join(e.dir, filepath.Base(e.name))); err == nil {
+					name += " -> " + lsTarget(c, e.dir, t)
+				}
+			}
+		}
+		fmt.Fprintln(hc.Stdout, b.String()+name)
+	}
+}
+
+// lsTarget is the target of a symlink; it is colored by what it points to.
+func lsTarget(c lsCfg, dir, t string) string {
+	p := t
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, t)
+	}
+	fi, err := os.Stat(p)
 	if err != nil {
-		return fail(hc, 2, "%v", err)
+		return lsColor(c.color, t, 0, true)
+	}
+	return lsColor(c.color, t, fi.Mode(), false)
+}
+
+func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
+	o, args, err := opts("ls", args, "lna1AdLhiRrSt", map[string]string{"color": "color"})
+	if err != nil {
+		// BusyBox words: "ls: invalid option -- 'Z'", then its usage, status 1.
+		msg := err.Error()
+		if k, ok := strings.CutPrefix(msg, "ls: unknown option --"); ok {
+			msg = fmt.Sprintf("ls: unrecognized option '--%s'", k)
+		} else if k, ok := strings.CutPrefix(msg, "ls: unknown option -"); ok {
+			msg = fmt.Sprintf("ls: invalid option -- '%s'", k)
+		}
+		fmt.Fprintf(hc.Stderr, "%s\n%s", msg, lsUsage)
+		return exitCode(1)
+	}
+	c := lsCfg{o: o, long: has(o, "l") || has(o, "n")}
+	if v, ok := o["color"]; ok {
+		// A bare --color is "always" in BusyBox; an unknown value is "never".
+		switch v {
+		case "", "always":
+			c.color = "always"
+		case "auto":
+			c.color = "auto"
+		default:
+			c.color = "never"
+		}
+	}
+	if c.color == "" {
+		c.color = "auto"
+	}
+	if c.color == "auto" {
+		c.color = "never"
+		if stdoutIsTTY(ctx, hc.Stdout) {
+			c.color = "always"
+		}
 	}
 	if len(args) == 0 {
 		args = []string{"."}
 	}
+	sort.Strings(args)
 	code := 0
-	for n, a := range args {
+	var files []lsEntry
+	var dirs []string
+	for _, a := range args {
 		stat := os.Lstat
 		if has(o, "L") || strings.HasSuffix(a, "/") {
 			stat = os.Stat
 		}
-		fi, err := stat(abs(ctx, hc, a))
+		p := abs(ctx, hc, a)
+		fi, err := stat(p)
 		if err != nil {
-			fmt.Fprintf(hc.Stderr, "ls: %s: %v\n", a, unwrap(err))
-			code = 2
+			fmt.Fprintf(hc.Stderr, "ls: %s: %s\n", a, fcErr(err))
+			code = 1
 			continue
 		}
-		var entries []fs.FileInfo
 		if fi.IsDir() && !has(o, "d") {
-			des, err := readDirAs(ctx, hc, a)
-			if err != nil {
-				fmt.Fprintf(hc.Stderr, "ls: can't open '%s': %v\n", a, unwrap(err))
-				code = 2
+			dirs = append(dirs, a)
+		} else {
+			files = append(files, lsEntry{a, fi, filepath.Dir(p)})
+		}
+	}
+	printed := false
+	if len(files) > 0 {
+		lsPrint(ctx, hc, c, files, false)
+		printed = true
+	}
+	header := len(args) > 1 || has(o, "R")
+	var walk func(d string)
+	walk = func(d string) {
+		if printed {
+			fmt.Fprintln(hc.Stdout)
+		}
+		printed = true
+		if header {
+			fmt.Fprintf(hc.Stdout, "%s:\n", d)
+		}
+		des, err := readDirAs(ctx, hc, d)
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "ls: can't open '%s': %s\n", d, fcErr(err))
+			code = 1
+			return
+		}
+		real := abs(ctx, hc, d)
+		var es []lsEntry
+		if has(o, "a") {
+			for _, n := range []string{".", ".."} {
+				if fi, err := os.Lstat(filepath.Join(real, n)); err == nil {
+					es = append(es, lsEntry{n, fi, real})
+				}
+			}
+		}
+		for _, de := range des {
+			if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
 				continue
 			}
-			for _, de := range des {
-				if strings.HasPrefix(de.Name(), ".") && !has(o, "a") && !has(o, "A") {
-					continue
-				}
-				info, err := de.Info()
-				if has(o, "L") {
-					info, err = os.Stat(filepath.Join(abs(ctx, hc, a), de.Name()))
-				}
-				if err == nil {
-					entries = append(entries, info)
-				}
+			info, err := de.Info()
+			if has(o, "L") {
+				info, err = os.Stat(filepath.Join(real, de.Name()))
 			}
-			if len(args) > 1 {
-				if n > 0 {
-					fmt.Fprintln(hc.Stdout)
-				}
-				fmt.Fprintf(hc.Stdout, "%s:\n", a)
+			if err != nil {
+				fmt.Fprintf(hc.Stderr, "ls: %s: %s\n", de.Name(), fcErr(err))
+				code = 1
+				continue
 			}
-		} else {
-			entries = []fs.FileInfo{fi}
+			es = append(es, lsEntry{de.Name(), info, real})
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if !fi.IsDir() || has(o, "d") {
-				name = a
-			}
-			if e.IsDir() {
-				name = "\x1b[1;34m" + name + "\x1b[0m"
-			}
-			if has(o, "l") {
-				if e.Mode()&fs.ModeSymlink != 0 {
-					p := abs(ctx, hc, a)
-					if fi.IsDir() && !has(o, "d") {
-						p = filepath.Join(p, e.Name())
-					}
-					if t, err := os.Readlink(p); err == nil {
-						name += " -> " + t
-					}
-				}
-				fmt.Fprintf(hc.Stdout, "%s 1 %s %8d %s %s\n", lsMode(e.Mode()), lsOwner(ctx, e), e.Size(), e.ModTime().Format("Jan _2 15:04"), name)
-			} else {
-				fmt.Fprintln(hc.Stdout, name)
+		lsPrint(ctx, hc, c, es, true)
+		if !has(o, "R") {
+			return
+		}
+		for _, e := range es {
+			if e.fi.IsDir() && e.name != "." && e.name != ".." {
+				walk(strings.TrimSuffix(d, "/") + "/" + e.name)
 			}
 		}
+	}
+	for _, d := range dirs {
+		walk(d)
 	}
 	return exitCode(code)
 }

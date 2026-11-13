@@ -1,27 +1,29 @@
+{{- /* Based on bitnami/charts apache 11.4.0, Apache-2.0, Copyright Broadcom, Inc. All Rights Reserved. Modified. */ -}}
 CHART NAME: {{ .Chart.Name }}
 CHART VERSION: {{ .Chart.Version }}
 APP VERSION: {{ .Chart.AppVersion }}
 
+NOTICE: Starting August 28th, 2025, only a limited subset of images/charts will remain available for free. Backup will be available for some time at the 'Bitnami Legacy' repository. More info at https://github.com/bitnami/containers/issues/83267
+
 ** Please be patient while the chart is being deployed **
 
-Apache can be accessed through the following DNS name from within your cluster:
+1. Get the Apache URL by running:
 
-    {{ include "apache.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local (port {{ .Values.service.ports.http }})
+{{- if contains "NodePort" .Values.service.type }}
 
-To access Apache from the terminal of Tabernetes:
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ template "apache.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT/
 
-    wget -qO- {{ include "apache.fullname" . }}{{ if ne (int .Values.service.ports.http) 80 }}:{{ .Values.service.ports.http }}{{ end }}
+{{- else if contains "LoadBalancer" .Values.service.type }}
 
-or show it next to the terminal:
+** Please ensure an external IP is associated to the {{ template "apache.fullname" . }} service before proceeding **
+** Watch the status using: kubectl get svc --namespace {{ .Release.Namespace }} -w {{ template "apache.fullname" . }} **
 
-    proxy svc/{{ include "apache.fullname" . }}
-{{- if eq .Values.service.type "NodePort" }}
-
-The service listens on a node port as well:
-
-    export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "apache.fullname" . }})
-{{- else if eq .Values.service.type "LoadBalancer" }}
-
-The service is of type LoadBalancer. Tabernetes has no load balancer, so its
-EXTERNAL-IP stays <pending>; the cluster IP and the node port work.
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ template "apache.fullname" . }} --template "{{ "{{ range (index .status.loadBalancer.ingress 0) }}{{ . }}{{ end }}" }}")
+{{- $port:=.Values.service.ports.http | toString }}
+  echo URL            : http://$SERVICE_IP{{- if ne $port "80" }}:{{ .Values.service.ports.http }}{{ end }}/
+{{- else if contains "ClusterIP"  .Values.service.type }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ template "apache.fullname" . }} 8080:{{ .Values.service.ports.http }}
+  echo URL            : http://127.0.0.1:8080/
 {{- end }}

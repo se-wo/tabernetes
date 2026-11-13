@@ -394,10 +394,10 @@ func TestSecOwnership(t *testing.T) {
 			t.Errorf("%s: %s %d:%d", name, lsMode(fi.Mode()), ownerUID(fi), ownerGID(fi))
 		}
 	}
-	if got, _ := runIn(t, pe, "ls -l /data"); !strings.Contains(got, " 1000 2000 ") {
+	if got, _ := runIn(t, pe, "ls -l /data"); !strings.Contains(got, " 1000     2000    ") {
 		t.Errorf("ls -l: %q", got)
 	}
-	if got, _ := runIn(t, pe, "ls -ld /data"); !strings.HasPrefix(got, "drwxrwsrwx 1 root 2000 ") {
+	if got, _ := runIn(t, pe, "ls -ld /data"); !strings.HasPrefix(got, "drwxrwsrwx    ") || !strings.Contains(got, " root     2000    ") {
 		t.Errorf("ls -ld: %q", got)
 	}
 }

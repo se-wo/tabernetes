@@ -37,8 +37,8 @@ type ociDescriptor struct {
 
 type imageMirror struct {
 	dir string
-	// full reference with tag, as crane --annotate-ref writes it:
-	// registry.k8s.io/pause:3.10.2
+	// full reference with tag, as containerd asks for it (ns, name, tag):
+	// registry.k8s.io/pause:3.10.2, docker.io/library/busybox:latest
 	tags map[string]ociDescriptor
 }
 
@@ -56,6 +56,11 @@ func loadImageMirror(dir string) (*imageMirror, error) {
 	m := &imageMirror{dir: dir, tags: map[string]ociDescriptor{}}
 	for _, d := range index.Manifests {
 		if ref := d.Annotations["org.opencontainers.image.ref.name"]; ref != "" && digestRe.MatchString(d.Digest) {
+			// crane --annotate-ref names Docker Hub images index.docker.io/...,
+			// but containerd asks with ns=docker.io.
+			if rest, ok := strings.CutPrefix(ref, "index.docker.io/"); ok {
+				ref = "docker.io/" + rest
+			}
 			m.tags[ref] = d
 		}
 	}

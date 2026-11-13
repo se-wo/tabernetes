@@ -5,7 +5,8 @@
 //     license files from the vendor tree, and the Go standard library. Runs in
 //     the wasm task, the only time the Kubernetes checkout is there.
 //   node site/third-party.mjs js <web dir> <out.json> <entry>...
-//     The npm packages that esbuild bundles from the entries.
+//     The npm packages that esbuild bundles from the entries, and the Helm
+//     charts of charts/bitnami/ (adapted from Bitnami's, Apache-2.0).
 //
 // build.mjs merges both into THIRD_PARTY_LICENSES.txt. Tabernetes' own code
 // and text are CC BY-NC-SA 4.0 (LICENSE), the code listed here keeps its own
@@ -120,7 +121,19 @@ function jsPackages(web, out, entryPoints) {
       files: files.map((f) => ({ name: path.basename(f), text: read(f) })),
     };
   });
-  fs.writeFileSync(out, JSON.stringify({ title: "npm packages bundled into the page (tabernetes.js, workers, xterm.css)", entries }, null, 1));
+  // The Helm charts that helm in the terminal installs (charts/bitnami/) are
+  // reduced and modified copies of charts of github.com/bitnami/charts. Their
+  // license is in charts/bitnami/LICENSE, outside the chart directories.
+  const chartLicense = licenseFiles(path.join(web, "..", "charts", "bitnami"));
+  if (!chartLicense.length) throw new Error("no LICENSE in charts/bitnami/");
+  entries.push({
+    name: "Bitnami charts nginx, apache and redis (reduced and modified)",
+    version: "",
+    license: "Apache-2.0",
+    url: "https://github.com/bitnami/charts",
+    files: chartLicense.map((f) => ({ name: `bitnami charts ${path.basename(f)}`, text: read(f) })),
+  });
+  fs.writeFileSync(out, JSON.stringify({ title: "npm packages bundled into the page (tabernetes.js, workers, xterm.css) and the Helm charts in charts/", entries }, null, 1));
 }
 
 const [mode, ...args] = process.argv.slice(2);

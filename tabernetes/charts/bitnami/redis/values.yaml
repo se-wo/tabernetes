@@ -1,6 +1,5 @@
-# A small chart with the values of Bitnami's redis chart that tutorials use:
-# a standalone master. Tabernetes runs the official redis image
-# (docker.io/library/redis).
+## @param clusterDomain Kubernetes Cluster Domain
+clusterDomain: cluster.local
 
 ## @param nameOverride String to partially override redis.fullname
 nameOverride: ""
@@ -65,7 +64,7 @@ master:
     failureThreshold: 5
   persistence:
     ## @param master.persistence.enabled Enable persistence with a PersistentVolumeClaim
-    ## (off: Tabernetes has no storage provisioner, the data lives in an emptyDir)
+    ## (off: the data lives in an emptyDir)
     enabled: false
     storageClass: ""
     accessModes:

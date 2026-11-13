@@ -68,8 +68,11 @@ What that means if you use or share this work:
 Third-party software keeps its own license and is not covered by the
 Creative Commons license: Kubernetes (Apache License 2.0), the Go standard
 library (BSD-3-Clause), mvdan.cc/sh (BSD-3-Clause), the other Go modules
-compiled into the binary, and the JavaScript packages of the terminal
-(xterm.js and fzstd, MIT; noVNC, MPL-2.0). The site build collects the list
+compiled into the binary, the JavaScript packages of the terminal
+(xterm.js and fzstd, MIT; noVNC, MPL-2.0) and the Helm charts of
+`tabernetes/charts/bitnami/` (nginx, apache and redis, reduced and modified
+from [Bitnami's charts](https://github.com/bitnami/charts), Apache License
+2.0, copyright Broadcom, Inc.). The site build collects the list
 and the license texts into `THIRD_PARTY_LICENSES.txt` next to the page
 (`tabernetes/site/third-party.mjs`); the footer of the page links it.
 
