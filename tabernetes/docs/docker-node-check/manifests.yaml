@@ -1,0 +1,118 @@
+# Test objects for check.sh. Every pod runs on the Docker node node-1
+# (nodeSelector, not nodeName, so the scheduler still checks the node) and
+# uses busybox, which the node image brings.
+---
+# bb: a plain pod for DNS and image checks.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bb
+  labels: {app: bb}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: bb
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      command: [sleep, "86400"]
+---
+# data: a claim of the default StorageClass (local-path).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 64Mi}
+---
+# writer: uses the claim on node-1 and writes /data/x.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: writer
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      command: [sh, -c, "echo hello from $HOSTNAME > /data/x && sleep 86400"]
+      volumeMounts:
+        - {name: data, mountPath: /data}
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: data}
+---
+# web: busybox httpd answers with the pod name, the backend of the Ingress.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: node-1}
+      containers:
+        - name: web
+          image: busybox
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c, "mkdir /www && echo $HOSTNAME > /www/index.html && exec httpd -f -p 80 -h /www"]
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector: {app: web}
+  ports:
+    - port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  rules:
+    - host: demo.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: {number: 80}
+---
+# sanity: the manifest shape of #21 (securityContext) and #22 (memory limit)
+# on the real kubelet: non-root, read-only root, a limit and a probe.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sanity
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  securityContext:
+    runAsUser: 1000
+    runAsNonRoot: true
+  containers:
+    - name: sanity
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      command: [sh, -c, "id; touch /x 2>&1 || true; sleep 86400"]
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      resources:
+        limits: {memory: 32Mi}
+      readinessProbe:
+        exec:
+          command: ["true"]
+        periodSeconds: 5
