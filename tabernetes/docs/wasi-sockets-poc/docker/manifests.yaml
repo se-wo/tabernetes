@@ -1,0 +1,172 @@
+# Test objects for phase 0 on a joined Docker node (../run.sh docker). Every
+# pod runs on node-1 with runwasi. The images poc/*:1 come from the host's
+# Docker through an import into the node (item 18).
+---
+# Item 13: exit codes of std::process::exit.
+apiVersion: v1
+kind: Pod
+metadata: {name: exit0, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmd:1, imagePullPolicy: Never, env: [{name: EXIT_CODE, value: "0"}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: exit1, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmd:1, imagePullPolicy: Never, env: [{name: EXIT_CODE, value: "1"}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: exit3, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmd:1, imagePullPolicy: Never, env: [{name: EXIT_CODE, value: "3"}]}
+---
+# Item 13: exit-with-code. CO11: an import that runwasi does not link.
+apiVersion: v1
+kind: Pod
+metadata: {name: exitcode3, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/exitcode:1, imagePullPolicy: Never, env: [{name: EXIT_CODE, value: "3"}]}
+---
+# CR6: a command component with wasi:http.
+apiVersion: v1
+kind: Pod
+metadata: {name: cmdhttp, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmdhttp:1, imagePullPolicy: Never}
+---
+# CO3: the function that the entrypoint names. CO4: no such function.
+apiVersion: v1
+kind: Pod
+metadata: {name: core-go, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/core:1, imagePullPolicy: Never, command: ["/core.wasm#go"]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: core-start, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/core:1, imagePullPolicy: Never}
+---
+# NL1: name lookup of a Service by its short name, and of a name outside
+# the cluster.
+apiVersion: v1
+kind: Pod
+metadata: {name: lookup, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmd:1, imagePullPolicy: Never, env: [{name: LOOKUP, value: "kubernetes"}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: lookup-fqdn, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - {name: c, image: poc/cmd:1, imagePullPolicy: Never, env: [{name: LOOKUP, value: "kubernetes.default.svc.cluster.local"}]}
+---
+# Items 7 and 14: the proxy component. restartPolicy Always, as a Deployment
+# would have it.
+apiVersion: v1
+kind: Pod
+metadata: {name: proxy, labels: {poc: wasi, app: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: poc/proxy:1, imagePullPolicy: Never}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: proxy}
+spec:
+  selector: {app: proxy}
+  ports: [{port: 8080}]
+---
+# PX4: [::]:8080 in a pod of the Docker node.
+apiVersion: v1
+kind: Pod
+metadata: {name: proxy6, labels: {poc: wasi}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: poc/proxy:1
+      imagePullPolicy: Never
+      env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "[::]:8080"}]
+---
+# Item 8: the echo images for TCP and UDP.
+apiVersion: v1
+kind: Pod
+metadata: {name: echo-tcp, labels: {poc: wasi, app: echo-tcp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: poc/echo:1, imagePullPolicy: Never}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: echo-tcp}
+spec:
+  selector: {app: echo-tcp}
+  ports: [{port: 7, protocol: TCP}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: echo-udp, labels: {poc: wasi, app: echo-udp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: poc/echo:1, imagePullPolicy: Never, env: [{name: PROTO, value: udp}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: echo-udp}
+spec:
+  selector: {app: echo-udp}
+  ports: [{port: 7, protocol: UDP}]
+---
+# The client for the checks: busybox on node-1.
+apiVersion: v1
+kind: Pod
+metadata: {name: client, labels: {poc: wasi}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: busybox, imagePullPolicy: IfNotPresent, command: [sleep, "86400"]}

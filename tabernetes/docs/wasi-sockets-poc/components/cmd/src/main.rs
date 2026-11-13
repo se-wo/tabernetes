@@ -1,5 +1,6 @@
 //! A command component: it writes its arguments, its environment, the
-//! file in $FILE and stdin, then exits with the code in $EXIT_CODE.
+//! file in $FILE and stdin, looks up the name in $LOOKUP, then exits with the
+//! code in $EXIT_CODE.
 use std::io::Read;
 
 fn main() {
@@ -18,6 +19,13 @@ fn main() {
         }
         let w = format!("{f}.written");
         println!("write {w}: {:?}", std::fs::write(&w, "x").map_err(|e| e.to_string()));
+    }
+    if let Ok(name) = std::env::var("LOOKUP") {
+        use std::net::ToSocketAddrs;
+        match (name.as_str(), 80).to_socket_addrs() {
+            Ok(a) => println!("lookup {name}: {:?}", a.map(|a| a.ip()).collect::<Vec<_>>()),
+            Err(e) => println!("lookup {name}: error {e}"),
+        }
     }
     if std::env::var("STDIN").is_ok() {
         let mut s = String::new();
