@@ -116,3 +116,56 @@ func TestImageMirror(t *testing.T) {
 		t.Errorf("PUT: %s", resp.Status)
 	}
 }
+
+// The node image names Docker Hub images as crane --annotate-ref writes them,
+// index.docker.io/..., but containerd asks the mirror with ns=docker.io.
+func TestImageMirrorDockerHub(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const mt = "application/vnd.oci.image.index.v1+json"
+	var manifests []ociDescriptor
+	digests := map[string]string{}
+	// The names exactly as in index.json of ghcr.io/se-wo/tabernetes:latest.
+	for _, ref := range []string{
+		"index.docker.io/library/busybox:latest",
+		"index.docker.io/rancher/local-path-provisioner:v0.0.31",
+	} {
+		b := []byte(`{"schemaVersion":2,"mediaType":"` + mt + `","manifests":[],"x":"` + ref + `"}`)
+		d := writeBlob(t, dir, b)
+		digests[ref] = d
+		manifests = append(manifests, ociDescriptor{
+			MediaType:   mt,
+			Digest:      d,
+			Size:        int64(len(b)),
+			Annotations: map[string]string{"org.opencontainers.image.ref.name": ref},
+		})
+	}
+	index, _ := json.Marshal(map[string]any{"schemaVersion": 2, "manifests": manifests})
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), index, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadImageMirror(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	// What containerd sends for busybox and rancher/local-path-provisioner:v0.0.31.
+	for path, ref := range map[string]string{
+		"/v2/library/busybox/manifests/latest?ns=docker.io":                 "index.docker.io/library/busybox:latest",
+		"/v2/rancher/local-path-provisioner/manifests/v0.0.31?ns=docker.io": "index.docker.io/rancher/local-path-provisioner:v0.0.31",
+	} {
+		req, _ := http.NewRequest(http.MethodHead, srv.URL+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Docker-Content-Digest") != digests[ref] {
+			t.Errorf("HEAD %s: %s %v, want the manifest of %s", path, resp.Status, resp.Header, ref)
+		}
+	}
+}
