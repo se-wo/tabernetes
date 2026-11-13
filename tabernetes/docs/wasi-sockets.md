@@ -502,14 +502,14 @@ not a requirement.
 | CO8 | The transpile worker must transpile a component one time for each key of the cache. | Decision 2. Other pods and restarts use the result in the cache. |
 | CO9 | The transpiler must not run on a Go thread. | A transpiler on the Go thread stops all other work of the tab node. |
 | CO10 | If the browser has no JSPI, a component pod must get `CreateContainerError` with a text that gives the cause. | Fact 14: old browsers only. |
-| CO11 | If a component has an import that the tab node does not give, the pod must get the status that runwasi gives. | Examples: WASI 0.3, `wasi:keyvalue`, a function of a newer `wasi:*@0.2.x` version. |
+| CO11 | If a component has an import that the tab node does not give, the pod must get the status that runwasi gives. | Examples: WASI 0.3, `wasi:keyvalue`, a function of a newer `wasi:*@0.2.x` version. On runwasi, the container exits with status 137 (section 9.2). |
 | CO12 | The status text must give the name of the import. | |
 | CO13 | A module must run with no change. A module gets no socket functions. | |
 | CO14 | The generated JavaScript of a component must run only in a pod worker. | Not on a Go thread and not in the page. |
 | CO15 | The transpile worker must examine all names of imports and exports in the result of `generate`. It must do this before the result goes to the Go side. | A parser before `generate` is 2.4 MB more (fact 10). |
 | CO16 | A name with characters that are not in the WIT syntax must fail with `CreateContainerError`. | Section 8.2. |
 | CO17 | The pod worker must count the calls in sequence that do not wait and give no data. After 1,000 such calls, it must suspend the next call for one task of the event loop. | Section 8.5 gives the calls. Without this pause, a component that polls never receives messages. |
-| CO18 | The exit code of a command component must be the same as on runwasi. | The shim gives only 0 and 1 without `exit-with-code` (fact 9). Phase 0, item 13. |
+| CO18 | A command component must exit with the exit code 0 or 1, as on runwasi. A component with an import of `exit-with-code` must get the status of CO11. | runwasi does not link `exit-with-code` (section 9.2, item 13). The shim has it (fact 9), so the pod worker must not give it. |
 | CO19 | The pod worker must continue a suspended call with a message on a `MessageChannel`, not with `setTimeout`. | Fact 21. |
 
 ### 7.2 Proxy components
@@ -536,13 +536,13 @@ not a requirement.
 | PX18 | A request body or a response body of more than 16 MiB must fail. | Decision 4. |
 | PX19 | For a request body of more than 16 MiB, the client must get the status code 413. | |
 | PX20 | For a response body of more than 16 MiB, the client must get the status code 500. | The shim keeps the complete body without a limit (fact 9). The HTTP path must examine the size. Phase 0, item 12. |
-| PX21 | If an instance traps, the client must get the same result as on runwasi. | Phase 0, item 7. |
+| PX21 | If an instance traps, the client must get the same result as on runwasi. | Section 9.2: the client gets no response, and the connection closes. |
 | PX22 | After an instance traps, the container must continue to run. | Fact 4. |
 | PX23 | The tab node must not set a timeout for a request. | runwasi has no timeout. |
 | PX24 | If the client closes its connection, the pod worker must discard the instance of this request. It must also cancel the timers, the client requests and the pollables of this instance. | The instance does not continue. Section 11. Phase 0, item 15. |
 | PX25 | The pod worker must discard an instance after `handle` returns and after the response body is complete. | |
-| PX26 | If `handle` returns and sets no response, the client, the container state and the restart count must be the same as on runwasi. | runwasi causes a panic (fact 4). Phase 0, item 14. |
-| PX27 | If the instance sets an error code as its response, the client must get the same result as on runwasi. | runwasi gives an error to hyper. The shim sends 500 (fact 9). Phase 0, item 7. |
+| PX26 | If `handle` returns and sets no response, the client, the container state and the restart count must be the same as on runwasi. | Section 9.2: the client gets no response, and the container exits with status 139. |
+| PX27 | If the instance sets an error code as its response, the client must get the same result as on runwasi. | Section 9.2: the client gets no response. The shim sends 500 (fact 9), so the HTTP path must not use this response of the shim. |
 | PX28 | The component must get all headers of the request, except the 9 headers of fact 20. | `Cookie`, `User-Agent` and `Origin` are examples. |
 | PX29 | The component must get each method and each request body. | Examples: a method that is not standard, `TRACE`, a GET with a body (fact 19). |
 | PX30 | The tab node must send each status code that runwasi sends. | Examples: 204, 304, a status code outside 200 to 599. |
@@ -1115,6 +1115,31 @@ the decision and its requirements.
     access to ghcr.io or an import step in the Docker check, as `IMPORT=1`
     does for busybox (section 10.2).
 
+### 9.2 Results of phase 0
+
+`docs/wasi-sockets-poc/run.sh` gives these results. The command `run.sh
+runwasi` runs the test components of `docs/wasi-sockets-poc/components/`
+with the published `containerd-shim-wasmtime` v0.6.1 and containerd 2.4.2.
+It runs without kubelet. So it records the exit status of the task, not the
+pod status and not the restart count. The Docker check records these
+(item 8).
+
+| Item | Result | Effect on the design |
+| --- | --- | --- |
+| 7, PX15 | `create-tcp-socket` and `create-udp-socket` give a socket. `start-bind` and `start-connect` give `access-denied`. `resolve-addresses` gives `permanent-resolver-failure`. | PX15 uses these results. |
+| 7, PX21 | After an instance traps, the client gets no response. The connection closes. The container continues to run. | PX21. |
+| 7, PX27 | After an error code as the response, the client gets no response. The connection closes. | PX27. |
+| 7, PX16, PX28 | `Cookie`, `User-Agent` and `Origin` arrive at the component. Two `Set-Cookie` headers arrive at the client. | PX16 and PX28 stay. |
+| 7, PX30, PX31 | hyper sends `date`. For a body without `Content-Length`, it sends `transfer-encoding: chunked`. A response with 204 has only `date`. The status code 599 arrives. | The tab node sends the same header names (PX31). |
+| 7, PX11 | The environment contains the variables of the container spec, for example `PATH` and `HOSTNAME`, and `REQUEST_ID`. | PX11 stays. |
+| 7, PX3, PX32 | A value that does not parse gives `0.0.0.0:8080`. Port 0 gives an ephemeral port of the kernel. | PX3 and PX32 stay. |
+| 7, PX33 | The IP 192.0.2.7 gives "Address not available (os error 99)". The task exits with status 137. | The tab node gives the same status. |
+| 7, PX4 | Not examined. The kernel of the test host has no IPv6. | The Docker check examines `[::]:8080`. |
+| 7, CO11, CR6 | A component with an import that the linker does not have does not start. The log names the interface, for example `wasi:http/types@0.2.12`. The task exits with status 137. A command component with `wasi:http` gets this result. | CO11, CR6. |
+| 7, CO4, NL1 | Not examined yet. | |
+| 13 | `std::process::exit` of Rust gives 0 for 0, 1 for 1 and 1 for 3. Rust 1.97 imports only `exit`. A component with an import of `exit-with-code` does not link (status 137). | CO18: exit codes 0 and 1 only. |
+| 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. | PX26. The Docker check records the restart count. |
+
 ## 10 Tests
 
 ### 10.1 Test images
@@ -1159,7 +1184,7 @@ The column "Nodes" gives the nodes for the test:
 | Requirements | Test | Nodes |
 | --- | --- | --- |
 | CO1, CO5, FS1 | The command component writes its arguments, its environment and a file of a volume to stdout. It reads stdin. | tab, worker, Docker |
-| CO18 | The command component exits with the exit codes of phase 0, item 13. The pod shows the same exit codes. | tab, Docker |
+| CO18 | The command component exits with 0, 1 and 3. The pod shows the exit codes 0, 1 and 1. A component with `exit-with-code` gets the status of CO11. | tab, Docker |
 | CO2 | A component with the two exports runs in the world of its first export. | tab, Docker |
 | CO3, CO4 | A component without the two exports runs the function of the entrypoint. A second component without this function gets the status of phase 0. | tab, Docker |
 | CO6, CO7 | A component that uses more memory than `limits.memory` gets `OOMKilled`. During one request, the counted memory increases by the memory of the instance. After the response, it decreases by the same number. | tab |

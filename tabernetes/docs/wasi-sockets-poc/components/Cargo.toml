@@ -1,0 +1,9 @@
+# Test components for phase 0 of ../../wasi-sockets.md.
+# Build: cargo build --release --target wasm32-wasip2
+[workspace]
+members = ["cmd", "cmdhttp", "exitcode", "proxy"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+strip = true
