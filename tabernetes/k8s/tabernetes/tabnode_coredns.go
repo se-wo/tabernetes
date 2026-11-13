@@ -507,7 +507,6 @@ func (s *serviceProxy) serveDNS(ctx context.Context, ln net.Listener, st *coredn
 				if _, err := io.ReadFull(r, req); err != nil {
 					return
 				}
-				chargeDNS()
 				resp, err := s.answerDNS(req, st)
 				if err != nil {
 					return

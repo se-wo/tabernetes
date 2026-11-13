@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
@@ -327,7 +328,7 @@ func TestNodeCPUMonotonic(t *testing.T) {
 			busy += time.Duration((i%5)-1) * 30 * time.Millisecond
 			etcd += int64(i % 3 * 1000)
 			rest[compScheduler] += int64(i % 2 * 500)
-			u := m.sample(now.Add(time.Duration(i%7)*time.Second), 3)
+			u := m.sample(now.Add(time.Duration(i%7)*time.Second), 3, true)
 			if u.node.UsageCoreNanoSeconds < last {
 				t.Fatalf("measured=%v: node cpu went back", measure)
 			}
@@ -374,7 +375,7 @@ func TestCPUPodsWithinNode(t *testing.T) {
 				nodeCPU.add(200 * time.Millisecond)
 				idleCPU.add(200 * time.Millisecond)
 			}
-			u := m.sample(now, 2)
+			u := m.sample(now, 2, true)
 			if i > 0 {
 				var dComps time.Duration
 				for _, name := range compNames {
@@ -416,9 +417,9 @@ func TestCPUGCStaysInNode(t *testing.T) {
 	gcCPU = func() time.Duration { return gc }
 	var m nodeSysModel
 	now := time.Now()
-	m.sample(now, 0)
+	m.sample(now, 0, true)
 	var comps, node time.Duration
-	prev := m.sample(now, 0) // the first measured interval
+	prev := m.sample(now, 0, true) // the first measured interval
 	for i := range 10 {
 		now = now.Add(time.Second)
 		busy += 100 * time.Millisecond
@@ -426,7 +427,7 @@ func TestCPUGCStaysInNode(t *testing.T) {
 		if i == 2 {
 			gc += 250 * time.Millisecond // a cycle ends, longer than an interval
 		}
-		u := m.sample(now, 0)
+		u := m.sample(now, 0, true)
 		var d time.Duration
 		for _, name := range compNames {
 			d += time.Duration(u.comps[name].UsageCoreNanoSeconds - prev.comps[name].UsageCoreNanoSeconds)
@@ -444,6 +445,43 @@ func TestCPUGCStaysInNode(t *testing.T) {
 	}
 	if want := time.Second - 250*time.Millisecond; comps < want-time.Millisecond || comps > want+time.Millisecond {
 		t.Errorf("control plane got %v of 1s with 250ms GC, want %v", comps, want)
+	}
+}
+
+// TestCPUNoControlPlane: a node without the control plane (a Web Worker)
+// splits nothing, even when its own client moves bytes; with idle
+// containers the node is max(measured, containers).
+func TestCPUNoControlPlane(t *testing.T) {
+	busy, ok := time.Duration(0), true
+	var etcd int64
+	rest := map[string]int64{}
+	fakeBusy(t, &busy, &ok)
+	fakeBytes(t, &etcd, rest)
+	var m nodeSysModel
+	now := time.Now()
+	m.sample(now, 0, false)
+	prev := m.sample(now, 0, false)
+	prevCtrs := m.ctrs
+	for i := range 10 {
+		now = now.Add(time.Second)
+		dBusy := 40 * time.Millisecond
+		busy += dBusy
+		rest[""] += 5000
+		// idle containers: charged, but nothing ran for them
+		idle := time.Duration(i*20) * time.Millisecond
+		nodeCPU.add(idle)
+		idleCPU.add(idle)
+		u := m.sample(now, 3, false)
+		for _, name := range compNames {
+			if c := u.comps[name].UsageCoreNanoSeconds; c != 0 {
+				t.Fatalf("interval %d: %s got %v on a node without the control plane", i, name, time.Duration(c))
+			}
+		}
+		dNode := time.Duration(u.node.UsageCoreNanoSeconds - prev.node.UsageCoreNanoSeconds)
+		if want := max(dBusy, m.ctrs-prevCtrs); dNode != want {
+			t.Errorf("interval %d: node %v, want %v", i, dNode, want)
+		}
+		prev, prevCtrs = u, m.ctrs
 	}
 }
 
@@ -903,5 +941,28 @@ func TestCoreDNSCharge(t *testing.T) {
 	chargeDNS() // none left: nothing happens
 	if a.cpu != 5*dnsQueryCost || b.cpu != 5*dnsQueryCost {
 		t.Errorf("charged after the exit: %v and %v", a.cpu, b.cpu)
+	}
+
+	// One query over TCP is charged once, not by serveDNS and lookupName.
+	c := testAcct("")
+	defer addCoreDNS(c)()
+	s := testProxy(testService("default", "web", "10.96.1.1"))
+	ln, err := net.Listen("tcp", "10.244.250.11:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go s.serveDNS(ctx, ln, &corednsStats{})
+	conn, err := net.Dial("tcp", "10.244.250.11:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if m := dnsQuery(t, conn, 1, "web.default.svc.cluster.local.", dnsmessage.TypeA); len(m.Answers) != 1 {
+		t.Fatalf("web: %+v", m)
+	}
+	if c.cpu != dnsQueryCost {
+		t.Errorf("one query charged %v, want %v", c.cpu, dnsQueryCost)
 	}
 }

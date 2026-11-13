@@ -44,8 +44,9 @@ const (
 	// rateWindow is the window of the CPU rate (usageNanoCores), like the
 	// housekeeping interval of cAdvisor.
 	rateWindow = 10 * time.Second
-	// dnsQueryCost is the CPU of CoreDNS for one name it looks up or one
-	// query it answers.
+	// dnsQueryCost is the CPU of CoreDNS for one name it looks up
+	// (lookupName), once per query: each name of the search path of a pod is
+	// a query to a real CoreDNS. Reverse lookups are not charged.
 	dnsQueryCost = 50 * time.Microsecond
 	// localPathLoopCost is one round of the control loop of the local path
 	// provisioner: the lists of StorageClasses, claims and volumes.
@@ -446,7 +447,7 @@ func addCoreDNS(a *ctrAcct) (remove func()) {
 	}
 }
 
-// chargeDNS charges one lookup or query to a CoreDNS container; nothing when
+// chargeDNS charges one name lookup to a CoreDNS container; nothing when
 // none runs on this node.
 func chargeDNS() {
 	corednsAccts.Lock()

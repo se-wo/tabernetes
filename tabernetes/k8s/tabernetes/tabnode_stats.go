@@ -125,7 +125,7 @@ func (n *tabNode) sampleOnce(now time.Time) {
 			acctOf(s.c).Usage(now, true)
 		}
 	}
-	nodeModel.sample(now, len(ws))
+	nodeModel.sample(now, len(ws), n.static != nil)
 }
 
 // procBusy is the time the wasm instance ran Go code since it started:
@@ -255,8 +255,12 @@ type cpuSampleOf struct {
 
 // sample advances all counters to now under one lock and returns them. The
 // counters never go back. In each interval the node gets at least what the
-// containers and the control plane pods got.
-func (m *nodeSysModel) sample(now time.Time, pods int) cpuSampleOf {
+// containers and the control plane pods got. controlPlane says whether this
+// node runs the control plane; on any other node nothing is split and all
+// of the time stays in the node. A component that exited, or has no mirror
+// pod yet, still gets its share here but is not listed (statsPods): its
+// time is in the node and in no pod, so the pods still add up to no more.
+func (m *nodeSysModel) sample(now time.Time, pods int, controlPlane bool) cpuSampleOf {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.last.IsZero() {
@@ -277,7 +281,10 @@ func (m *nodeSysModel) sample(now time.Time, pods int) cpuSampleOf {
 	for k, v := range rest {
 		dRest[k] = v - m.rest[k]
 	}
-	shares := cpShares(etcd-m.etcd, dRest)
+	shares := map[string]float64{}
+	if controlPlane {
+		shares = cpShares(etcd-m.etcd, dRest)
+	}
 	var work time.Duration // the time to split between the control plane pods
 	var dBusy time.Duration
 	if measured && m.measured {
@@ -515,7 +522,7 @@ func (n *tabNode) collect(now time.Time) nodeStats {
 		st.pods = append(st.pods, p)
 	}
 	st.ctrMem = st.podsSum.WorkingSetBytes
-	cpu := nodeModel.sample(now, len(ws))
+	cpu := nodeModel.sample(now, len(ws), n.static != nil)
 	st.node = cpu.node
 	st.mem = readGoMem()
 	if cps := n.static.statsPods(); len(cps) > 0 {
