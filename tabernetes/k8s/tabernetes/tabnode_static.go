@@ -43,6 +43,7 @@ import (
 	"k8s.io/component-base/version"
 	"k8s.io/cri-streaming/pkg/streaming/portforward"
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
+	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
@@ -575,6 +576,35 @@ func (m *staticPods) podList() []v1.Pod {
 		pod := mirror.DeepCopy()
 		pod.Status = m.desired(sp, mirror)
 		list = append(list, *pod)
+	}
+	return list
+}
+
+// statsPod is a control plane pod in the stats of the node: its mirror pod
+// and its component.
+type statsPod struct {
+	ref stats.PodReference
+	c   *component
+}
+
+// statsPods lists the control plane pods the stats show: those with a
+// mirror pod whose component runs.
+func (m *staticPods) statsPods() []statsPod {
+	if m == nil {
+		return nil
+	}
+	var list []statsPod
+	for _, sp := range m.pods {
+		m.mu.Lock()
+		mirror := sp.mirror
+		m.mu.Unlock()
+		if mirror == nil || !sp.c.exited().IsZero() {
+			continue
+		}
+		list = append(list, statsPod{
+			ref: stats.PodReference{Name: mirror.Name, Namespace: mirror.Namespace, UID: string(mirror.UID)},
+			c:   sp.c,
+		})
 	}
 	return list
 }

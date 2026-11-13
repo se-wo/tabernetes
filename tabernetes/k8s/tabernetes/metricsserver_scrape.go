@@ -8,6 +8,7 @@ package main
 // container. CPU usage is the rate of the cumulative counter between them.
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -318,6 +319,8 @@ type kubeletScraper struct {
 	timeout           time.Duration
 	// logErr reports a failed node; may be nil.
 	logErr func(node string, err error)
+	// charge gets the CPU of parsing the answers; may be nil.
+	charge msCharge
 
 	mu       sync.Mutex
 	lastTick time.Time
@@ -409,7 +412,14 @@ func (s *kubeletScraper) scrapeNode(ctx context.Context, node *corev1.Node) (*sc
 		msg, _ := io.ReadAll(io.LimitReader(body, 256))
 		return nil, fmt.Errorf("request failed - %q, response: %q", resp.Status, strings.TrimSpace(string(msg)))
 	}
-	return parseResourceMetrics(body, time.Now())
+	// Read all first: only the parsing is work, the read waits.
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	defer s.charge.since(now)
+	return parseResourceMetrics(bytes.NewReader(b), now)
 }
 
 // scrapeOnce reads all nodes at the same time and stores what came back.

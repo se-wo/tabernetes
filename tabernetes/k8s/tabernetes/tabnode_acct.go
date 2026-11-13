@@ -44,6 +44,15 @@ const (
 	// rateWindow is the window of the CPU rate (usageNanoCores), like the
 	// housekeeping interval of cAdvisor.
 	rateWindow = 10 * time.Second
+	// dnsQueryCost is the CPU of CoreDNS for one name it looks up or one
+	// query it answers.
+	dnsQueryCost = 50 * time.Microsecond
+	// localPathLoopCost is one round of the control loop of the local path
+	// provisioner: the lists of StorageClasses, claims and volumes.
+	localPathLoopCost = 3 * requestCost
+	// localPathVolumeCost is the CPU to provision or delete a volume: the
+	// helper pod, the events and the PersistentVolume.
+	localPathVolumeCost = 20 * time.Millisecond
 )
 
 // imageProfile is how a built-in image looks to the accounting: the
@@ -53,8 +62,10 @@ type imageProfile struct {
 	idle   float64 // cores
 }
 
-// imageProfiles are by the short name of a built-in image. Numbers from
-// `kubectl top` of the real images on a kind cluster, rounded.
+// imageProfiles are by the name of a built-in image, or its last path
+// element. Numbers from `kubectl top` of the real images on a kind cluster,
+// rounded. The add-ons are idle numbers too; their work is charged where it
+// happens (lookups, scrapes, reloads, control loops).
 var imageProfiles = map[string]imageProfile{
 	"nginx":       {3 << 20, 0.001},
 	"httpd":       {6 << 20, 0.001},
@@ -68,6 +79,11 @@ var imageProfiles = map[string]imageProfile{
 	"podinfo":     {10 << 20, 0.001},
 	"hello-app":   {2 << 20, 0.0005},
 	"kubectl":     {20 << 20, 0},
+
+	"coredns":                        {13 << 20, 0.0015},
+	"metrics-server":                 {18 << 20, 0.002},
+	"rancher/local-path-provisioner": {8 << 20, 0.0005},
+	"ingress-nginx/controller":       {90 << 20, 0.002},
 }
 
 // defaultProfile is a container that runs its command in the shell: a
@@ -167,6 +183,9 @@ func profileOf(img *builtinImage, wasm bool) imageProfile {
 	case img == nil:
 		return defaultProfile
 	}
+	if p, ok := imageProfiles[img.name]; ok {
+		return p
+	}
 	if p, ok := imageProfiles[path.Base(img.name)]; ok {
 		return p
 	}
@@ -252,7 +271,9 @@ func (a *ctrAcct) rollLocked(now time.Time) {
 	}
 }
 
-func (a *ctrAcct) chargeLocked(now time.Time, d time.Duration) {
+// chargeLocked counts d, no more than the quota allows, and returns what it
+// counted.
+func (a *ctrAcct) chargeLocked(now time.Time, d time.Duration) time.Duration {
 	a.rollLocked(now)
 	if a.limit > 0 {
 		quota := time.Duration(a.limit * float64(cfsPeriod))
@@ -261,6 +282,7 @@ func (a *ctrAcct) chargeLocked(now time.Time, d time.Duration) {
 	a.inPeriod += d
 	a.cpu += d
 	nodeCPU.add(d)
+	return d
 }
 
 // AddMemory changes the memory the programs of the container hold by delta
@@ -328,7 +350,7 @@ func (a *ctrAcct) Usage(now time.Time, running bool) ctrUsage {
 		// a little jitter, so that idle containers do not show the same
 		// number for ever
 		jitter := 0.7 + 0.6*math.Abs(math.Sin(float64(now.UnixNano())/1e9))
-		a.chargeLocked(now, time.Duration(float64(now.Sub(a.idleAt))*a.profile.idle*jitter))
+		idleCPU.add(a.chargeLocked(now, time.Duration(float64(now.Sub(a.idleAt))*a.profile.idle*jitter)))
 	}
 	if now.After(a.idleAt) {
 		a.idleAt = now
@@ -372,6 +394,10 @@ func (u ctrUsage) sum(o ctrUsage) ctrUsage {
 // counter never goes back when a container goes.
 var nodeCPU cpuCounter
 
+// idleCPU is the part of nodeCPU that is the idle rate of images: a number
+// of the model only, no code of this node ran for it (tabnode_stats.go).
+var idleCPU cpuCounter
+
 type cpuCounter struct {
 	mu  sync.Mutex
 	sum time.Duration
@@ -387,4 +413,48 @@ func (c *cpuCounter) get() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sum
+}
+
+// corednsAccts are the accounts of the CoreDNS containers that run on this
+// node. The service proxy of the node answers the names for them, and each
+// answer is charged to the next one in turn, like a Service spreads the
+// queries over its endpoints.
+var corednsAccts struct {
+	sync.Mutex
+	list []*ctrAcct
+	next int
+}
+
+// addCoreDNS adds the account of a CoreDNS container that starts; call the
+// returned function when it exits.
+func addCoreDNS(a *ctrAcct) (remove func()) {
+	if a == nil {
+		return func() {}
+	}
+	corednsAccts.Lock()
+	corednsAccts.list = append(corednsAccts.list, a)
+	corednsAccts.Unlock()
+	return func() {
+		corednsAccts.Lock()
+		defer corednsAccts.Unlock()
+		for i, b := range corednsAccts.list {
+			if b == a {
+				corednsAccts.list = append(corednsAccts.list[:i], corednsAccts.list[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// chargeDNS charges one lookup or query to a CoreDNS container; nothing when
+// none runs on this node.
+func chargeDNS() {
+	corednsAccts.Lock()
+	var a *ctrAcct
+	if n := len(corednsAccts.list); n > 0 {
+		corednsAccts.next = (corednsAccts.next + 1) % n
+		a = corednsAccts.list[corednsAccts.next]
+	}
+	corednsAccts.Unlock()
+	a.ChargeCPU(dnsQueryCost)
 }

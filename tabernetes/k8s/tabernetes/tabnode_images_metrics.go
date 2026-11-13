@@ -232,7 +232,8 @@ users:
 		return dialCluster(withProc(c, pe), network, addr)
 	}
 	run = &msRun{
-		log: log, ln: ln, version: version, cert: cert, key: key, kubeconfig: kubeconfig, tokenFile: tokenFile, caFile: pe.root.real(saDir + "/ca.crt"),
+		charge: acctFrom(ctx).ChargeCPU,
+		log:    log, ln: ln, version: version, cert: cert, key: key, kubeconfig: kubeconfig, tokenFile: tokenFile, caFile: pe.root.real(saDir + "/ca.crt"),
 		dial: dial, opts: o, selector: selector,
 	}
 	if err := run.run(ctx); err != nil {
@@ -255,7 +256,8 @@ type msRun struct {
 	dial       func(ctx context.Context, network, addr string) (net.Conn, error)
 	opts       *msOptions
 	selector   labels.Selector
-	started    bool // the apiserver serves on ln
+	charge     msCharge // the CPU of the work of the program
+	started    bool     // the apiserver serves on ln
 }
 
 func (r *msRun) run(ctx context.Context) error {
@@ -292,6 +294,7 @@ func (r *msRun) run(ctx context.Context) error {
 	scraper := &kubeletScraper{
 		nodes: nodeInf.Lister(), selector: r.selector, storage: storage, client: hc, tokenFile: r.tokenFile,
 		preferred: preferred, useNodeStatusPort: r.opts.useNodeStatusPort, port: r.opts.kubeletPort, timeout: timeout,
+		charge: r.charge,
 		logErr: func(node string, err error) {
 			if node == "" {
 				r.log.error("scraper.go:121", "\"Failed to list nodes\" err=%q", err.Error())
@@ -303,7 +306,7 @@ func (r *msRun) run(ctx context.Context) error {
 
 	cfg := &msServerConfig{
 		listener: r.ln, cert: r.cert, key: r.key, version: r.version,
-		nodes: nodeInf.Lister(), pods: podInf.Lister(), usage: storage,
+		nodes: nodeInf.Lister(), pods: podInf.Lister(), usage: storage, charge: r.charge,
 		auth: delegatedAuth(r.kubeconfig, dialWrapper(r.dial, r.caFile)),
 		ready: []healthz.HealthChecker{
 			healthz.NamedCheck("metric-storage-ready", func(*http.Request) error {
