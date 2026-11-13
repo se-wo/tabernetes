@@ -59,7 +59,10 @@ runwasi)
 	EOF
 	PATH="$tmp/bin:$PATH" containerd -c "$tmp/config.toml" >"$tmp/containerd.log" 2>&1 &
 	ctrd=$!
-	for _ in $(seq 20); do [ -S "$sock" ] && break; sleep 0.5; done
+	for _ in $(seq 20); do
+		[ -S "$sock" ] && break
+		sleep 0.5
+	done
 	ctr() { command ctr -a "$sock" "$@" 2> >(grep -v DEPRECATION >&2); }
 	for c in cmd exitcode cmdhttp proxy; do
 		cp "$here/components/target/wasm32-wasip2/release/$c.wasm" "$tmp/img/"
