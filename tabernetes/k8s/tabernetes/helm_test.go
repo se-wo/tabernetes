@@ -295,6 +295,10 @@ func TestHelmBitnamiShow(t *testing.T) {
 				if what == "chart" && !strings.Contains(out, "home: https://bitnami.com") {
 					t.Errorf("Chart.yaml: %s", out)
 				}
+				// helm prints the parsed metadata, not the comment of Chart.yaml.
+				if what == "chart" && (strings.Contains(out, "not maintained by Broadcom") || strings.Contains(out, "Apache-2.0")) {
+					t.Errorf("helm show chart prints the license comment: %s", out)
+				}
 			})
 		}
 	}

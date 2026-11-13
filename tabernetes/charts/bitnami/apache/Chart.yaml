@@ -1,3 +1,6 @@
+# Based on bitnami/charts apache 11.4.0, Apache-2.0,
+# Copyright Broadcom, Inc. All Rights Reserved.
+# Reduced and modified copy, not maintained by Broadcom.
 apiVersion: v2
 name: apache
 version: 11.4.0
