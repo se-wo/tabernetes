@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -263,7 +264,13 @@ func TestLsFlags(t *testing.T) {
 	blue := func(s string) string { return "\x1b[1;34m" + s + "\x1b[m" }
 	for _, tc := range []struct{ name, script, want string }{
 		{"plain", "ls --color=never", "a\nb\nd\nl\n"},
-		{"default colors directories", "ls", "a\nb\n" + blue("d") + "\nl\n"},
+		{"default is plain without a terminal", "ls", "a\nb\nd\nl\n"},
+		{"pipe", "ls | cat", "a\nb\nd\nl\n"},
+		{"command substitution", "x=$(ls); echo \"$x\"", "a\nb\nd\nl\n"},
+		{"redirect", "ls > ../out.txt; cat ../out.txt", "a\nb\nd\nl\n"},
+		{"for loop", "for f in $(ls -d d); do echo $f; done", "d\n"},
+		{"--color=always in a pipe", "ls --color=always -d d | cat", blue("d") + "\n"},
+		{"--color in a pipe", "ls --color -d d | cat", blue("d") + "\n"},
 		{"-1", "ls -1 --color=never", "a\nb\nd\nl\n"},
 		{"-a", "ls -a --color=never", ".\n..\n.h\na\nb\nd\nl\n"},
 		{"-A", "ls -A --color=never", ".h\na\nb\nd\nl\n"},
@@ -279,7 +286,7 @@ func TestLsFlags(t *testing.T) {
 		{"--color bare", "ls --color a", "\x1b[0;0ma\x1b[m\n"},
 		{"--color=always symlink", "ls --color=always l", "\x1b[1;36ml\x1b[m\n"},
 		{"--color=never dir", "ls --color=never -d d", "d\n"},
-		{"--color=auto", "ls --color=auto -d d", blue("d") + "\n"},
+		{"--color=auto in a pipe", "ls --color=auto -d d | cat", "d\n"},
 		{"-S", "cd " + sorted + " && ls -S", "y\nz\nx\n"},
 		{"-t", "cd " + sorted + " && ls -t", "y\nx\nz\n"},
 		{"-rt", "cd " + sorted + " && ls -rt", "z\nx\ny\n"},
@@ -470,5 +477,62 @@ func TestLsNumericIDs(t *testing.T) {
 	// The terminal is root.
 	if got, _ := sh(t, "touch f && ls -n f"); !strings.HasPrefix(got, "-rw-r--r--    1 0        0                0 ") {
 		t.Errorf("ls -n in the terminal: %q", got)
+	}
+}
+
+func TestStdoutIsTTY(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	for _, tc := range []struct {
+		name string
+		w    io.Writer
+		want bool
+	}{
+		{"buffer", &buf, false},
+		{"pipe", io.Discard, false},
+		{"screen", holdWriter{tty}, true},
+		{"screen of kubectl", ttyOut{}, true},
+		{"screen in a context writer", ctxWriter{ctx, holdWriter{tty}}, true},
+		{"pipe in a context writer", ctxWriter{ctx, &buf}, false},
+	} {
+		if got := stdoutIsTTY(ctx, tc.w); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// In a container the stdout of ls is a terminal only with tty: true.
+func TestLsColorInContainer(t *testing.T) {
+	blue := "\x1b[1;34m/tmp\x1b[m"
+	pe, _ := secContainer(t, "busybox", nil, nil)
+	for script, want := range map[string]bool{
+		"ls -d /tmp":                      false,
+		"ls -d /tmp | cat":                false,
+		"ls --color=always -d /tmp | cat": true,
+		"ls --color=always -d /tmp":       true,
+	} {
+		if got, _ := runIn(t, pe, script); strings.Contains(got, blue) != want {
+			t.Errorf("no tty, %s: %q", script, got)
+		}
+	}
+	in, keys := io.Pipe()
+	defer keys.Close()
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pe.tty = newPty(ctx, in, &out, cancel)
+	for script, want := range map[string]bool{
+		"ls -d /tmp":                      true,
+		"ls --color=auto -d /tmp":         true,
+		"ls --color=never -d /tmp":        false,
+		"ls -d /tmp | cat":                false,
+		"x=$(ls -d /tmp); echo $x":        false,
+		"ls --color=always -d /tmp | cat": true,
+	} {
+		before := len(out.String())
+		runArgv(ctx, pe, []string{"sh", "-c", script}, []string{"PATH=/bin"}, "/", pe.tty, pe.tty, pe.tty)
+		if got := out.String()[before:]; strings.Contains(got, blue) != want || !strings.Contains(got, "/tmp") {
+			t.Errorf("tty, %s: %q", script, got)
+		}
 	}
 }

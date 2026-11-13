@@ -546,7 +546,7 @@ type lsEntry struct {
 type lsCfg struct {
 	o     map[string]string
 	long  bool   // -l or -n
-	color string // "", "always" or "never"
+	color string // "always" or "never"
 }
 
 // lsHuman is a size of ls -h like BusyBox: bytes below 1024, then one
@@ -610,23 +610,41 @@ func lsIDs(ctx context.Context, fi fs.FileInfo) string {
 	return fmt.Sprintf("%d %d", uid, gid)
 }
 
+// stdoutIsTTY tells whether w, the stdout of a command, is a terminal, as
+// isatty(1) would: the screen of the tab (shell.go gives commands a writer
+// bound to their context around it) or, in a container with a tty, the tty of
+// its process. A pipe, a file or a $(...) is not.
+func stdoutIsTTY(ctx context.Context, w io.Writer) bool {
+	for range 8 {
+		cw, ok := w.(ctxWriter)
+		if !ok {
+			break
+		}
+		w = cw.w
+	}
+	switch w.(type) {
+	case holdWriter, ttyOut, *terminal:
+		return true
+	}
+	pe := procOf(ctx)
+	return pe != nil && pe.tty != nil && w == io.Writer(pe.tty)
+}
+
 // lsColor wraps a name in the escape codes of BusyBox (the colors of its
-// built-in table). With "always" every kind of file gets its own color; by
-// default (no --color, or "auto") only directories are blue, as before;
-// "never" prints plain names.
+// built-in table). The mode is "always" (--color=always or a bare --color:
+// every kind of file gets its color, in a pipe too), "never" (plain names) or
+// "auto" (no --color, or --color=auto, like BusyBox: the same colors, but
+// only when stdout is a terminal; ls decides that and passes "never"
+// otherwise).
 func lsColor(mode, name string, m fs.FileMode, broken bool) string {
 	code := ""
 	switch {
 	case mode == "never":
 		return name
-	case broken && mode != "always":
-		return name
 	case broken:
 		code = "1;31"
 	case m.IsDir():
 		code = "1;34"
-	case mode != "always":
-		return name
 	case m&fs.ModeSymlink != 0:
 		code = "1;36"
 	case m&fs.ModeNamedPipe != 0:
@@ -740,8 +758,18 @@ func ls(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.E
 		case "", "always":
 			c.color = "always"
 		case "auto":
+			c.color = "auto"
 		default:
 			c.color = "never"
+		}
+	}
+	if c.color == "" {
+		c.color = "auto"
+	}
+	if c.color == "auto" {
+		c.color = "never"
+		if stdoutIsTTY(ctx, hc.Stdout) {
+			c.color = "always"
 		}
 	}
 	if len(args) == 0 {
