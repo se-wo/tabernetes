@@ -93,7 +93,7 @@ These items are not in the scope of this document:
 | proxy component | A component in the proxy world: it has the export `wasi:http/incoming-handler`. |
 | instance | One instantiation of the core modules of a component, with its own memory. |
 | client request | An HTTP request that a component sends with `wasi:http/outgoing-handler`. |
-| HTTP path | The code in the pod worker that moves requests, responses and client requests between the component and the Go side. Phase 0 selects it (section 9.1, item 12). |
+| HTTP path | The code in the pod worker that moves requests, responses and client requests between the component and the Go side. It is a `wasi:http` of Tabernetes (decision 4). |
 | mirror | The OCI mirror of WebAssembly images that the page reads (`wasm-images/`). |
 | in-process network | The network of Go for `js/wasm` (`net_fake.go`). `net.Listen` and `net.Dial` connect goroutines of the same Go thread. |
 | UDP table | A new table of UDP sockets in each tab node. It is separate from the in-process network. |
@@ -433,16 +433,15 @@ The author and three reviewers examined these facts in the sources on
    - a complete `sockets` object, with `ip-name-lookup`;
    - `environment`, `arguments`, `stdin`, `stdout` and `stderr`;
    - a `browserFilesystem` adapter over the copy of the files of section
-     4.1 (section 8.10).
+     4.1 (section 8.10);
+   - a complete `http` object: the `wasi:http` of Tabernetes (decision 4);
+   - `clocks` with timers for each instance (section 8.6).
 
    The shim gives the other interfaces.
 4. A browser `Request` or `Response` object must not hold the data of a
    request, a response or a client request. Fact 19 shows the data that it
-   removes. Phase 0 (item 12) selects the HTTP path from two candidates:
-   - objects with the same functions as `Request` and `Response`, which the
-     shim reads (fact 9), without the rules of the browser;
-   - a `wasi:http` of Tabernetes, through the option `http` of `WASIShim`.
-
+   removes. The HTTP path is a `wasi:http` of Tabernetes, through the option
+   `http` of `WASIShim`. Phase 0 (item 12) selected it (section 9.2).
    Request bodies and response bodies are complete blocks, with a maximum
    of 16 MiB.
 5. The Go side has every socket. TCP sockets use the in-process network
@@ -535,20 +534,21 @@ not a requirement.
 | PX17 | If the response has no `Content-Type`, the tab node must not add one. | `net/http` of Go adds one if the code does not prevent it. |
 | PX18 | A request body or a response body of more than 16 MiB must fail. | Decision 4. |
 | PX19 | For a request body of more than 16 MiB, the client must get the status code 413. | |
-| PX20 | For a response body of more than 16 MiB, the client must get the status code 500. | The shim keeps the complete body without a limit (fact 9). The HTTP path must examine the size. Phase 0, item 12. |
+| PX20 | For a response body of more than 16 MiB, the client must get the status code 500. | The `wasi:http` of Tabernetes fails the write at the limit (section 9.2, item 12). |
 | PX21 | If an instance traps, the client must get the same result as on runwasi. | Section 9.2: the client gets no response, and the connection closes. |
 | PX22 | After an instance traps, the container must continue to run. | Fact 4. |
 | PX23 | The tab node must not set a timeout for a request. | runwasi has no timeout. |
-| PX24 | If the client closes its connection, the pod worker must discard the instance of this request. It must also cancel the timers, the client requests and the pollables of this instance. | The instance does not continue. Section 11. Phase 0, item 15. |
+| PX24 | If the client closes its connection, the pod worker must discard the instance of this request. It must also cancel the timers, the client requests and the pollables of this instance. | Section 8.6 gives the method. Section 9.2, item 15. |
 | PX25 | The pod worker must discard an instance after `handle` returns and after the response body is complete. | |
 | PX26 | If `handle` returns and sets no response, the client, the container state and the restart count must be the same as on runwasi. | Section 9.2: the client gets no response, and the container exits with status 139. |
-| PX27 | If the instance sets an error code as its response, the client must get the same result as on runwasi. | Section 9.2: the client gets no response. The shim sends 500 (fact 9), so the HTTP path must not use this response of the shim. |
+| PX27 | If the instance sets an error code as its response, the client must get the same result as on runwasi. | Section 9.2: the client gets no response. |
 | PX28 | The component must get all headers of the request, except the 9 headers of fact 20. | `Cookie`, `User-Agent` and `Origin` are examples. |
 | PX29 | The component must get each method and each request body. | Examples: a method that is not standard, `TRACE`, a GET with a body (fact 19). |
 | PX30 | The tab node must send each status code that runwasi sends. | Examples: 204, 304, a status code outside 200 to 599. |
 | PX31 | For the same response, the client must get the same header names as from runwasi. | Examples: `Date`, `Content-Length` or `Transfer-Encoding: chunked`, a client with HTTP/1.0. |
 | PX32 | With port 0 in the address, the tab node must listen on an ephemeral port from 32768 to 60999. | |
 | PX33 | With an IP that the pod cannot bind, the container must get the same result as on runwasi. | Phase 0, item 7. |
+| PX34 | If the browser cannot make the memory of a new instance, the request must wait in the queue of PX10. It must not fail. | All pod workers of a tab share a limit of approximately 125 Wasm memories (section 9.2, item 15). |
 
 ### 7.3 Client requests
 
@@ -562,7 +562,7 @@ not a requirement.
 | CR6 | A command component with an import of `wasi:http` must get the status that runwasi gives. | Fact 5. Phase 0, item 7. |
 | CR7 | A client request to an IP outside the cluster must fail with `connection-refused`. | wasmtime gives this code for a connect error that is not a timeout (fact 20). |
 | CR8 | A client request that NetworkPolicy denies must fail after the same time and with the same error code as on a Docker node. | Phase 0, item 17. |
-| CR9 | The pod worker must give the error code of the Go side to the component without a change. | The shim changes each failure of `fetch` (fact 9). Section 8.6. |
+| CR9 | The pod worker must give the error code of the Go side to the component without a change. | The shim changes each failure of `fetch` (fact 9). The `wasi:http` of Tabernetes does not use `fetch`. |
 | CR10 | If the component discards a client request, the pod worker must send `fetch-cancel`. The Go side must then close the connection. | |
 | CR11 | A client request must fail with `connection-timeout` if the connection does not occur in 600 seconds. | The default of wasmtime (fact 20). |
 
@@ -891,7 +891,8 @@ The Go side does these steps for a proxy component:
 The pod worker does these steps for each `request` message:
 
 1. Instantiate the core modules again, with a new context (PX11 to PX15).
-2. Give the request to the HTTP path of phase 0, item 12.
+2. Make an `incoming-request` of the `wasi:http` of Tabernetes from the
+   message.
 3. Call `handle` of the component.
 4. Send the `response` message to the Go side.
 5. Discard the instance (PX25).
@@ -900,15 +901,21 @@ JSPI can suspend many instances in one pod worker. One suspended instance
 does not stop the others. The compiled core modules are the same for all
 instances. Only the memory of an instance is new.
 
-For a `cancel` message, the pod worker does not continue the instance. It
-cancels the timers, the client requests and the pollables of the instance.
-It then removes all references to the instance (PX24).
+For a `cancel` message, the pod worker does these steps (PX24):
+
+1. Cancel the timers and the client requests of the instance.
+2. Continue each suspended call of the instance with an exception. The stack
+   of the instance then unwinds.
+3. Remove all references to the instance.
+
+Step 2 is necessary. Chrome does not free a suspended instance that does not
+continue (section 9.2, item 15). So each pollable of an instance must be
+able to fail its wait. The pod worker gives `WASIShim` its own clocks for
+this reason.
 
 For client requests, the HTTP path sends a `fetch` message. The Go side
 does the client request with the cluster client and sends `fetched`. The
-error code in `fetched` goes to the component without a change (CR9). With
-the shim, the HTTP path wraps `outgoingHandler.handle` or
-`FutureIncomingResponse.prototype.get` to keep this code.
+error code in `fetched` goes to the component without a change (CR9).
 
 ### 8.7 UDP table
 
@@ -1013,7 +1020,7 @@ connection and then its end.
 | `web/src/wasi.js` | Start components. Keep the results of the transpile worker in the cache. |
 | `web/src/wasi.worker.js` | Run components in JSPI mode with `WASIShim`. Instantiate proxy components for each request. Send the messages of section 8.3. |
 | `web/src/sockets.js` (new) | The `sockets` object for `WASIShim`, with `ip-name-lookup`. The count of CO17. |
-| `web/src/http.js` (new) | The HTTP path of phase 0, item 12, with `fetch` and `fetch-cancel`. |
+| `web/src/http.js` (new) | The `wasi:http` of Tabernetes (decision 4), with `fetch` and `fetch-cancel`. The base is `docs/wasi-sockets-poc/browser/src/http-own.js`. |
 | `web/src/files.js` (new) | The `browserFilesystem` adapter of section 8.10. |
 | `web/src/channel.js`, `web/src/nodes.js` | The `udp` channel to node workers, with credits. |
 | `web/package.json` | Add `@bytecodealliance/jco` and `@bytecodealliance/preview2-shim` with a fixed version. |
@@ -1046,7 +1053,7 @@ gives the tests.
 | --- | --- |
 | 0 | Proof of concept in `docs/wasi-sockets-poc/`. Section 9.1 gives its items. |
 | 1 | Components without network: CO1 to CO19, FS1 to FS4, MS1, MS6, AC2. |
-| 2 | Proxy components and client requests: PX1 to PX33, CR1 to CR11, MS5, AC1. |
+| 2 | Proxy components and client requests: PX1 to PX34, CR1 to CR11, MS5, AC1. |
 | 3 | TCP and name lookup: TC1 to TC22, NL1 to NL3, MS2 to MS4. |
 | 4 | UDP on a tab node: UD1 to UD22, FL1 to FL13, AC3. |
 | 5 | UDP between nodes: ND1 to ND20. All deferred tests. |
@@ -1117,9 +1124,10 @@ the decision and its requirements.
 
 ### 9.2 Results of phase 0
 
-`docs/wasi-sockets-poc/run.sh` gives these results. The command `run.sh
-browser` runs the browser items in headless Chrome 153. The command `run.sh
-runwasi` runs the test components of `docs/wasi-sockets-poc/components/`
+`docs/wasi-sockets-poc/run.sh` gives these results. The commands `browser`,
+`proxy`, `opaque` and `webrtc` of `run.sh` run in headless Chrome 153 on
+Linux x86-64. The command `udptable` runs Go for `js/wasm` in Node.js. The
+command `runwasi` runs the test components of `docs/wasi-sockets-poc/components/`
 with the published `containerd-shim-wasmtime` v0.6.1 and containerd 2.4.2.
 It runs without kubelet. So it records the exit status of the task, not the
 pod status and not the restart count. The Docker check records these
@@ -1147,6 +1155,19 @@ pod status and not the restart count. The Docker check records these
 | 4 | `site/page.html` and `site/terminal.html` have no Content Security Policy. The service worker `web/proxy-sw.js` has only the scope `tabernetes-proxy/`. The headers of the published site: not examined. | |
 | 11 | esbuild bundles the transpile worker as ESM only with `--external:node:*`. jco-transpile has dynamic imports of `node:fs/promises` for Node.js. The bundle has 652,619 bytes. It loads the four core modules from `../vendor/` with `Content-Type: application/wasm`. | Section 8.2 gets the flag. |
 | 13 | In the shim, `exit(3)` of Rust gives 1. A component that calls `exit-with-code(3)` gives 3. | CO18: the pod worker must not give `exit-with-code`. |
+| 12 | Two prototypes in `docs/wasi-sockets-poc/browser/src/`: `http-own.js` (a `wasi:http` of Tabernetes) and `http-shim.js` (objects for the shim). The two give the same results for PX16, PX21, PX26 to PX30 and CR9. | |
+| 12 | The prototype for the shim must replace the globals `Headers` and `Response`. It must also wrap `method`, `ResponseOutparam.set` and `FutureIncomingResponse.prototype.get`, and put the error code into the text of an `Error`. | Decision 4: the `wasi:http` of Tabernetes. |
+| 12 | A response body of 17 MiB: the `wasi:http` of Tabernetes fails the write after 16 MiB, in 98 ms. The shim keeps all 17 MiB, in 833 ms. | PX20. |
+| 12 | 1,000 requests in a sequence take 1.77 ms (own) and 1.79 ms (shim) each. After garbage collection, the browser freed all 1,014 instances of each prototype. | CO7. |
+| 12 | Minified size: 5,114 bytes (own) and 12,733 bytes (shim with the wrappers). | |
+| 5 | 16 requests that wait from 800 ms down to 50 ms end in the opposite sequence. 20 requests that wait 1 second end after 1,040 ms. | PX8. |
+| 6 | Not examined with 10,000 requests. In item 12, the browser freed 1,000 instances. | |
+| 15 | One renderer process of Chrome 153 has approximately 125 Wasm memories. The next instantiation fails with "Out of memory: Cannot allocate Wasm memory for new instance". Two pod workers share this limit: 100 and 25. | PX34, a new risk in section 12, open question 2. |
+| 15 | A cancel that only clears the timers frees none of 125 suspended instances. After it, each new instantiation fails. | Section 8.6. |
+| 15 | A cancel that continues the suspended call with an exception frees all 100 instances, in each of three rounds. | Section 8.6, step 2. |
+| 9 | `docs/wasi-sockets-poc/udptable/` binds TCP in the in-process network and UDP in a UDP table on `10.244.0.2:53`. The in-process network alone gives "Address already in use". Ephemeral ports start at 32768 for each IP. A queue of 256 KiB keeps 256 datagrams of 1,024 bytes. | UD1, UD3 to UD6. |
+| 10 | Chrome 153 and pion v4.2.26 each open a channel `udp`. The other side sees `ordered: false` and `maxRetransmits: 0` for each channel. Messages of 65,521 bytes and of 65,537 bytes arrive in the two directions. Chrome gives `sctp.maxMessageSize` 262,144. | ND3 and ND5 stay. |
+| 16 | In Chrome 153, a module worker from a `data:` URL has the origin `null`. A `WebAssembly.Module` from the page arrives through `postMessage` and runs. IndexedDB and `caches` throw `SecurityError`. A `fetch` to the origin of the page fails. Firefox and Safari: not examined. | Decision 13 stays. |
 
 ## 10 Tests
 
@@ -1226,6 +1247,7 @@ The column "Nodes" gives the nodes for the test:
 | PX29 | Requests with the method `PURGE`, with `TRACE` and a GET with a body arrive at the component without a change. | tab, Docker |
 | PX30 | Responses with the status codes 204, 304 and 599 arrive with the same status code as on a Docker node. | tab, Docker |
 | PX31 | A test compares the header names of the same response from a tab node and from a Docker node, for HTTP/1.1 and HTTP/1.0. Only the values of `Date` are different. | tab, Docker |
+| PX34 | A unit test of the pod worker lets instantiation fail with "Out of memory". The request waits. After another instance ends, it gets its response. | tab |
 | CR1 | The component gets a response from another Service by its name. | tab, worker, Docker |
 | CR1, CR8 | A NetworkPolicy that denies the client request gives the error code and the time of phase 0. | tab, Docker (deferred) |
 | CR2, CR7 | A client request to `example.com` fails with `DNS-error`. A client request to `192.0.2.1` fails with `connection-refused`. | tab |
@@ -1311,9 +1333,6 @@ These differences stay after this design. `README.md` must show them.
 | ICMP | Only on one tab node, each echo request examined | Between all nodes, only the first echo request examined |
 | NodePort and hostPort for UDP with an endpoint on `tab` | Out of scope | The host network namespace does not reach tab pods (issue #61) |
 
-If phase 0 (item 12) selects an HTTP path with differences, phase 0 adds
-them to this table.
-
 ## 12 Risks
 
 | Risk | Effect | Action |
@@ -1327,6 +1346,7 @@ them to this table.
 | The `poll` of the shim continues a ready pollable after `setTimeout(0)` (fact 9, fact 21). | A component that polls ready sockets does approximately 250 rounds each second. | Phase 1 measures it with the CO17 test. A later change can give the pod worker its own `poll`. |
 | Go cannot compile components (fact 7). | The current test images in Go cannot use sockets. | The new test images are in Rust. `mise.toml` and CI get Rust. |
 | Each request makes a new instance with a new memory. | The browser frees the memory only at garbage collection. Many requests can use too much memory. | PX9, CO7. Phase 0, items 6 and 15. |
+| Chrome 153 gives one renderer process approximately 125 Wasm memories (section 9.2, item 15). Each instance, each module and the Go binary of each tab node uses one. | New instances and new pods fail when the tab has no Wasm memory left. | PX34. Open question 2. A suspended instance must continue with an exception before the pod worker discards it (section 8.6). |
 | The Go thread moves the data of all sockets of pods. | Much network traffic of pods makes the control plane slower. This is the same reason as for the rejection of a TCP/IP stack in section 13, but only for traffic of pods. | The credits of section 8.4 set a limit to the memory. AC1 shows the time in the container. A later design can move bytes between workers with shared memory. |
 | The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | The item is not complete in `docs/networking-policy.md`. Phase 5 cannot end before it (decision 16). |
 | A Docker node without a proxy has no internet (section 4.4). | The Docker check cannot pull the Rust test images. | Phase 0, item 18. |
@@ -1350,7 +1370,8 @@ them to this table.
 | A transpiler on the Go thread. | Rejected | It stops the tab node for the complete time of the transpiler run. |
 | One transpile worker in the page for all tab nodes. | Rejected | Node workers then must have a new channel to the page. The browser HTTP cache already prevents a second download. |
 | Browser `Request` and `Response` objects for the shim. | Rejected | They remove headers, methods and status codes (fact 19). |
-| A `wasi:http` of Tabernetes, with bodies in parts. | Phase 0 | Phase 0, item 12 compares it with objects for the shim. Bodies in parts are a later design. |
+| Objects for the HTTP of the shim, without the rules of the browser. | Rejected | The pod worker must replace the globals `Headers` and `Response` and wrap four functions of the shim. The shim keeps a response body without a limit (section 9.2, item 12). |
+| A `wasi:http` of Tabernetes with bodies in parts. | Later | Bodies in parts are a later design. |
 | A parser of components before `generate`. | Rejected | It is 2.4 MB more (fact 10). CO15 examines the result of `generate`. |
 | An examination of `127.0.0.1` sockets at `Accept`. | Rejected | The client sees a connection and then its end, not `connection-refused` (section 8.11). |
 | Components that the mirror transpiles before publication. | Later | Pods can use images from other registries, so the transpile worker is necessary in all conditions. |
@@ -1361,8 +1382,9 @@ them to this table.
    10 MB?
    Phase 0 measures the time. The target is less than 10 seconds in Chrome
    on a laptop.
-2. Is 16 the correct maximum of instances for PX9? Phase 0 (items 6 and 15)
-   and phase 2 measure the memory for each instance.
+2. Is 16 the correct maximum of instances for PX9? All pod workers of a tab
+   share approximately 125 Wasm memories (section 9.2, item 15). Phase 2
+   must decide a limit for the tab and how the containers share it.
 3. After phase 5, Docker pods can get UDP answers from CoreDNS on a tab
    node. Can CoreDNS then stay on the tab node? A later design must decide.
 

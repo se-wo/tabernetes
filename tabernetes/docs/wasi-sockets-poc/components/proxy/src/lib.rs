@@ -6,6 +6,7 @@
 //!   /status/N    an empty response with the status code N
 //!   /cookie      a response with two Set-Cookie headers
 //!   /wait/MS     a response after MS milliseconds
+//!   /big/N       a response body of N bytes
 //!   /trap        a trap
 //!   /noresponse  handle returns and sets no response
 //!   /error       response-outparam.set with an error code
@@ -173,6 +174,10 @@ impl Guest for Component {
                 let ms = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
                 sleep_ms(ms);
                 respond(out, 200, &[], &format!("waited {ms}\n"));
+            }
+            "big" => {
+                let n: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                respond(out, 200, &[], &"x".repeat(n));
             }
             "trap" => unreachable!("trap on request"),
             "noresponse" => {}
