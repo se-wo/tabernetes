@@ -182,6 +182,22 @@ func proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 }
 `)
 
+	// Every client-go transport passes WrapRoundTripper, which tabernetes sets
+	// to count the bytes of each control plane component, watch streams
+	// included (tabernetes/controlplane.go).
+	edit("staging/src/k8s.io/client-go/transport/round_trippers.go",
+		"\trt = DebugWrappers(rt)\n",
+		"\trt = WrapRoundTripper(DebugWrappers(rt)) // tabernetes\n",
+	)
+	write("staging/src/k8s.io/client-go/transport/tabernetes.go", `package transport
+
+import "net/http"
+
+// WrapRoundTripper wraps the round tripper of every client. Added by
+// tabernetes (k8s/patch.go).
+var WrapRoundTripper = func(rt http.RoundTripper) http.RoundTripper { return rt }
+`)
+
 	// The shell of the terminal. Its only other dependencies, golang.org/x/sys
 	// and golang.org/x/term, are vendored by Kubernetes already.
 	vendorModule("mvdan.cc/sh/v3", os.Getenv("MVDAN_SH_VERSION"),

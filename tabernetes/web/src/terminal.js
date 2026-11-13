@@ -4,7 +4,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { installFS } from "./fs.js";
-import { patchWalltime } from "./clock.js";
+import { countBusy, patchWalltime } from "./clock.js";
 
 const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
 
@@ -100,6 +100,7 @@ export async function startTerminal(el, opts) {
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
   patchWalltime(go);
+  countBusy(go);
   const instance = await instantiate(unpack(opts.wasmURL, counted, total, opts.workerURL), go.importObject);
   term.writeln("");
   globalThis.tabernetesStatus(cached ? "compiled WebAssembly from the browser cache" : "downloaded and compiled WebAssembly");

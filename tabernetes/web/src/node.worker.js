@@ -5,7 +5,7 @@
 // come from it.
 import "./wasm_exec.js";
 import { installFS } from "./fs.js";
-import { patchWalltime } from "./clock.js";
+import { countBusy, patchWalltime } from "./clock.js";
 import { portChannel, openChannel } from "./channel.js";
 import { installWasi } from "./wasi.js";
 import { installGPU } from "./gpu.js";
@@ -42,6 +42,7 @@ async function start({ module, config, wasi }) {
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
   patchWalltime(go);
+  countBusy(go);
   const instance = await WebAssembly.instantiate(module, go.importObject);
   go.run(instance).then(
     () => self.postMessage({ type: "exit" }),

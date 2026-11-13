@@ -28,6 +28,7 @@ var (
 	compLogsMu sync.Mutex
 	compLogs   = map[string]*logBuf{}         // by component name
 	labelLogs  = map[unsafe.Pointer]*logBuf{} // by label set
+	labelNames = map[unsafe.Pointer]string{}  // component by label set
 )
 
 // componentLogs is the log of a component, the log of its container in
@@ -51,7 +52,20 @@ func labelGoroutine(name string) {
 	ptr := runtimeGetProfLabel()
 	compLogsMu.Lock()
 	labelLogs[ptr] = logs
+	labelNames[ptr] = name
 	compLogsMu.Unlock()
+}
+
+// goroutineComponent is the component the current goroutine belongs to, ""
+// for none.
+func goroutineComponent() string {
+	ptr := runtimeGetProfLabel()
+	if ptr == nil {
+		return ""
+	}
+	compLogsMu.Lock()
+	defer compLogsMu.Unlock()
+	return labelNames[ptr]
 }
 
 // goroutineLogs is the log of the component the current goroutine belongs

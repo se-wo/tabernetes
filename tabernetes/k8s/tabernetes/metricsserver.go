@@ -106,12 +106,25 @@ func listSelectors(o *metainternalversion.ListOptions) (labels.Selector, fields.
 	return ls, fs
 }
 
+// msCharge charges CPU time to the container of the metrics-server; nil
+// charges nothing.
+type msCharge func(time.Duration)
+
+// since charges the time since start: the handlers and the parsing of a
+// scrape do not wait on anything, so the time they take is their CPU.
+func (c msCharge) since(start time.Time) {
+	if c != nil {
+		c(time.Since(start))
+	}
+}
+
 // --- nodes ---
 
 type nodeMetricsREST struct {
-	gr    schema.GroupResource
-	usage msUsageProvider
-	nodes corev1listers.NodeLister
+	gr     schema.GroupResource
+	usage  msUsageProvider
+	nodes  corev1listers.NodeLister
+	charge msCharge
 }
 
 var (
@@ -139,6 +152,7 @@ func (m *nodeMetricsREST) GetSingularName() string { return "nodemetrics" }
 func (m *nodeMetricsREST) NamespaceScoped() bool   { return false }
 
 func (m *nodeMetricsREST) List(ctx context.Context, o *metainternalversion.ListOptions) (runtime.Object, error) {
+	defer m.charge.since(time.Now())
 	ls, fs := listSelectors(o)
 	nodes, err := m.nodes.List(ls)
 	if err != nil {
@@ -158,6 +172,7 @@ func (m *nodeMetricsREST) List(ctx context.Context, o *metainternalversion.ListO
 }
 
 func (m *nodeMetricsREST) Get(ctx context.Context, name string, _ *metav1.GetOptions) (runtime.Object, error) {
+	defer m.charge.since(time.Now())
 	node, err := m.nodes.Get(name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -193,6 +208,7 @@ func memCell(q resource.Quantity) string { return fmt.Sprintf("%dMi", q.Value()/
 func windowCell(d metav1.Duration) string { return d.Duration.Round(time.Millisecond).String() }
 
 func (m *nodeMetricsREST) ConvertToTable(ctx context.Context, obj runtime.Object, _ runtime.Object) (*metav1.Table, error) {
+	defer m.charge.since(time.Now())
 	var items []metrics.NodeMetrics
 	t := &metav1.Table{ColumnDefinitions: nodeColumns}
 	switch o := obj.(type) {
@@ -216,9 +232,10 @@ func (m *nodeMetricsREST) ConvertToTable(ctx context.Context, obj runtime.Object
 // --- pods ---
 
 type podMetricsREST struct {
-	gr    schema.GroupResource
-	usage msUsageProvider
-	pods  corev1listers.PodLister
+	gr     schema.GroupResource
+	usage  msUsageProvider
+	pods   corev1listers.PodLister
+	charge msCharge
 }
 
 func (m *podMetricsREST) New() runtime.Object     { return &metrics.PodMetrics{} }
@@ -229,6 +246,7 @@ func (m *podMetricsREST) GetSingularName() string { return "podmetrics" }
 func (m *podMetricsREST) NamespaceScoped() bool   { return true }
 
 func (m *podMetricsREST) List(ctx context.Context, o *metainternalversion.ListOptions) (runtime.Object, error) {
+	defer m.charge.since(time.Now())
 	ls, fs := listSelectors(o)
 	ns := genericapirequest.NamespaceValue(ctx)
 	var (
@@ -262,6 +280,7 @@ func (m *podMetricsREST) List(ctx context.Context, o *metainternalversion.ListOp
 }
 
 func (m *podMetricsREST) Get(ctx context.Context, name string, _ *metav1.GetOptions) (runtime.Object, error) {
+	defer m.charge.since(time.Now())
 	ns := genericapirequest.NamespaceValue(ctx)
 	pod, err := m.pods.Pods(ns).Get(name)
 	if err != nil {
@@ -279,6 +298,7 @@ func (m *podMetricsREST) Get(ctx context.Context, name string, _ *metav1.GetOpti
 }
 
 func (m *podMetricsREST) ConvertToTable(ctx context.Context, obj runtime.Object, _ runtime.Object) (*metav1.Table, error) {
+	defer m.charge.since(time.Now())
 	var items []metrics.PodMetrics
 	t := &metav1.Table{ColumnDefinitions: podColumns}
 	switch o := obj.(type) {
@@ -314,6 +334,7 @@ type msServerConfig struct {
 	nodes     corev1listers.NodeLister
 	pods      corev1listers.PodLister
 	usage     msUsageProvider
+	charge    msCharge // the CPU of the handlers
 	version   string
 	// auth sets the authenticator and the authorizer.
 	auth func(c *genericapiserver.Config) error
@@ -379,8 +400,8 @@ func newMetricsAPIServer(cfg *msServerConfig) (*genericapiserver.GenericAPIServe
 	}
 	info := genericapiserver.NewDefaultAPIGroupInfo(metrics.GroupName, scheme, metav1.ParameterCodec, codecs)
 	info.VersionedResourcesStorageMap[v1beta1.SchemeGroupVersion.Version] = map[string]rest.Storage{
-		"nodes": &nodeMetricsREST{gr: metrics.Resource("nodemetrics"), usage: cfg.usage, nodes: cfg.nodes},
-		"pods":  &podMetricsREST{gr: metrics.Resource("podmetrics"), usage: cfg.usage, pods: cfg.pods},
+		"nodes": &nodeMetricsREST{gr: metrics.Resource("nodemetrics"), usage: cfg.usage, nodes: cfg.nodes, charge: cfg.charge},
+		"pods":  &podMetricsREST{gr: metrics.Resource("podmetrics"), usage: cfg.usage, pods: cfg.pods, charge: cfg.charge},
 	}
 	if err := srv.InstallAPIGroup(&info); err != nil {
 		return nil, err

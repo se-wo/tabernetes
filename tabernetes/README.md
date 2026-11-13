@@ -253,9 +253,41 @@ a metrics-server can scrape the node. The numbers are a model
 (`tabnode_acct.go`): CPU comes from the commands of the shell and the work of
 the built-in programs, `limits.cpu` works like the CFS quota, and the memory
 of a container is the size of its image plus what its programs allocate. The
-memory of the node comes from the Go runtime. The endpoints take a client
-certificate of the cluster CA or a bearer token that the apiserver allows to
-get `nodes/stats` or `nodes/metrics`.
+endpoints take a client certificate of the cluster CA or a bearer token that
+the apiserver allows to get `nodes/stats` or `nodes/metrics`.
+
+Some numbers are measured, the others are models
+(`tabnode_stats.go`, `tabnode_acct.go`):
+
+| Number | How | Anchored to | How far off |
+| --- | --- | --- | --- |
+| Node CPU | measured: the time the page runs the WebAssembly instance (`countBusy`, `web/src/clock.js`); more when the models of the pods charge more | the clock of the page | exact for the instance |
+| Node memory | measured: what the Go runtime holds, plus the models of the containers | `runtime.MemStats` | the containers' part is a model |
+| CPU of the four control plane pods | modelled: the node CPU, less the work charged to containers and less the garbage collector, split by the bytes each component moved (etcd: its listener; apiserver: etcd bytes and all client bodies; the others: the bodies of their own clients, watch streams included) | measured node CPU, byte counters, `/cpu/classes/gc` | see below |
+| Memory of `etcd-tab` | measured: the bytes of its store (kept revisions and watch log) plus its share of the goroutine stacks | the store | close; gRPC buffers not counted |
+| Memory of the other three control plane pods | modelled: live heap and stacks without the store, split by the goroutines of each component (counted 45 s after the node starts, then every 5 minutes; before that in four even parts, one for the node) | `/gc/heap/live:bytes`, the stacks | not checked |
+| Add-ons | memory and idle CPU modelled (CoreDNS 13, metrics-server 18, local-path-provisioner 8, ingress-nginx 90 MiB); scrape parsing, metrics API and ingress reloads measured; DNS lookups and provisioner loops fixed costs | `kubectl top` of the real images: CoreDNS (11-12 MiB) and local-path-provisioner (7 MiB) compared on a Docker node, the other two not | rough |
+| Ordinary containers | modelled: shell commands, the work of the built-in programs, image size plus allocations | the image profiles | a shell loop shows more CPU than really ran |
+
+A `runtime/trace` of 30 s, idle and under load, compared the CPU of each
+control plane pod with the time its goroutines ran:
+
+| Pod | Idle | Load |
+| --- | --- | --- |
+| `kube-apiserver-tab` | 2.2 times too high | 2.5 times too high |
+| `etcd-tab` | 4.0 times too high | 2.6 times too high |
+| `kube-controller-manager-tab` | 0.7 times | 1.5 times |
+| `kube-scheduler-tab` | 0 (it moves almost no bytes) | 0.5 times |
+
+The pods are too high because the time the runtime spends outside of
+goroutines (the scheduler, the calls between Go and JavaScript, timers;
+about 40 % of the CPU when idle) goes to the pods, like kernel time is
+charged to a cgroup, and so does part of the time of goroutines that belong
+to no component (the node and the add-ons), which move few bytes.
+
+The pods never add up to more than the node, for CPU and for memory: the
+control plane pods are cut out of the heap of the Go runtime, and the part of
+the CPU and of the memory that no pod has stays in the node.
 
 The addon metrics-server (`addons/metrics-server.yaml`, the manifest of the
 upstream release) serves `metrics.k8s.io`, so `kubectl top` and

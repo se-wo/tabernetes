@@ -1100,7 +1100,10 @@ func (c *ingController) input(owned []*netv1.Ingress) *ingInput {
 // updates the status of the Ingresses.
 func (c *ingController) sync(ctx context.Context) error {
 	owned := c.owned()
+	start := time.Now()
 	out := renderIngressConf(c.input(owned))
+	// Rendering waits on nothing: its time is CPU of the controller.
+	acctFrom(ctx).ChargeCPU(time.Since(start))
 	warned := map[string]bool{}
 	for _, w := range out.warnings {
 		if !c.warned[w] {
@@ -1153,7 +1156,10 @@ func (c *ingController) reload(ctx context.Context, conf string) error {
 		return err
 	}
 	defer os.Remove(c.real(tmp))
+	start := time.Now()
 	cfg, err := ngxLoad(c.real, tmp, "")
+	// nginx -t: parsing the file is CPU of the controller.
+	acctFrom(ctx).ChargeCPU(time.Since(start))
 	if err != nil {
 		return fmt.Errorf("\n-------------------------------------------------------------------------------\nError: exit status 1\nnginx: [emerg] %v\nnginx: configuration file %s test failed\n-------------------------------------------------------------------------------", err, tmp)
 	}

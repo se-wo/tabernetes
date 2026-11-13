@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
@@ -42,6 +44,62 @@ type store struct {
 	notify     chan struct{}
 	leases     map[int64]*lease
 	nextLease  int64
+	// bytes is what the keys, values and the watch log hold (heldBytes).
+	bytes int64
+}
+
+// stored is the sum of bytes of all stores of the process.
+var stored atomic.Int64
+
+// StoredBytes is the memory the stores of the process hold: keys and values
+// of every kept revision, the watch log and the structs around them. It is
+// counted on every write, not estimated.
+func StoredBytes() int64 { return stored.Load() }
+
+var (
+	recordSize = int64(unsafe.Sizeof(record{}))
+	kvSize     = int64(unsafe.Sizeof(mvccpb.KeyValue{}))
+	eventSize  = int64(unsafe.Sizeof(event{}))
+)
+
+// recordBytes is the memory of one record: the record, and for a value its
+// key and value. A tombstone has only the record.
+func recordBytes(r record) int64 {
+	if r.kv == nil {
+		return recordSize
+	}
+	return recordSize + kvSize + int64(len(r.kv.Key)+len(r.kv.Value))
+}
+
+// eventBytes is the memory of an event of the log. The KeyValue of a put is
+// the one of its record and counts there; a delete has a KeyValue of its own.
+func eventBytes(e event) int64 {
+	if e.typ == mvccpb.DELETE {
+		return eventSize + kvSize + int64(len(e.kv.Key))
+	}
+	return eventSize
+}
+
+// grow changes the bytes of s by d; it must be called with mu held.
+func (s *store) grow(d int64) {
+	s.bytes += d
+	stored.Add(d)
+}
+
+// heldBytes counts the bytes of s from scratch: every key once, every
+// record and every event of the log. The counter must always equal it.
+func (s *store) heldBytes() int64 {
+	var n int64
+	for k, recs := range s.keys {
+		n += int64(len(k))
+		for _, r := range recs {
+			n += recordBytes(r)
+		}
+	}
+	for _, e := range s.log {
+		n += eventBytes(e)
+	}
+	return n
 }
 
 func newStore() *store {
@@ -138,9 +196,15 @@ func (s *store) put(rev int64, key, value []byte, leaseID int64) (prev *mvccpb.K
 			l.keys[k] = struct{}{}
 		}
 	}
+	if _, ok := s.keys[k]; !ok {
+		s.grow(int64(len(k)))
+	}
 	s.addKey(k)
-	s.keys[k] = append(s.keys[k], record{rev: rev, kv: kv})
-	s.log = append(s.log, event{rev: rev, typ: mvccpb.PUT, kv: kv, prevKV: prev})
+	r := record{rev: rev, kv: kv}
+	e := event{rev: rev, typ: mvccpb.PUT, kv: kv, prevKV: prev}
+	s.keys[k] = append(s.keys[k], r)
+	s.log = append(s.log, e)
+	s.grow(recordBytes(r) + eventBytes(e))
 	return prev
 }
 
@@ -154,8 +218,11 @@ func (s *store) del(rev int64, key string) *mvccpb.KeyValue {
 			delete(l.keys, key)
 		}
 	}
-	s.keys[key] = append(s.keys[key], record{rev: rev, deleted: true})
-	s.log = append(s.log, event{rev: rev, typ: mvccpb.DELETE, kv: &mvccpb.KeyValue{Key: []byte(key), ModRevision: rev}, prevKV: prev})
+	r := record{rev: rev, deleted: true}
+	e := event{rev: rev, typ: mvccpb.DELETE, kv: &mvccpb.KeyValue{Key: []byte(key), ModRevision: rev}, prevKV: prev}
+	s.keys[key] = append(s.keys[key], r)
+	s.log = append(s.log, e)
+	s.grow(recordBytes(r) + eventBytes(e))
 	return prev
 }
 
@@ -165,6 +232,10 @@ func (s *store) compact(rev int64) {
 	}
 	s.compactRev = rev
 	i := sort.Search(len(s.log), func(i int) bool { return s.log[i].rev > rev })
+	var freed int64
+	for _, e := range s.log[:i] {
+		freed += eventBytes(e)
+	}
 	s.log = append([]event(nil), s.log[i:]...)
 	for k, recs := range s.keys {
 		// keep the newest record <= rev plus everything after it
@@ -172,13 +243,18 @@ func (s *store) compact(rev int64) {
 		if j <= 0 {
 			continue
 		}
+		for _, r := range recs[:j] {
+			freed += recordBytes(r)
+		}
 		recs = append([]record(nil), recs[j:]...)
 		if len(recs) == 1 && recs[0].deleted {
+			freed += int64(len(k)) + recordBytes(recs[0])
 			delete(s.keys, k)
 			continue
 		}
 		s.keys[k] = recs
 	}
+	s.grow(-freed)
 	if len(s.sorted) != len(s.keys) {
 		s.sorted = s.sorted[:0]
 		for k := range s.keys {
