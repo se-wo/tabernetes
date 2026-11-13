@@ -4,3 +4,7 @@
 /tabernetes/.build/
 /tabernetes/web/node_modules
 /tabernetes/web/src/wasm_exec.js
+
+# output of tabernetes/docs/docker-node-check/
+browser-console.log
+/tabernetes/out/

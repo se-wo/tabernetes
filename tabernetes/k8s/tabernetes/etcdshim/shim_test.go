@@ -1,7 +1,9 @@
 package etcdshim
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -96,4 +98,47 @@ func TestLogfOnCompact(t *testing.T) {
 			t.Fatal("no log entry for the compaction")
 		}
 	}
+}
+
+func TestStoredBytes(t *testing.T) {
+	before := StoredBytes()
+	s := newStore()
+	check := func(step string) {
+		t.Helper()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if want := s.heldBytes(); s.bytes != want {
+			t.Fatalf("%s: counter %d, walk %d", step, s.bytes, want)
+		}
+		if got := StoredBytes() - before; got != s.bytes {
+			t.Fatalf("%s: StoredBytes grew by %d, store holds %d", step, got, s.bytes)
+		}
+	}
+	write := func(f func()) {
+		s.mu.Lock()
+		s.rev++
+		f()
+		s.mu.Unlock()
+	}
+	check("empty")
+	for i := range 20 {
+		write(func() { s.put(s.rev, []byte(fmt.Sprintf("/k/%d", i%7)), bytes.Repeat([]byte("v"), 100*i), 0) })
+	}
+	check("puts")
+	write(func() { s.del(s.rev, "/k/3") })
+	write(func() { s.del(s.rev, "/k/4") })
+	write(func() { s.put(s.rev, []byte("/k/4"), []byte("again"), 0) })
+	check("deletes")
+	s.mu.Lock()
+	full := s.bytes
+	s.compact(s.rev - 1)
+	s.mu.Unlock()
+	check("compact")
+	s.mu.Lock()
+	if s.bytes >= full {
+		t.Errorf("compaction freed nothing: %d -> %d", full, s.bytes)
+	}
+	s.compact(s.rev)
+	s.mu.Unlock()
+	check("compact all")
 }

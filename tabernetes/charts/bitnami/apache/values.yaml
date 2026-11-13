@@ -1,5 +1,5 @@
-# A small chart with the values of Bitnami's apache chart that tutorials use.
-# Tabernetes runs the official httpd image (docker.io/library/httpd).
+## @param clusterDomain Kubernetes Cluster Domain
+clusterDomain: cluster.local
 
 ## @param nameOverride String to partially override apache.fullname
 nameOverride: ""

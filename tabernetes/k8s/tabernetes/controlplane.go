@@ -16,12 +16,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/client-go/transport"
 
 	"k8s.io/kubernetes/cmd/tabernetes/etcdshim"
 )
@@ -106,6 +108,7 @@ var etcdArgs = []string{
 // startEtcd serves the etcd shim on l and its health endpoints on
 // 127.0.0.1:2381, like the metrics listener of etcd.
 func startEtcd(l net.Listener) {
+	l = countingListener{l, &cpBytes.etcd}
 	c := addComponent("etcd", etcdArgs)
 	etcdshim.Logf = func(level, msg string, kv ...any) {
 		caller := "etcdshim"
@@ -206,4 +209,105 @@ func etcdHealthHandler() http.Handler {
 		})
 	}
 	return mux
+}
+
+// cpBytes counts the bytes the control plane moves: in and out of the
+// listener of etcd, and the request and response bodies of every client-go
+// client, watch streams included, by the component of the goroutine that
+// sends the request ("" for none: the tab node, the add-ons, kubectl in the
+// terminal). The CPU of the node is split between the control plane pods by
+// these bytes (tabnode_stats.go).
+var cpBytes struct {
+	etcd atomic.Int64
+
+	mu   sync.Mutex
+	rest map[string]int64
+}
+
+func addRESTBytes(component string, n int64) {
+	cpBytes.mu.Lock()
+	if cpBytes.rest == nil {
+		cpBytes.rest = map[string]int64{}
+	}
+	cpBytes.rest[component] += n
+	cpBytes.mu.Unlock()
+}
+
+// cpBytesNow reads the counters.
+func cpBytesNow() (etcd int64, rest map[string]int64) {
+	cpBytes.mu.Lock()
+	defer cpBytes.mu.Unlock()
+	rest = make(map[string]int64, len(cpBytes.rest))
+	for k, v := range cpBytes.rest {
+		rest[k] = v
+	}
+	return cpBytes.etcd.Load(), rest
+}
+
+// restBytes counts the bodies of a client. RoundTrip runs in the goroutine
+// that sends the request, so its label names the component; the response
+// body counts for the same component, whoever reads it.
+type restBytes struct{ next http.RoundTripper }
+
+func (r restBytes) RoundTrip(req *http.Request) (*http.Response, error) {
+	comp := goroutineComponent()
+	if req.ContentLength > 0 {
+		addRESTBytes(comp, req.ContentLength)
+	}
+	resp, err := r.next.RoundTrip(req)
+	// An upgraded connection (exec, port-forward) keeps its body: the
+	// streams use it as the connection.
+	if resp != nil && resp.Body != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+		resp.Body = countingBody{resp.Body, comp}
+	}
+	return resp, err
+}
+
+type countingBody struct {
+	io.ReadCloser
+	comp string
+}
+
+func (b countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		addRESTBytes(b.comp, int64(n))
+	}
+	return n, err
+}
+
+// k8s/patch.go makes every client-go transport pass WrapRoundTripper.
+func init() {
+	transport.WrapRoundTripper = func(rt http.RoundTripper) http.RoundTripper { return restBytes{rt} }
+}
+
+// countingListener counts the bytes of every connection it accepts.
+type countingListener struct {
+	net.Listener
+	n *atomic.Int64
+}
+
+func (l countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return countingConn{c, l.n}, nil
+}
+
+type countingConn struct {
+	net.Conn
+	n *atomic.Int64
+}
+
+func (c countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.n.Add(int64(n))
+	return n, err
 }

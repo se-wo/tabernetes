@@ -340,6 +340,7 @@ func (s *serviceProxy) watchCorefile(ctx context.Context) {
 // lookupName answers one fully qualified name: the Corefile first (rewrite,
 // hosts), then the services.
 func (s *serviceProxy) lookupName(name string) (dnsAnswer, bool) {
+	chargeDNS()
 	if st := s.corefile.Load(); st != nil {
 		var ips []string
 		if name, ips = st.cf.name(name); len(ips) > 0 {
@@ -573,6 +574,7 @@ func corednsProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 	log.Printf("[INFO] plugin/reload: Running configuration SHA512 = %s", hash)
 	fmt.Fprint(hc.Stdout, banner)
 
+	defer addCoreDNS(acctFrom(ctx))()
 	stats := &corednsStats{}
 	errs := make(chan error, 4)
 	serve := func(addr string, h http.Handler) bool {

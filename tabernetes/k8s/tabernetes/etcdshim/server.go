@@ -580,7 +580,7 @@ func (srv *Server) Status(ctx context.Context, r *pb.StatusRequest) (*pb.StatusR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return &pb.StatusResponse{
-		Header: srv.header(), Version: "3.7.0", StorageVersion: "3.7.0", DbSize: int64(len(s.log)) * 1024, DbSizeInUse: int64(len(s.log)) * 1024,
+		Header: srv.header(), Version: "3.7.0", StorageVersion: "3.7.0", DbSize: s.bytes, DbSizeInUse: s.bytes,
 		Leader: memberID, RaftIndex: uint64(s.rev), RaftTerm: 1, RaftAppliedIndex: uint64(s.rev),
 	}, nil
 }

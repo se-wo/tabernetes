@@ -164,6 +164,7 @@ func (lp *localPath) run(ctx context.Context) {
 }
 
 func (lp *localPath) sync(ctx context.Context) {
+	acctFrom(ctx).ChargeCPU(localPathLoopCost)
 	scs, err := lp.cs.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return
@@ -249,6 +250,7 @@ func (lp *localPath) event(ctx context.Context, pvc *v1.PersistentVolumeClaim, t
 }
 
 func (lp *localPath) provision(ctx context.Context, pvc *v1.PersistentVolumeClaim, class *storagev1.StorageClass) {
+	acctFrom(ctx).ChargeCPU(localPathVolumeCost)
 	pvName := "pvc-" + string(pvc.UID)
 	lp.event(ctx, pvc, v1.EventTypeNormal, "Provisioning", fmt.Sprintf("External provisioner is provisioning volume for claim %q", pvc.Namespace+"/"+pvc.Name))
 	vol, err := lp.createVolume(ctx, pvc, class, pvName)
@@ -319,6 +321,7 @@ func (lp *localPath) createVolume(ctx context.Context, pvc *v1.PersistentVolumeC
 }
 
 func (lp *localPath) deleteVolume(ctx context.Context, pv *v1.PersistentVolume) {
+	acctFrom(ctx).ChargeCPU(localPathVolumeCost)
 	var dir, node string
 	switch {
 	case pv.Spec.HostPath != nil:

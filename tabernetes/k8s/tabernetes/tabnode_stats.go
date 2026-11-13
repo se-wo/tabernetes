@@ -3,10 +3,15 @@ package main
 // The resource endpoints of the kubelet of the tab node: /stats/summary (the
 // Summary API, what `kubectl get --raw /api/v1/nodes/tab/proxy/stats/summary`
 // shows) and /metrics/resource (Prometheus text, what a metrics-server
-// scrapes). The numbers come from the accounting of tabnode_acct.go; the node
-// adds a model of the system share and the memory of the Go runtime.
+// scrapes). The containers come from the accounting of tabnode_acct.go. The
+// node is the memory of the Go runtime plus the containers, and the CPU time
+// the instance ran (or a model of it, see nodeSysModel). On the control plane
+// node the four control plane pods are cut out of the node: their CPU by the
+// bytes each one moved, their memory by the store of etcd and by goroutines.
+// The pods never add up to more than the node.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,9 +20,12 @@ import (
 	"math"
 	"net/http"
 	"runtime"
+	"runtime/metrics"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall/js"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -25,6 +33,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
+
+	"k8s.io/kubernetes/cmd/tabernetes/etcdshim"
 )
 
 const (
@@ -93,6 +103,9 @@ func (w *podWorker) forgetAccts() {
 // sampleStats samples the containers once a second, so that the rate of the
 // CPU (usageNanoCores) has a window.
 func (n *tabNode) sampleStats(ctx context.Context) {
+	if n.static != nil {
+		go countGoroutinesLoop(ctx)
+	}
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -112,60 +125,352 @@ func (n *tabNode) sampleOnce(now time.Time) {
 			acctOf(s.c).Usage(now, true)
 		}
 	}
-	nodeModel.sample(now, len(ws))
+	nodeModel.sample(now, len(ws), n.static != nil)
 }
 
-// nodeSysModel models the CPU of the node itself: the control plane on the tab
-// node, a little on a worker node.
+// procBusy is the time the wasm instance ran Go code since it started:
+// clock.js adds up every call into the instance (countBusy). false when
+// nothing counts it.
+var procBusy = func() (time.Duration, bool) {
+	f := js.Global().Get("tabernetesBusy")
+	if f.Type() != js.TypeFunction {
+		return 0, false
+	}
+	return time.Duration(f.Invoke().Float() * float64(time.Millisecond)), true
+}
+
+// cpBytesRead reads the bytes the control plane moved (controlplane.go).
+var cpBytesRead = cpBytesNow
+
+// gcCPU is the CPU time the garbage collector and the scavenger of the
+// runtime used since the start. The runtime adds a GC cycle when the cycle
+// ends, so the counter moves in steps.
+var gcCPU = func() time.Duration {
+	s := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/scavenge/total:cpu-seconds"}}
+	metrics.Read(s)
+	var sum float64
+	for _, x := range s {
+		if x.Value.Kind() == metrics.KindFloat64 {
+			sum += x.Value.Float64()
+		}
+	}
+	return time.Duration(sum * float64(time.Second))
+}
+
+// The control plane pods, by the name of their component and container.
+const (
+	compAPIServer  = "kube-apiserver"
+	compController = "kube-controller-manager"
+	compScheduler  = "kube-scheduler"
+	compEtcd       = "etcd"
+)
+
+var compNames = []string{compAPIServer, compController, compScheduler, compEtcd}
+
+// cpShares splits the work of an interval between the control plane pods by
+// the bytes each one moved in it. etcd: in and out of its listener.
+// kube-apiserver: the same bytes (it is the only client of etcd), the REST
+// bodies of all clients it served, and those of its own client. The
+// controller manager and the scheduler: the REST bodies of their own
+// clients. The bodies of other clients (the node, the add-ons, kubectl)
+// weigh as much again but go to no pod: that work stays in the node. So the
+// shares never add up to more than 1. Without any bytes all shares are 0:
+// the components did no requests, and the time stays in the node.
+func cpShares(etcd int64, rest map[string]int64) map[string]float64 {
+	var all int64
+	for _, n := range rest {
+		all += max(n, 0)
+	}
+	etcd = max(etcd, 0)
+	w := map[string]float64{
+		compEtcd:       float64(etcd),
+		compAPIServer:  float64(etcd + all + max(rest[compAPIServer], 0)),
+		compController: float64(max(rest[compController], 0)),
+		compScheduler:  float64(max(rest[compScheduler], 0)),
+	}
+	others := float64(all - max(rest[compAPIServer], 0) - max(rest[compController], 0) - max(rest[compScheduler], 0))
+	total := others
+	for _, v := range w {
+		total += v
+	}
+	if total <= 0 {
+		return map[string]float64{}
+	}
+	for k, v := range w {
+		w[k] = v / total
+	}
+	return w
+}
+
+// rateMeter is the rate of a CPU counter over the last rateWindow.
+type rateMeter struct{ samples []cpuSample }
+
+func (r *rateMeter) at(now time.Time, total time.Duration) uint64 {
+	if n := len(r.samples); n == 0 || now.Sub(r.samples[n-1].t) >= time.Second {
+		r.samples = append(r.samples, cpuSample{now, total})
+	}
+	for len(r.samples) > 2 && now.Sub(r.samples[1].t) >= rateWindow {
+		r.samples = r.samples[1:]
+	}
+	if old := r.samples[0]; now.Sub(old.t) > 0 && total >= old.cpu {
+		return uint64(float64(total-old.cpu) / now.Sub(old.t).Seconds())
+	}
+	return 0
+}
+
+// nodeSysModel keeps the CPU counters of the node and of the control plane
+// pods. With procBusy the node is measured: the time the instance ran, or
+// what the containers and the control plane pods were charged when that is
+// more (a model of a container can charge more than really ran). Without it
+// the node is the containers plus a modelled system share: the control plane
+// on the tab node, a little on a worker node. Either way the control plane
+// pods get the measured time less the work the containers were charged and
+// less the time of the garbage collector (or the modelled system share),
+// split by cpShares, never more.
 type nodeSysModel struct {
-	mu      sync.Mutex
-	last    time.Time
-	sys     time.Duration
-	samples []cpuSample
+	mu       sync.Mutex
+	last     time.Time
+	measured bool          // busy is a value of procBusy
+	busy     time.Duration // procBusy at last
+	ctrs     time.Duration // nodeCPU at last
+	idle     time.Duration // idleCPU at last
+	gc       time.Duration // gcCPU at last
+	gcDebt   time.Duration // GC time not yet taken out of the measured time
+	etcd     int64         // cpBytesRead at last
+	rest     map[string]int64
+
+	total time.Duration            // the node counter
+	comps map[string]time.Duration // the counters of the control plane pods
+	rate  rateMeter
+	rates map[string]*rateMeter
 }
 
 var nodeModel nodeSysModel
 
-// sample returns the CPU of the node at now: the containers plus the system
-// share. The counter never goes back.
-func (m *nodeSysModel) sample(now time.Time, pods int) ctrUsage {
+// cpuSampleOf is the CPU of the node and of the control plane pods at a time.
+type cpuSampleOf struct {
+	node  ctrUsage
+	comps map[string]ctrUsage // by component, no StartTime
+}
+
+// sample advances all counters to now under one lock and returns them. The
+// counters never go back. In each interval the node gets at least what the
+// containers and the control plane pods got. controlPlane says whether this
+// node runs the control plane; on any other node nothing is split and all
+// of the time stays in the node. A component that exited, or has no mirror
+// pod yet, still gets its share here but is not listed (statsPods): its
+// time is in the node and in no pod, so the pods still add up to no more.
+func (m *nodeSysModel) sample(now time.Time, pods int, controlPlane bool) cpuSampleOf {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.last.IsZero() {
 		m.last = nodeStart
+		m.comps = map[string]time.Duration{}
+		m.rates = map[string]*rateMeter{}
 	}
-	if dt := now.Sub(m.last); dt > 0 {
+	ctrs, idle := nodeCPU.get(), idleCPU.get()
+	etcd, rest := cpBytesRead()
+	busy, measured := procBusy()
+	gc := gcCPU()
+
+	dt := max(now.Sub(m.last), 0)
+	dCtrs := max(ctrs-m.ctrs, 0)
+	// the work the containers were charged, without their idle rates
+	dWork := max(dCtrs-max(idle-m.idle, 0), 0)
+	dRest := map[string]int64{}
+	for k, v := range rest {
+		dRest[k] = v - m.rest[k]
+	}
+	shares := map[string]float64{}
+	if controlPlane {
+		shares = cpShares(etcd-m.etcd, dRest)
+	}
+	var work time.Duration // the time to split between the control plane pods
+	var dBusy time.Duration
+	if measured && m.measured {
+		// The work the containers were charged for ran in the same
+		// instance but moved no bytes: it is not the control plane's. Their
+		// idle rates ran nowhere and take nothing from it.
+		dBusy = max(busy-m.busy, 0)
+		work = max(dBusy-dWork, 0)
+		// The garbage collector works for all of the heap: its time stays
+		// in the node. A cycle shows up at its end, all at once, so what
+		// does not fit into this interval comes off the next ones.
+		m.gcDebt += max(gc-m.gc, 0)
+		take := min(m.gcDebt, work)
+		work -= take
+		m.gcDebt -= take
+	} else {
+		// No measurement (or the first one): the model.
 		rate := 0.015
 		if tabNodeName == "tab" {
 			rate = 0.060 + 0.002*float64(pods)
 		}
 		jitter := 0.9 + 0.2*math.Abs(math.Sin(float64(now.UnixNano())/3e9))
-		m.sys += time.Duration(float64(dt) * rate * jitter)
+		work = time.Duration(float64(dt) * rate * jitter)
+	}
+	var dComps time.Duration
+	for _, name := range compNames {
+		d := time.Duration(float64(work) * shares[name])
+		m.comps[name] += d
+		dComps += d
+	}
+	if measured && m.measured {
+		m.total += max(dBusy, dCtrs+dComps)
+	} else {
+		m.total += work + dCtrs
+	}
+	if now.After(m.last) {
 		m.last = now
 	}
-	total := m.sys + nodeCPU.get()
-	if n := len(m.samples); n == 0 || now.Sub(m.samples[n-1].t) >= time.Second {
-		m.samples = append(m.samples, cpuSample{now, total})
+	m.ctrs, m.idle, m.etcd, m.rest = ctrs, idle, etcd, rest
+	m.busy, m.measured = busy, measured
+	m.gc = max(m.gc, gc)
+
+	out := cpuSampleOf{
+		node:  ctrUsage{Time: now, StartTime: nodeStart, UsageCoreNanoSeconds: uint64(m.total), UsageNanoCores: m.rate.at(now, m.total)},
+		comps: map[string]ctrUsage{},
 	}
-	for len(m.samples) > 2 && now.Sub(m.samples[1].t) >= rateWindow {
-		m.samples = m.samples[1:]
+	for _, name := range compNames {
+		r := m.rates[name]
+		if r == nil {
+			r = &rateMeter{}
+			m.rates[name] = r
+		}
+		out.comps[name] = ctrUsage{Time: now, UsageCoreNanoSeconds: uint64(m.comps[name]), UsageNanoCores: r.at(now, m.comps[name])}
 	}
-	var rate uint64
-	if old := m.samples[0]; now.Sub(old.t) > 0 && total >= old.cpu {
-		rate = uint64(float64(total-old.cpu) / now.Sub(old.t).Seconds())
-	}
-	return ctrUsage{Time: now, StartTime: nodeStart, UsageCoreNanoSeconds: uint64(total), UsageNanoCores: rate}
+	return out
 }
 
-// nodeMemory is the memory of the node from the Go runtime: what the wasm
-// instance holds. capacity is the memory of the node object.
-func nodeMemory() (usage, workingSet, capacity uint64) {
+// goMem is the memory of the Go runtime.
+type goMem struct {
+	workingSet, usage uint64
+	heapInuse, stack  uint64
+	live              uint64 // the heap the last GC marked live
+}
+
+var liveHeapMetric = []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+
+func readGoMem() goMem {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	workingSet = m.HeapInuse + m.StackInuse + m.MSpanInuse + m.MCacheInuse + m.GCSys + m.OtherSys
-	usage = m.Sys - min(m.HeapReleased, m.Sys)
-	_, _, gib := browserInfo()
-	return max(usage, workingSet), workingSet, uint64(gib) << 30
+	ws := m.HeapInuse + m.StackInuse + m.MSpanInuse + m.MCacheInuse + m.GCSys + m.OtherSys
+	usage := m.Sys - min(m.HeapReleased, m.Sys)
+	s := make([]metrics.Sample, len(liveHeapMetric))
+	copy(s, liveHeapMetric)
+	metrics.Read(s)
+	var live uint64
+	if s[0].Value.Kind() == metrics.KindUint64 {
+		live = s[0].Value.Uint64()
+	}
+	return goMem{workingSet: ws, usage: max(usage, ws), heapInuse: m.HeapInuse, stack: m.StackInuse, live: live}
+}
+
+// goroutineCounts is the number of goroutines of each component ("" for
+// none), from a goroutine profile. The profile stops the world for up to a
+// tenth of a second with thousands of goroutines, so a timer takes it now
+// and then (countGoroutinesLoop) and the stats use the last one.
+var goroutineCounts struct {
+	sync.Mutex
+	at     time.Time
+	byComp map[string]int
+	total  int
+}
+
+const (
+	// goroutineCountFirst is when the first count is taken after the node
+	// started, once the cluster has booted.
+	goroutineCountFirst = 45 * time.Second
+	// goroutineCountEvery is how often it is taken again.
+	goroutineCountEvery = 5 * time.Minute
+)
+
+// countGoroutines counts the goroutines by the label "component" that
+// labelGoroutine (complogs.go) gives them.
+func countGoroutines() (map[string]int, int) {
+	var b bytes.Buffer
+	pprof.Lookup("goroutine").WriteTo(&b, 1)
+	return parseGoroutineCounts(b.String())
+}
+
+// parseGoroutineCounts reads the text form of a goroutine profile: "<count>
+// @ <pcs>" per stack, then "# labels: {...}" when the stack has labels.
+func parseGoroutineCounts(text string) (map[string]int, int) {
+	counts := map[string]int{}
+	total, last := 0, 0 // last: the count of the stack before
+	for _, line := range strings.Split(text, "\n") {
+		if l, ok := strings.CutPrefix(line, "# labels: "); ok {
+			if _, v, ok := strings.Cut(l, `"component":"`); ok && last > 0 {
+				comp, _, _ := strings.Cut(v, `"`)
+				counts[""] -= last
+				counts[comp] += last
+			}
+			last = 0
+			continue
+		}
+		f, _, ok := strings.Cut(line, " @")
+		n, err := strconv.Atoi(f)
+		if !ok || err != nil {
+			last = 0
+			continue
+		}
+		counts[""] += n
+		total += n
+		last = n
+	}
+	return counts, total
+}
+
+func refreshGoroutineCounts(now time.Time) {
+	byComp, total := countGoroutines()
+	goroutineCounts.Lock()
+	goroutineCounts.at, goroutineCounts.byComp, goroutineCounts.total = now, byComp, total
+	goroutineCounts.Unlock()
+}
+
+// countGoroutinesLoop counts the goroutines once the cluster has booted and
+// then every goroutineCountEvery, until ctx ends.
+func countGoroutinesLoop(ctx context.Context) {
+	t := time.NewTimer(max(time.Until(nodeStart.Add(goroutineCountFirst)), 0))
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			refreshGoroutineCounts(now)
+			t.Reset(goroutineCountEvery)
+		}
+	}
+}
+
+// cpMemory splits the memory of the Go runtime between the control plane
+// pods. etcd holds its store (counted by the store) and its share of the
+// stacks by goroutines. The rest of the live heap and the stacks goes by the
+// share of goroutines of each component; the share of the goroutines of no
+// component (and of etcd, already counted) stays in the node. All of it fits
+// in the live heap plus the stacks and in the heap in use, so the pods never
+// hold more than the node. Before the first count (total 0) the rest goes in
+// four even parts: one for each of the three components, one for the node.
+func cpMemory(m goMem, stored uint64, counts map[string]int, total int) map[string]uint64 {
+	budget := min(m.live+m.stack, m.heapInuse)
+	out := map[string]uint64{}
+	share := func(name string) float64 {
+		if total <= 0 {
+			if name == compEtcd {
+				return 0
+			}
+			return 0.25
+		}
+		return float64(counts[name]) / float64(total)
+	}
+	etcd := min(stored+uint64(float64(m.stack)*share(compEtcd)), budget)
+	out[compEtcd] = etcd
+	rest := budget - etcd
+	for _, name := range []string{compAPIServer, compController, compScheduler} {
+		out[name] = uint64(float64(rest) * share(name))
+	}
+	return out
 }
 
 // podStatsOf is the stats of one pod with the running containers.
@@ -183,8 +488,24 @@ type ctrStatsOf struct {
 	limit   *int64
 }
 
-// collect samples every pod with a running container at now, and the node.
-func (n *tabNode) collect(now time.Time) (pods []podStatsOf, node ctrUsage, podsSum ctrUsage) {
+// nodeStats is a sample of the node and its pods.
+type nodeStats struct {
+	pods    []podStatsOf
+	node    ctrUsage // CPU of the node
+	podsSum ctrUsage // all pods: the system container "pods"
+	// ctrMem is the memory model of the containers. It comes on top of what
+	// the runtime holds; the control plane pods are part of that.
+	ctrMem uint64
+	mem    goMem
+}
+
+// workingSet is the working set of the node.
+func (s nodeStats) workingSet() uint64 { return s.mem.workingSet + s.ctrMem }
+
+// collect samples every pod with a running container at now, the control
+// plane pods and the node.
+func (n *tabNode) collect(now time.Time) nodeStats {
+	var st nodeStats
 	ws := n.workerList()
 	for _, w := range ws {
 		snaps := w.runningCtrs()
@@ -197,11 +518,29 @@ func (n *tabNode) collect(now time.Time) (pods []podStatsOf, node ctrUsage, pods
 			p.ctrs = append(p.ctrs, ctrStatsOf{name: s.name, started: s.started, u: u, limit: s.memory})
 			p.sum = p.sum.sum(u)
 		}
-		podsSum = podsSum.sum(p.sum)
-		pods = append(pods, p)
+		st.podsSum = st.podsSum.sum(p.sum)
+		st.pods = append(st.pods, p)
 	}
-	node = nodeModel.sample(now, len(ws))
-	return pods, node, podsSum
+	st.ctrMem = st.podsSum.WorkingSetBytes
+	cpu := nodeModel.sample(now, len(ws), n.static != nil)
+	st.node = cpu.node
+	st.mem = readGoMem()
+	if cps := n.static.statsPods(); len(cps) > 0 {
+		goroutineCounts.Lock()
+		counts, total := goroutineCounts.byComp, goroutineCounts.total
+		goroutineCounts.Unlock()
+		mem := cpMemory(st.mem, uint64(max(etcdshim.StoredBytes(), 0)), counts, total)
+		for _, cp := range cps {
+			u := cpu.comps[cp.c.name]
+			u.StartTime = cp.c.start
+			u.WorkingSetBytes = mem[cp.c.name]
+			p := podStatsOf{ref: cp.ref, start: cp.c.start, sum: u,
+				ctrs: []ctrStatsOf{{name: cp.c.name, started: cp.c.start, u: u}}}
+			st.podsSum = st.podsSum.sum(u)
+			st.pods = append(st.pods, p)
+		}
+	}
+	return st
 }
 
 func cpuStats(u ctrUsage) *stats.CPUStats {
@@ -218,7 +557,8 @@ func memStats(now time.Time, workingSet, usage uint64, available *uint64) *stats
 }
 
 func (n *tabNode) summary(now time.Time) stats.Summary {
-	pods, node, podsSum := n.collect(now)
+	st := n.collect(now)
+	pods, node, podsSum := st.pods, st.node, st.podsSum
 	s := stats.Summary{Pods: []stats.PodStats{}}
 	for _, p := range pods {
 		ps := stats.PodStats{PodRef: p.ref, StartTime: metav1.NewTime(p.start), Containers: []stats.ContainerStats{}}
@@ -237,10 +577,11 @@ func (n *tabNode) summary(now time.Time) stats.Summary {
 		ps.Memory = memStats(now, p.sum.WorkingSetBytes, p.sum.WorkingSetBytes, nil)
 		s.Pods = append(s.Pods, ps)
 	}
-	usage, ws, capacity := nodeMemory()
+	_, _, gib := browserInfo()
+	capacity := uint64(gib) << 30
 	// the model of the containers counts on top of what the runtime holds
-	ws += podsSum.WorkingSetBytes
-	usage = max(usage+podsSum.WorkingSetBytes, ws)
+	ws := st.workingSet()
+	usage := max(st.mem.usage+st.ctrMem, ws)
 	avail := capacity - min(ws, capacity)
 	s.Node = stats.NodeStats{
 		NodeName:  tabNodeName,
@@ -272,9 +613,8 @@ func (n *tabNode) getSummary(w http.ResponseWriter, r *http.Request) {
 // names, help texts and types of the resource metrics of a kubelet.
 func (n *tabNode) getResourceMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	pods, node, podsSum := n.collect(now)
-	_, ws, _ := nodeMemory()
-	ws += podsSum.WorkingSetBytes
+	st := n.collect(now)
+	pods, node, ws := st.pods, st.node, st.workingSet()
 	type sample struct {
 		labels string
 		value  float64

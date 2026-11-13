@@ -57,7 +57,12 @@ browser tab (single wasm binary)                     docker run tabernetes
   next to the page instead: small charts in the style of Bitnami's
   (`tabernetes/charts/`, nginx, apache and redis) that run the official images on
   the tab node, so `helm repo add bitnami https://charts.bitnami.com/bitnami` and
-  `helm install web bitnami/nginx` work.
+  `helm install web bitnami/nginx` work. What helm prints for these charts
+  (the notes, `helm show`) is the output of the real charts and says nothing
+  about this project, so it reads as on a real cluster. There is no load
+  balancer: the `EXTERNAL-IP` of a `LoadBalancer` service stays `<pending>`;
+  use the cluster IP, the node port or `port-forward`. `proxy svc/<name>` shows
+  a service next to the terminal.
 - The shell tools are small Go versions with the common flags: `cp`, `mv`,
   `ln`, `chmod`, `chown`, `stat`, `find`, `diff`, `sed`, `awk`
   ([goawk](https://github.com/benhoyt/goawk)), `jq` and `yq`
@@ -68,6 +73,8 @@ browser tab (single wasm binary)                     docker run tabernetes
   `ping` and `telnet` dial from the pod IP. `openssl` covers keys, requests,
   signing and `x509 -text` for the CertificateSigningRequest exercise.
   `kubectl convert` is compiled in, because plugins cannot run in Wasm.
+  `ls` prints like BusyBox, with `-l -n -a -A -d -h -i -L -R -r -S -t -1` and
+  `--color`.
 - `history` lists the command lines of the tab, and Ctrl-R searches them
   backwards like Bash. The history ends with the tab.
 - `cmd &` runs in the background, `jobs` lists the jobs, `kill %1` stops one.
@@ -246,9 +253,41 @@ a metrics-server can scrape the node. The numbers are a model
 (`tabnode_acct.go`): CPU comes from the commands of the shell and the work of
 the built-in programs, `limits.cpu` works like the CFS quota, and the memory
 of a container is the size of its image plus what its programs allocate. The
-memory of the node comes from the Go runtime. The endpoints take a client
-certificate of the cluster CA or a bearer token that the apiserver allows to
-get `nodes/stats` or `nodes/metrics`.
+endpoints take a client certificate of the cluster CA or a bearer token that
+the apiserver allows to get `nodes/stats` or `nodes/metrics`.
+
+Some numbers are measured, the others are models
+(`tabnode_stats.go`, `tabnode_acct.go`):
+
+| Number | How | Anchored to | How far off |
+| --- | --- | --- | --- |
+| Node CPU | measured: the time the page runs the WebAssembly instance (`countBusy`, `web/src/clock.js`); more when the models of the pods charge more | the clock of the page | exact for the instance |
+| Node memory | measured: what the Go runtime holds, plus the models of the containers | `runtime.MemStats` | the containers' part is a model |
+| CPU of the four control plane pods | modelled: the node CPU, less the work charged to containers and less the garbage collector, split by the bytes each component moved (etcd: its listener; apiserver: etcd bytes and all client bodies; the others: the bodies of their own clients, watch streams included) | measured node CPU, byte counters, `/cpu/classes/gc` | see below |
+| Memory of `etcd-tab` | measured: the bytes of its store (kept revisions and watch log) plus its share of the goroutine stacks | the store | close; gRPC buffers not counted |
+| Memory of the other three control plane pods | modelled: live heap and stacks without the store, split by the goroutines of each component (counted 45 s after the node starts, then every 5 minutes; before that in four even parts, one for the node) | `/gc/heap/live:bytes`, the stacks | not checked |
+| Add-ons | memory and idle CPU modelled (CoreDNS 13, metrics-server 18, local-path-provisioner 8, ingress-nginx 90 MiB); scrape parsing, metrics API and ingress reloads measured; DNS lookups and provisioner loops fixed costs | `kubectl top` of the real images: CoreDNS (11-12 MiB) and local-path-provisioner (7 MiB) compared on a Docker node, the other two not | rough |
+| Ordinary containers | modelled: shell commands, the work of the built-in programs, image size plus allocations | the image profiles | a shell loop shows more CPU than really ran |
+
+A `runtime/trace` of 30 s, idle and under load, compared the CPU of each
+control plane pod with the time its goroutines ran:
+
+| Pod | Idle | Load |
+| --- | --- | --- |
+| `kube-apiserver-tab` | 2.2 times too high | 2.5 times too high |
+| `etcd-tab` | 4.0 times too high | 2.6 times too high |
+| `kube-controller-manager-tab` | 0.7 times | 1.5 times |
+| `kube-scheduler-tab` | 0 (it moves almost no bytes) | 0.5 times |
+
+The pods are too high because the time the runtime spends outside of
+goroutines (the scheduler, the calls between Go and JavaScript, timers;
+about 40 % of the CPU when idle) goes to the pods, like kernel time is
+charged to a cgroup, and so does part of the time of goroutines that belong
+to no component (the node and the add-ons), which move few bytes.
+
+The pods never add up to more than the node, for CPU and for memory: the
+control plane pods are cut out of the heap of the Go runtime, and the part of
+the CPU and of the memory that no pod has stays in the node.
 
 The addon metrics-server (`addons/metrics-server.yaml`, the manifest of the
 upstream release) serves `metrics.k8s.io`, so `kubectl top` and
@@ -645,8 +684,10 @@ python3 -m http.server -d .build/site 8080   # http://localhost:8080/
 works under any base path, such as `/tabernetes/` on GitHub Pages
 (`.github/workflows/pages.yaml`). It also writes `THIRD_PARTY_LICENSES.txt`:
 the Go modules in the binary (`go list -deps`, collected by the `wasm` task
-while the Kubernetes checkout is there) and the npm packages in the bundles,
-each with its license text. `site/charts.mjs` packages the charts of
+while the Kubernetes checkout is there), the npm packages in the bundles and
+the Helm charts of `charts/bitnami/` (Apache License 2.0, from Bitnami's
+charts; the license text is `charts/bitnami/LICENSE`), each with its license
+text. `site/charts.mjs` packages the charts of
 `charts/` into chart repositories under `charts/` of the site. `join` prints
 `TABERNETES_IMAGE` if set at build time, else `$NODE_IMAGE:latest`.
 
@@ -706,6 +747,9 @@ with all capabilities, but only over these namespaces:
   outgoing traffic and forwards the WebRTC UDP port. WebRTC, flannel and
   kube-proxy work as before.
 - A new `cgroup2` mount gives the kubelet a writable cgroup tree.
+  This needs a host with cgroups v2. On a host with cgroups v1 the node
+  joins but stays NotReady, and every pod sandbox fails with
+  `cpu.weight: no such file or directory`. `--privileged` works there.
 - The kubelet runs with the feature gate `KubeletInUserNamespace`.
   containerd runs with `restrict_oom_score_adj` and without AppArmor.
 - Docker's `/sys` is read-only, and in a user namespace the kernel allows only
