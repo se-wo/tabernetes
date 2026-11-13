@@ -706,6 +706,9 @@ with all capabilities, but only over these namespaces:
   outgoing traffic and forwards the WebRTC UDP port. WebRTC, flannel and
   kube-proxy work as before.
 - A new `cgroup2` mount gives the kubelet a writable cgroup tree.
+  This needs a host with cgroups v2. On a host with cgroups v1 the node
+  joins but stays NotReady, and every pod sandbox fails with
+  `cpu.weight: no such file or directory`. `--privileged` works there.
 - The kubelet runs with the feature gate `KubeletInUserNamespace`.
   containerd runs with `restrict_oom_score_adj` and without AppArmor.
 - Docker's `/sys` is read-only, and in a user namespace the kernel allows only

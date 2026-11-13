@@ -71,5 +71,13 @@ Settings of `check.sh`, as environment variables:
 - **The real ingress-nginx controller** comes from `registry.k8s.io` and is not
   in the node image. Without that registry the controller stays on `tab`, and
   the `ingress` step checks only the tab controller with a backend on node-1.
-- **`leave` takes about 6 minutes.** Nothing removes a lost Docker node, so its
-  pods move only after the default 300 second toleration for `not-ready`.
+- **`leave` takes about 6 minutes.** A lost Docker node stays `NotReady`, like
+  in a real cluster without a cloud controller. Its pods move only after the
+  default 300 second toleration for `not-ready`, and the old pods stay
+  `Terminating` until `kubectl delete node node-1`.
+- **The host of a Docker node does not reach tab pods.** Pods of the Docker
+  node reach them, by pod IP and by service IP. A connection from the node's
+  own network namespace times out: the kernel drops it on the pod link
+  (`tabpods1`), because its source is an address of the node itself. So a
+  NodePort on the Docker node does not answer while the only endpoint is a pod
+  on `tab`, for example the Ingress on `<node IP>:30080`.
