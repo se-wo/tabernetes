@@ -6,6 +6,7 @@
   "dependencies": {
     "@bytecodealliance/jco": "1.42.0",
     "@bytecodealliance/preview2-shim": "0.31.1",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "playwright": "1.63.0"
   }
 }

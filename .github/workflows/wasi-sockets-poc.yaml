@@ -1,0 +1,118 @@
+name: WASI sockets phase 0
+
+# The checks of tabernetes/docs/wasi-sockets-poc/docker/checks.sh on a joined
+# Docker node, on a host with IPv6 and nftables: items 7 ([::]:8080) and 17
+# (a client request that NetworkPolicy denies) of docs/wasi-sockets.md.
+# The checks record results and do not fail on them. Read the log of the step
+# "Checks" or the summary of the run.
+on:
+  pull_request:
+    paths:
+      - tabernetes/docs/wasi-sockets-poc/**
+      - tabernetes/docs/docker-node-check/**
+      - .github/workflows/wasi-sockets-poc.yaml
+
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Docker node
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          working_directory: tabernetes
+
+      # Same key as ci.yaml and pages.yaml.
+      - name: Cache tabernetes
+        id: cache-tabernetes
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tabernetes/.build/assets/tabernetes.wasm.zst
+            tabernetes/.build/assets/THIRD_PARTY_LICENSES.go.json
+            tabernetes/.build/wasm_exec.js
+          key: tabernetes-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/k8s/**', 'tabernetes/site/third-party.mjs') }}
+
+      - name: Build tabernetes
+        if: steps.cache-tabernetes.outputs.cache-hit != 'true'
+        working-directory: tabernetes
+        run: mise run wasm
+
+      - name: Build page
+        working-directory: tabernetes
+        run: mise run site
+
+      # Playwright from the lockfile of the browser PoC.
+      - name: Install Playwright
+        working-directory: tabernetes/docs/wasi-sockets-poc/browser
+        run: |
+          npm ci --silent
+          npx playwright install --with-deps chromium
+          # browser.mjs and tab.mjs load Playwright with require().
+          echo "NODE_PATH=${PWD}/node_modules" >>"${GITHUB_ENV}"
+
+      - name: Host
+        run: |
+          uname -r
+          docker info -f 'cgroups v{{.CgroupVersion}}, Docker {{.ServerVersion}}'
+          command -v ctr jq
+          ip -6 addr show lo
+          rustup target add wasm32-wasip2
+
+      # The processes stay for the next steps of the job.
+      - name: Start the page
+        working-directory: tabernetes
+        run: |
+          nohup python3 -m http.server -d .build/site 8080 >"${RUNNER_TEMP}/http.log" 2>&1 &
+          nohup node docs/docker-node-check/browser.mjs >"${RUNNER_TEMP}/browser.log" 2>&1 &
+          for _ in $(seq 120); do
+            grep -q '^ready' "${RUNNER_TEMP}/browser.log" && exit 0
+            if ! pgrep -f browser.mjs >/dev/null; then break; fi
+            sleep 5
+          done
+          cat "${RUNNER_TEMP}/browser.log"
+          exit 1
+
+      - name: Join the Docker node
+        working-directory: tabernetes
+        env:
+          OUT: ${{ runner.temp }}/out
+        run: |
+          docs/docker-node-check/check.sh images join
+          ! grep -q '^FAIL' "${OUT}/summary.txt"
+
+      - name: Checks
+        working-directory: tabernetes
+        run: docs/wasi-sockets-poc/run.sh docker 2>&1 | tee "${RUNNER_TEMP}/checks.txt"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## WASI sockets phase 0 on a Docker node'
+            echo '```text'
+            cat "${RUNNER_TEMP}/checks.txt" 2>/dev/null || echo "no checks"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Logs
+        if: failure()
+        run: |
+          cat "${RUNNER_TEMP}/browser.log" "${RUNNER_TEMP}"/out/*.txt 2>/dev/null || true
+          docker logs tabernetes-node-1 2>&1 | tail -100 || true

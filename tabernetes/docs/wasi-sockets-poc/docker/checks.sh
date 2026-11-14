@@ -52,6 +52,10 @@ ip="$(x 'hostname -i' | tr -d ' \r\n')"
 x "wget -qO- -T 30 proxy:8080/fetch/$ip:8000/x"
 x 'wget -qO- -T 30 proxy:8080/fetch/nothere.invalid/x'
 x 'wget -qO- -T 30 proxy:8080/fetch/echo-tcp.default.svc.cluster.local:9/x'
+echo "== item 7, PX4: [::]:8080 on the IPv4 pod IP"
+ip6="$(tab 'kubectl get pod proxy6 -o jsonpath={.status.podIP}' | tr -d ' \r\n')"
+x "wget -qO- -T 5 $ip6:8080/context | head -3; echo rc=\$?"
+tab 'kubectl logs proxy6 --tail 5'
 echo "== item 14: trap, error code, no response"
 status() { tab "kubectl get pod proxy -o custom-columns=RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.exitCode,REASON:.status.containerStatuses[0].lastState.terminated.reason --no-headers"; }
 for p in trap error noresponse; do
