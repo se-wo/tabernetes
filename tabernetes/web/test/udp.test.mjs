@@ -273,7 +273,7 @@ test("fact 5 of W4.5a: broadcast gives access-denied, multicast is sent, bind to
   assert.deepEqual(g.take(), []);
 });
 
-test("fact 5 of W4.5a: an IPv6 socket binds to :: and ::1; an IPv6 remote address gives remote-unreachable", () => {
+test("fact 5 of W4.5a: an IPv6 socket binds to :: and ::1; an IPv6 remote address gives remote-unreachable, multicast is ok", () => {
   assert.equal(UDP_IPV6_REMOTE_CODE, "remote-unreachable");
   const g = fakeGo();
   const sock = g.s.udpCreateSocket.createUdpSocket("ipv6");
@@ -283,10 +283,27 @@ test("fact 5 of W4.5a: an IPv6 socket binds to :: and ::1; an IPv6 remote addres
   sock.finishBind();
   assert.deepEqual(sock.localAddress(), v6([0, 0, 0, 0, 0, 0, 0, 1], 32768));
   assert.throws(() => sock.stream(v6([0, 0, 0, 0, 0, 0, 0, 1], 53)), is(UDP_IPV6_REMOTE_CODE));
-  const [, out] = sock.stream(undefined);
-  assert.throws(() => sendTo(out, [{ data: bytes(1), remoteAddress: v6([0xfd00, 0, 0, 0, 0, 0, 0, 1], 53) }]), is(UDP_IPV6_REMOTE_CODE));
+  const [in1, out] = sock.stream(undefined);
+  assert.throws(() => sendTo(out, [{ data: bytes(1), remoteAddress: v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1], 7) }]), is(UDP_IPV6_REMOTE_CODE));
+  // The wrong family and IPv4-mapped addresses give invalid-argument.
+  assert.throws(() => sendTo(out, [{ data: bytes(1), remoteAddress: v4(127, 0, 0, 1, 53) }]), is("invalid-argument"));
+  assert.throws(() => sendTo(out, [{ data: bytes(1), remoteAddress: v6([0, 0, 0, 0, 0, 0xffff, 0x7f00, 1], 53) }]), is("invalid-argument"));
+  // A multicast address is permitted, as on runwasi; the pod worker drops
+  // the datagram without a message.
+  assert.equal(sendTo(out, [{ data: bytes(1), remoteAddress: v6([0xff02, 0, 0, 0, 0, 0, 0, 1], 7) }]), 1n);
   // The unspecified address and the port 0 come first.
   assert.throws(() => sendTo(out, [{ data: bytes(1), remoteAddress: v6([0, 0, 0, 0, 0, 0, 0, 0], 53) }]), is("invalid-argument"));
+  assert.deepEqual(g.take(), []);
+  // stream to a multicast address and back: no message for an IPv6 socket.
+  in1[Symbol.dispose]();
+  out[Symbol.dispose]();
+  const [in3, out3] = sock.stream(v6([0xff02, 0, 0, 0, 0, 0, 0, 1], 7));
+  assert.deepEqual(sock.remoteAddress(), v6([0xff02, 0, 0, 0, 0, 0, 0, 1], 7));
+  assert.equal(sendTo(out3, [{ data: bytes(1) }]), 1n);
+  in3[Symbol.dispose]();
+  out3[Symbol.dispose]();
+  sock.stream(undefined);
+  assert.throws(() => sock.remoteAddress(), is("invalid-state"));
   assert.deepEqual(g.take(), []);
 
   const any = g.s.udpCreateSocket.createUdpSocket("ipv6");
@@ -511,7 +528,7 @@ test("CO17: 1,000 calls without data give a pause; a receive with a datagram res
 });
 
 test("TC22 and fact 7 of W4.5a: the UDP options keep their values; a set to 0 gives invalid-argument", () => {
-  assert.deepEqual(UDP_DEFAULTS, { unicastHopLimit: 64, receiveBufferSize: 106_496n, sendBufferSize: 106_496n });
+  assert.deepEqual(UDP_DEFAULTS, { unicastHopLimit: 64, receiveBufferSize: 524_288n, sendBufferSize: 106_496n });
   assert.equal(UDP_MIN_RECEIVE_BUFFER, 1_152n);
   assert.equal(UDP_MIN_SEND_BUFFER, 2_304n);
   const check = (sock) => {

@@ -132,11 +132,12 @@ const MIN_RECEIVE_BUFFER = 1_152n;
 const MIN_SEND_BUFFER = 2_304n;
 
 // The defaults of the UDP socket options (TC22, fact 7 of package W4.5a).
-// They have no effect, as for TCP. runwasi gives the buffer sizes of the
-// kernel (212,992) divided by 2.
+// They have no effect, as for TCP. The values are those of runwasi on the
+// reference runner of package W4.5a; the buffer sizes depend on the host
+// (section 11, "Socket options").
 export const UDP_DEFAULTS = Object.freeze({
   unicastHopLimit: 64,
-  receiveBufferSize: 106_496n,
+  receiveBufferSize: 524_288n,
   sendBufferSize: 106_496n,
 });
 
@@ -976,6 +977,9 @@ export const UDP_BROADCAST_CODE = "access-denied";
 export const UDP_MULTICAST_REMOTE = true;
 // UDP_IPV6_REMOTE_CODE is the error code of an IPv6 remote address in stream
 // and send (fact 5, rule 4): an IPv6 socket has no socket in the UDP table.
+// An IPv6 multicast address is permitted, as on runwasi. The pod worker
+// keeps such a remote address and drops such a datagram itself, without a
+// message: nothing can receive it.
 export const UDP_IPV6_REMOTE_CODE = "remote-unreachable";
 // UDP_SEND_PERMIT is the result of check-send in wasmtime (fact 6): a fixed
 // permit, not a count of bytes. After a send that would block, check-send
@@ -1007,7 +1011,10 @@ function udpAddress(family, sa, remote) {
   }
   if (isUnspecified(ip) || sa.val.port === 0) throw "invalid-argument";
   if (isBroadcast(ip)) throw UDP_BROADCAST_CODE;
-  if (isMulticast(ip) && !UDP_MULTICAST_REMOTE) throw UDP_CAST_CODE;
+  if (isMulticast(ip)) {
+    if (!UDP_MULTICAST_REMOTE) throw UDP_CAST_CODE;
+    return ip;
+  }
   if (ip.tag === "ipv6") throw UDP_IPV6_REMOTE_CODE;
   return ip;
 }
@@ -1117,6 +1124,12 @@ class Udp {
   // connect sends connect for the remote address ip and port (rule 4). The
   // address 0.0.0.0 (:: for ipv6) with the port 0 removes the remote address.
   connect(sa) {
+    // An IPv6 socket can only connect to a multicast address: the pod worker
+    // keeps it without a message (UDP_IPV6_REMOTE_CODE).
+    if (this.family === "ipv6") {
+      this.remote = sa && copyAddress(sa);
+      return;
+    }
     if (sa === null) {
       this.remote = null;
       this.send("connect", { protocol: "udp", address: this.family === "ipv4" ? "0.0.0.0" : "::", port: 0 });
@@ -1203,6 +1216,8 @@ class Udp {
     const ip = udpAddress(this.family, sa, true);
     // Rule 7: a send that takes the pending error sends nothing.
     this.takeError();
+    // IPv6 multicast: nothing can receive the datagram.
+    if (ip.tag === "ipv6") return true;
     // Rule 6: without credit, the send would block.
     if (n > this.credit) return false;
     const bytes = new Uint8Array(data).buffer;
