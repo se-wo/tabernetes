@@ -69,9 +69,8 @@ step_wasi_udp() {
 	# The clients wait 10 seconds (DELAY_MS) and then need approximately 5
 	# seconds.
 	for p in wasi-udp-clients wasi-udp-facts wasi-udp-queue; do
-		wait_for "kubectl get pod $p" 'Completed|Error' 120 >/dev/null
+		wait_for "kubectl get pod $p -o jsonpath={.status.phase}" 'Succeeded|Failed' 120 >/dev/null
 	done
-	wait_for 'kubectl get pod wasi-echo-udp -o jsonpath={.status.containerStatuses[*].state.terminated.reason}' 'Completed|Error' 60
 	wait_for 'kubectl get pod wasi-udp-lo -o jsonpath={.status.containerStatuses[*].state.terminated.reason}' 'Completed|Error' 60
 	k get pods -l wasi-check=udp -o wide
 	cip="$(tab run "kubectl get service wasi-echo-udp -o jsonpath='{.spec.clusterIP}'" | tr -d ' \r\n')"
@@ -106,6 +105,10 @@ step_wasi_udp() {
 	ok=0
 	udp_refused "$a" || ok=1
 	check "UD10, UD11" "$ok" "a connected client to the Service wasi-udp-none: $(udp_lines "$(grep -E '^(peer|answer|no answer|error)' <<<"$a")") (want connection-refused)"
+
+	# How kube-proxy rejects a Service without endpoints (UD10, UD11).
+	# shellcheck disable=SC2016,SC2086 # for the shell in the node; crictl_ns is a list of flags
+	udp_fact "kube-proxy: mode '$(tab run "kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}'" 2>&1 | tr -d '\r' | sed -n 's/^mode: *//p')', rules for wasi-udp-none: $(udp_lines "$(docker exec "$N" nsenter $crictl_ns sh -c 'iptables-save 2>/dev/null | grep "wasi-udp-none"; nft list ruleset 2>/dev/null | grep -i "wasi-udp-none"' 2>&1 | head -6)")"
 
 	# UD12: no rule of kube-proxy has the ClusterIP with port 9. The result
 	# depends on the host, as for TCP (CR7 in section 9.2).

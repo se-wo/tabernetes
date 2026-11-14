@@ -5,7 +5,10 @@
 # until their servers listen and their names resolve.
 ---
 # UD2, UD7, UD15: the UDP echo server on 0.0.0.0:7. UD13: the container
-# "self" sends to the Service of its own pod.
+# "self" sends to the Service of its own pod, with the full name: the short
+# name is the name of the pod, which /etc/hosts gives the pod IP. "self" runs
+# for 60 seconds: a container that exits makes the pod not ready, and a
+# Service without ready endpoints rejects the datagrams.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-echo-udp, labels: {wasi-check: udp, app: wasi-echo-udp}}
@@ -23,9 +26,11 @@ spec:
       imagePullPolicy: Never
       env:
         - {name: MODE, value: udp-client}
-        - {name: CONNECT, value: "wasi-echo-udp:7"}
+        - {name: CONNECT, value: "wasi-echo-udp.default.svc.cluster.local:7"}
         - {name: CONNECTED, value: "1"}
         - {name: LINE, value: self}
+        - {name: COUNT, value: "30"}
+        - {name: INTERVAL_MS, value: "2000"}
         - {name: DELAY_MS, value: "10000"}
 ---
 apiVersion: v1
@@ -49,6 +54,7 @@ kind: Service
 metadata: {name: wasi-echo-udp-pod}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector: {app: wasi-echo-udp}
   ports: [{port: 7, protocol: UDP}]
 ---
@@ -62,6 +68,8 @@ spec:
 ---
 # UD20: the echo server on 127.0.0.1:7 and a client in the same pod. UD21:
 # the name wasi-udp-lo resolves to the pod IP, which has no socket on port 7.
+# The pod is not ready after the client exits, so the headless Service
+# publishes the address of a pod that is not ready.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-udp-lo, labels: {wasi-check: udp, app: wasi-udp-lo}}
@@ -90,6 +98,7 @@ kind: Service
 metadata: {name: wasi-udp-lo}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector: {app: wasi-udp-lo}
   ports: [{port: 7, protocol: UDP}]
 ---
