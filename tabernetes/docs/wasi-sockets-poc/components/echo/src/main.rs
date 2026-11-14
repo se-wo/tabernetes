@@ -24,10 +24,10 @@ fn main() {
     for c in l.incoming() {
         let Ok(c) = c else { continue };
         println!("tcp from {:?} to {:?}", c.peer_addr(), c.local_addr());
-        let mut w = c.try_clone().expect("clone");
-        for line in BufReader::new(c).lines() {
+        // &TcpStream reads and writes: try_clone is not supported on wasip2.
+        for line in BufReader::new(&c).lines() {
             let Ok(line) = line else { break };
-            if w.write_all(format!("echo {line}\n").as_bytes()).is_err() {
+            if (&c).write_all(format!("echo {line}\n").as_bytes()).is_err() {
                 break;
             }
         }

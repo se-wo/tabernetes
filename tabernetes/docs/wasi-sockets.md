@@ -1130,8 +1130,11 @@ Linux x86-64. The command `udptable` runs Go for `js/wasm` in Node.js. The
 command `runwasi` runs the test components of `docs/wasi-sockets-poc/components/`
 with the published `containerd-shim-wasmtime` v0.6.1 and containerd 2.4.2.
 It runs without kubelet. So it records the exit status of the task, not the
-pod status and not the restart count. The Docker check records these
-(item 8).
+pod status and not the restart count. The command `docker` runs
+`docs/wasi-sockets-poc/docker/checks.sh` on a Docker node that joined with
+the Docker check. That node runs kubelet, so it records the pod status and
+the restart count. The test host has cgroups v1 and nested Docker: the
+Docker check needs `--privileged` and `OOM_WORKAROUND=1` there.
 
 | Item | Result | Effect on the design |
 | --- | --- | --- |
@@ -1143,11 +1146,14 @@ pod status and not the restart count. The Docker check records these
 | 7, PX11 | The environment contains the variables of the container spec, for example `PATH` and `HOSTNAME`, and `REQUEST_ID`. | PX11 stays. |
 | 7, PX3, PX32 | A value that does not parse gives `0.0.0.0:8080`. Port 0 gives an ephemeral port of the kernel. | PX3 and PX32 stay. |
 | 7, PX33 | The IP 192.0.2.7 gives "Address not available (os error 99)". The task exits with status 137. | The tab node gives the same status. |
-| 7, PX4 | Not examined. The kernel of the test host has no IPv6. | The Docker check examines `[::]:8080`. |
+| 7, PX4 | Not examined. The kernel of the test host has no IPv6. On the Docker node, `[::]:8080` gives "Address family not supported by protocol" and a restart loop with status 137. | A host with IPv6 must examine `[::]:8080`. |
 | 7, CO11, CR6 | A component with an import that the linker does not have does not start. The log names the interface, for example `wasi:http/types@0.2.12`. The task exits with status 137. A command component with `wasi:http` gets this result. | CO11, CR6. |
-| 7, CO4, NL1 | Not examined yet. | |
+| 7, CO3, CO4 | On the Docker node, the entrypoint `/core.wasm#go` calls the export `go`, and the pod ends with `Completed`. Without `#go`, runwasi looks for `_start`: "component does not have exported function", status 137, reason `Error`. | CO3 and CO4. |
+| 7, NL1 | On the Docker node, a command component finds `kubernetes` and `kubernetes.default.svc.cluster.local`: 10.96.0.1. | NL1 stays. |
+| 7, CR2, CR7 | On the Docker node, a client request to a name that does not resolve gives `DNS-error` with the rcode "address not available". A ClusterIP port without a Service gives `connection-refused`. | CR2 and CR7 stay. |
+| 7, CO11, CR6, 13 | On the Docker node, the pods with `exit-with-code` and with `wasi:http` in a command component end with status 137 and the reason `Error`. `exit(3)` gives the exit code 1. | CO11, CR6 and CO18. |
 | 13 | `std::process::exit` of Rust gives 0 for 0, 1 for 1 and 1 for 3. Rust 1.97 imports only `exit`. A component with an import of `exit-with-code` does not link (status 137). | CO18: exit codes 0 and 1 only. |
-| 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. | PX26. The Docker check records the restart count. |
+| 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. On the Docker node, the container ends with 139 and the reason `Error`. kubelet starts it again, with the restart count 1. `REQUEST_ID` then starts at 0 again. A trap and an error code cause no restart. | PX26. |
 | 1 | In Chrome 153, a module worker transpiles the command component and the proxy component. Firefox and Safari: not examined. The test host has only Chromium. | |
 | 2 | The first transpiler run takes 393 to 427 ms, with the load of the transpiler from a local server. A component of 3.4 MB takes 79 to 83 ms. A component of 4.4 MB takes 135 to 165 ms. A component of 12.0 MB from componentize-js takes 593 to 614 ms. | Open question 1: the time in Chrome is far below 10 seconds. |
 | 2 | The generated JavaScript of the proxy component has 785,828 bytes. It contains the runtime of jco for JSPI. | The cache of decision 2 keeps it one time for each key. |
@@ -1167,6 +1173,9 @@ pod status and not the restart count. The Docker check records these
 | 15 | A cancel that continues the suspended call with an exception frees all 100 instances, in each of three rounds. | Section 8.6, step 2. |
 | 9 | `docs/wasi-sockets-poc/udptable/` binds TCP in the in-process network and UDP in a UDP table on `10.244.0.2:53`. The in-process network alone gives "Address already in use". Ephemeral ports start at 32768 for each IP. A queue of 256 KiB keeps 256 datagrams of 1,024 bytes. | UD1, UD3 to UD6. |
 | 10 | Chrome 153 and pion v4.2.26 each open a channel `udp`. The other side sees `ordered: false` and `maxRetransmits: 0` for each channel. Messages of 65,521 bytes and of 65,537 bytes arrive in the two directions. Chrome gives `sctp.maxMessageSize` 262,144. | ND3 and ND5 stay. |
+| 8 | On the Docker node, the echo component answers through the Services `echo-tcp` (TCP) and `echo-udp` (UDP). The Rust standard library on `wasm32-wasip2` has no `TcpStream::try_clone`. | Section 10.1. |
+| 17 | Not examined. On the test host, kube-network-policies cannot write its nftables rules ("netlink receive: no such file or directory"). A NetworkPolicy then has no effect on the Docker node. | A deferred test (decision 16). |
+| 18 | The Docker check imports the images from the Docker of the host with `ctr images import`, as `IMPORT=1` does. The pods use `imagePullPolicy: Never`. | Section 10.2: the import step. |
 | 16 | In Chrome 153, a module worker from a `data:` URL has the origin `null`. A `WebAssembly.Module` from the page arrives through `postMessage` and runs. IndexedDB and `caches` throw `SecurityError`. A `fetch` to the origin of the page fails. Firefox and Safari: not examined. | Decision 13 stays. |
 
 ## 10 Tests
@@ -1182,8 +1191,8 @@ The mirror gets these images, in Rust:
 - a proxy component that sends client requests
 
 The images are on ghcr.io and in the mirror of the page. A Docker node
-without a proxy cannot pull them (section 4.4). Phase 0, item 18 selects
-the method for the Docker check.
+without a proxy cannot pull them (section 4.4). The Docker check imports
+them into the node with `ctr images import` (section 9.2, item 18).
 
 ### 10.2 Tests on a Docker node
 

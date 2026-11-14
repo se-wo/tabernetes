@@ -1,5 +1,5 @@
 #!/bin/bash
-# run.sh components|runwasi|browser|proxy|opaque|udptable|webrtc
+# run.sh components|runwasi|browser|proxy|opaque|udptable|webrtc|docker
 # Proofs of concept for phase 0 of ../wasi-sockets.md. They build in
 # components/target and in a temporary directory, and leave the rest of the
 # repository alone.
@@ -14,6 +14,7 @@
 #   opaque      a pod worker from a data: URL: origin, Module, Blob import
 #   udptable    a UDP table next to the in-process network of Go (js/wasm)
 #   webrtc      the data channel "udp" between Chromium and pion
+#   docker      the components on a joined Docker node (docker/checks.sh)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 SHIM_VERSION=containerd-shim-wasmtime/v0.6.1
@@ -143,6 +144,17 @@ webrtc)
 	go build -o rtc .
 	node "$here/webrtc/drive.mjs" ./rtc
 	;;
+docker)
+	components
+	tmp="$(mktemp -d)"
+	trap 'rm -rf "$tmp"' EXIT
+	for c in cmd exitcode cmdhttp core proxy echo; do
+		cp "$here/components/target/wasm32-wasip2/release/$c.wasm" "$tmp/"
+		printf 'FROM scratch\nCOPY %s.wasm /%s.wasm\nENTRYPOINT ["/%s.wasm"]\n' "$c" "$c" "$c" >"$tmp/Dockerfile"
+		docker build -q -t "poc/$c:1" "$tmp" >/dev/null
+	done
+	"$here/docker/checks.sh"
+	;;
 udptable)
 	tmp="$(mktemp -d)"
 	trap 'rm -rf "$tmp"' EXIT
@@ -153,7 +165,7 @@ udptable)
 	env -i PATH="$PATH" HOME="$HOME" node "$(go env GOROOT)/lib/wasm/wasm_exec_node.js" u.wasm
 	;;
 *)
-	sed -n '2,16p' "$0" >&2
+	sed -n '2,17p' "$0" >&2
 	exit 2
 	;;
 esac
