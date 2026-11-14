@@ -1240,8 +1240,21 @@ these rules:
   `response` has the error code `trap`.
 - If the browser cannot make the memory of an instance (PX34), the request
   goes back to the front of the queue. It starts again when another instance
-  of the container ends. If no instance of the container runs, it starts
-  again after 1 second.
+  of the container ends, or after 1 second. The timer of 1 second also runs
+  when other instances of the container run: these instances can wait for a
+  long time, and other pods of the tab can free memory before them.
+- When a request starts to wait for memory, the pod worker writes this line
+  to stderr of the container: "tabernetes: the browser tab has no Wasm memory
+  left for a new instance; N requests of this container wait (PX34)". While
+  the wait continues, it writes the line again after 60 seconds or more. When
+  an instance gets its memory again, it writes "tabernetes: a new instance got
+  its Wasm memory after S s". So a wait for memory is not silent. runwasi
+  does not write these lines (section 11).
+- If the browser cannot make the memory of the instance of the link check,
+  the pod worker writes the line of PX34 and tries the link check again after
+  1 second. Requests wait in the queue until the link check is complete. So a
+  component with an import that is not there also gets the status of CO12
+  when the tab is full.
 - If the component sets a response and its body is complete, the pod worker
   sends this response, also if the instance then traps. runwasi does the
   same, because it sends the response when the component sets it.
@@ -1265,6 +1278,30 @@ these rules:
   have no field for them. The Go side uses its timeouts (CR8, CR11).
 - An error code in `fetched` that `wasi:http` does not have goes to the
   component as `internal-error` with the name of the code as its text.
+
+The Wasm memories of a tab (open question 2) obey these rules:
+
+- Each container keeps a maximum of 16 instances (PX9). The tab has no
+  limit of its own.
+- A proxy component waits for memory (PX34), with the lines in its log of
+  the rules above.
+- A command component or a component with an entrypoint that cannot get its
+  memory does not start. The container exits with 137. Its log contains "the
+  component cannot instantiate: the browser tab has no Wasm memory left for a
+  new instance", and the text of the browser.
+- A module (WASI preview 1) that cannot get its memory exits with 128. Its
+  log contains the text of the browser: "Out of memory: Cannot allocate Wasm
+  memory for new instance". `wasi.worker.js` gives this status, not
+  `component.js`.
+- With `restartPolicy: Always`, kubelet starts these containers again with
+  its back-off. So a full tab gives a status and a restart, not a pod that
+  waits without a trace.
+- Package W2.4 of `wasi-sockets-plan.md` adds a limit for the tab, the
+  release of the memory of ended instances and a status for a node worker
+  that cannot start.
+
+`web/test/e2e/wasi-memory.test.mjs` measures the numbers of section 14 and
+tests these rules on a full tab.
 
 ### 8.7 UDP table
 
@@ -1745,6 +1782,7 @@ These differences stay after this design. `README.md` must show them.
 | Item | Tab node | Docker node with runwasi |
 | --- | --- | --- |
 | Instances of a proxy component at the same time | A maximum of 16 | No maximum |
+| Memory for new instances and pods | All pods and nodes of one browser tab share approximately 125 Wasm memories (section 14). When the tab is full, requests to proxy components wait with a line in the log, and other WebAssembly pods exit with 137 (components) or 128 (modules). | The memory of the host |
 | Instances of a proxy component on threads | One thread. An instance in a loop of CPU work stops the other instances and `cancel`. | Parallel tasks of tokio |
 | A component in a loop of CPU work | It receives no messages. Only a stop of the container ends it. | The kernel stops it at the end of its time |
 | Bodies of HTTP requests and responses | Complete blocks, a maximum of 16 MiB | Streams, no maximum |
@@ -1772,7 +1810,8 @@ These differences stay after this design. `README.md` must show them.
 | The `poll` of the shim continues a ready pollable after `setTimeout(0)` (fact 9, fact 21). | A component that polls ready sockets does approximately 250 rounds each second. | Phase 1 measures it with the CO17 test. A later change can give the pod worker its own `poll`. |
 | Go cannot compile components (fact 7). | The current test images in Go cannot use sockets. | The new test images are in Rust. `mise.toml` and CI get Rust. |
 | Each request makes a new instance with a new memory. | The browser frees the memory only at garbage collection. Many requests can use too much memory. | PX9, CO7. Phase 0, items 6 and 15. |
-| Chrome 153 gives one renderer process approximately 125 Wasm memories (section 9.2, item 15). Each instance, each module and the Go binary of each tab node uses one. | New instances and new pods fail when the tab has no Wasm memory left. | PX34. Open question 2. A suspended instance must continue with an exception before the pod worker discards it (section 8.6). |
+| Chrome 153 gives one renderer process 125 Wasm memories. The page, the node workers and their pod workers share them (section 14). | 8 proxy containers with 16 requests each make the tab full. New components exit with 137, new modules with 128. A new node worker does not start. | PX34, section 8.6. A suspended instance must continue with an exception (section 8.6). Package W2.4. |
+| The memory of an instance that ended stays until the garbage collection of its pod worker. An idle pod worker collects its garbage late. | After a load, the tab stays full or almost full. New pods fail (section 14). | Chrome collects the garbage of a pod worker that cannot make a memory. A deletion of pods frees their memories. Package W2.4. |
 | The Go thread moves the data of all sockets of pods. | Much network traffic of pods makes the control plane slower. This is the same reason as for the rejection of a TCP/IP stack in section 13, but only for traffic of pods. | The credits of section 8.4 set a limit to the memory. AC1 shows the time in the container. A later design can move bytes between workers with shared memory. |
 | The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | The item is not complete in `docs/networking-policy.md`. Phase 5 cannot end before it (decision 16). |
 | A Docker node without a proxy has no internet (section 4.4). | The Docker check cannot pull the Rust test images. | Phase 0, item 18. |
@@ -1811,6 +1850,56 @@ These differences stay after this design. `README.md` must show them.
 2. Is 16 the correct maximum of instances for PX9? All pod workers of a tab
    share approximately 125 Wasm memories (section 9.2, item 15). Phase 2
    must decide a limit for the tab and how the containers share it.
+
+   Answer of phase 2 (package W2.3b). `web/test/e2e/wasi-memory.test.mjs`
+   measures the numbers in headless Chromium 153 of Playwright 1.63, the
+   browser of CI. A worker of the page makes Wasm memories until the browser
+   refuses one. The number of these memories is the free memories of the tab.
+
+   | Item | Wasm memories |
+   | --- | --- |
+   | An empty renderer process | 125 |
+   | The tab node (the Go binary of the page, and one more) | 2 |
+   | A node worker (its Go binary) | 1 |
+   | The transpile worker of a Go thread, after its first component | 1 |
+   | A command component that runs | 1 |
+   | A module (WASI preview 1) that runs: the module and the shared memory of its sleeps | 2 |
+   | A proxy container without requests: the instance of the link check, until garbage collection | 1 |
+   | Each active instance of a proxy component | 1 |
+   | The memory of an instance that ended | 1, until the garbage collection of its pod worker |
+
+   - A module on a node worker decreases the free memories of the page by 2.
+     So the page, all node workers and all their pod workers are in one
+     renderer process, and they share one limit.
+   - 8 proxy containers with 16 requests each (128 instances) made the tab
+     full after 2.1 seconds. More requests waited (PX34). A new proxy
+     container started and wrote the line of PX34 into its log. A new command
+     component exited with 137 and the text of section 8.6. A new module
+     exited with 128. A new node worker did not start: its Go binary got no
+     memory, the node did not register, and only the status line of the page
+     showed "stopped".
+   - After the requests ended, the request of the new container waited 13.7
+     seconds more. 5 and 30 seconds after the end, only 23 of 119 memories
+     were free. The deletion of the containers freed all memories.
+   - 160 requests in a sequence to one container decreased the free memories
+     from 120 to 66. The pod worker then collected its garbage, and after 30
+     seconds all memories were free.
+
+   Decision: 16 stays the maximum of each container (PX9). The tab gets no
+   limit of its own in phase 2. The rules of section 8.6 make a full tab
+   visible: requests wait with a line in the log, other pods exit with a
+   status and kubelet starts them again. Reasons:
+
+   - The memories of the tab do not depend only on the active instances. The
+     garbage of pod workers, the Go binaries and the transpile workers also
+     use them. A limit for the active instances alone does not prevent a full
+     tab.
+   - A limit for the tab must have a broker in the page. Pod workers have
+     opaque origins and are workers of different Go threads, so the broker
+     must have new messages in both contract files. This is not a small
+     change. Package W2.4 of `wasi-sockets-plan.md` does it.
+   - A smaller maximum for each container does not prevent a full tab: 16
+     containers with 8 instances also make it full.
 3. After phase 5, Docker pods can get UDP answers from CoreDNS on a tab
    node. Can CoreDNS then stay on the tab node? A later design must decide.
 

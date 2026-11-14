@@ -45,7 +45,9 @@ order. Packages with the same predecessors can run at the same time.
 | W2.1a | 2 | PX1 to PX4, PX6, PX16 to PX20, PX23, PX26 to PX33, AC1 (proxy server) | `k8s/tabernetes/tabnode_wasi_proxy.go` (new), the proxy world in `componentStatus`, `startComponent` and `pullWasmOnce` of `tabnode_wasi.go` | `tabnode_wasi_msg.go` | phase 1 | L |
 | W2.1b | 2 | CR1 to CR8, CR10, CR11, MS5, AC1 (client requests) | `k8s/tabernetes/tabnode_wasi_fetch.go` (new), a client for components in `tabnode_dial.go`, `synTimeout` as a variable for tests | `tabnode_wasi_msg.go`, `tabnode_netpol.go` (only `synTimeout`) | phase 1 | M |
 | W2.2 | 2 | PX7 to PX15, PX21, PX22, PX24 to PX27, PX34, CR9 | `web/src/http.js` (new, from `http-own.js` of phase 0), the proxy path of `component.js` and `component.worker.js` | `wasi_messages.js` | phase 1 | L |
-| W2.3 | 2 | All PX and CR tests end-to-end, the CO2 test of `bothrev`, open question 2 | step `wasi-proxy`, `README.md` (phase 2) | `wasi-sockets.md` (the answer to open question 2) | W2.1a, W2.1b, W2.2 | M |
+| W2.3a | 2 | All PX and CR tests end-to-end, the CO2 test of `bothrev` | step `wasi-proxy`, the end-to-end tests of PX and CR, `README.md` (phase 2) | none | W2.1a, W2.1b, W2.2 | M |
+| W2.3b | 2 | Open question 2 (PX9, PX34) | `web/test/e2e/wasi-memory.test.mjs` (new) | `wasi-sockets.md` (sections 8.6, 11, 12, 14), `component.js` (PX34 in the proxy path), `proxy.test.mjs` (tests of PX34), `README.md` (one sentence after W2.3a) | W2.1a, W2.1b, W2.2 | S |
+| W2.4 | 2 | The Wasm memory of the tab (sections 12 and 14) | `web/src/memory.js` (new), see below | `wasi_messages.js`, `tabnode_wasi_msg.go` (rule 4), `component.js`, `wasi.js`, `nodes.js`, `node.worker.js`, `wasi.worker.js` | W2.3b | L |
 | W3.1 | 3 | TC1 to TC4, TC7 to TC12, TC14 to TC16, TC18, TC19, NL1 to NL3, MS2 to MS4, AC1 (TCP) | `k8s/tabernetes/tabnode_wasi_tcp.go` (new), `tabnode_loopback.go` (new), the loopback checks in `tabnode_dial.go`, `tabnode_net.go`, `tabnode_netpol.go` and `podlink.go` | `tabnode_wasi_msg.go` | phase 2 | L |
 | W3.2 | 3 | TC5, TC6, TC13, TC17, TC20 to TC22, NL in the pod worker | the TCP and lookup part of `web/src/sockets.js` | `wasi_messages.js` | phase 2 | L |
 | W3.3 | 3 | All TC and NL tests end-to-end, PX5, CO17, CO19 | step `wasi-sockets`, `README.md` (phase 3) | none | W3.1, W3.2 | M |
@@ -58,6 +60,19 @@ order. Packages with the same predecessors can run at the same time.
 | W5.2 | 5 | ND13 to ND19, the agent part of ND3 and ND12 | `node/agent/podlink.go` | none | phase 4 | L |
 | W5.3 | 5 | ND1, ND10, the deferred tests | step `wasi-udp` (between nodes), `docs/networking-policy.md`, `README.md` (phase 5) | none | W5.1, W5.2 | M |
 | W6.1 | 6 | IC1 to IC8 | ICMP in `tabnode_netpol.go`, `ping` in `coreutils_misc.go`, `README.md` (phase 6) | none | phase 4 | M |
+
+W2.4 does not stop phase 3. It can run at the same time as phases 3 to 6.
+It does these items:
+
+- A broker in the page (`web/src/memory.js`). It counts the Wasm memories
+  of all Go threads and pod workers and shares a limit for the tab between
+  the containers.
+- A request from the page that makes idle pod workers collect their
+  garbage. To examine: one new memory in each pod worker. A memory that the
+  browser cannot make starts a garbage collection in that worker.
+- A status in the terminal and on the Node for a node worker whose Go
+  binary gets no memory (`nodes.js`, `node.worker.js`).
+- The text of section 8.6 for modules (`wasi.worker.js`).
 
 Phase 5 has only deferred tests. So W6.1 can run at the same time as phase
 5. The deferred tests of W5.3 write SKIP until the nfqueue item of
