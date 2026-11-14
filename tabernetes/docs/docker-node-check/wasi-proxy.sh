@@ -14,7 +14,7 @@
 #                   variable
 #   PX2, PX3        no variable, and a value that does not parse: port 8080
 #   PX4, PX32, PX33 [::]:8080, port 0 and a foreign IP
-#   PX5             SKIP: package W3.3
+#   PX5             in the step wasi-sockets (wasi-sockets.sh)
 #   PX6, PX11, PX13 the context of an instance
 #   PX7             a new instance for each request
 #   PX8, PX9, PX10  20 requests that wait 1 second
@@ -153,8 +153,6 @@ step_wasi_proxy() {
 	docker logs "$N" 2>&1 | grep -m3 'os error 99' >>"$OUT/$step.txt"
 	[ "$a" = "rc=0 restarts 0" ] && [ "${s#* }" = "137 Error" ] || ok=1
 	check "PX4, PX32, PX33" "$ok" "[::]:8080: $a (want rc=0 restarts 0); port 0 listens on '$p': $b (want a port of 32768 to 60999, rc=0); 192.0.2.7:8080: restarts, exit code, reason '$s' (want 137 Error)"
-
-	result SKIP "PX5: 127.0.0.1:9000 is for package W3.3 (the loopback table of phase 3)"
 
 	# PX6, PX11, PX13: the context of an instance on 0.0.0.0:9090, with the
 	# two variables of runwasi in the container spec.
