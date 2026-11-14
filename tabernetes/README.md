@@ -129,6 +129,17 @@ browser tab (single wasm binary)                     docker run tabernetes
   also advertises `127.0.0.1` for the `-p 127.0.0.1:<port>:<port>/udp`
   mapping. That way it works on Docker Desktop, where the browser cannot
   reach container IPs.
+- A Docker node leaves the cluster as soon as its agent stops, with Ctrl-C or
+  `docker stop`. The agent sends `bye` on the `ctl` data channel, which the
+  page opens with every connection, and waits up to three seconds for the
+  answer. The tab then deletes the Node and its pods, so their controllers
+  start new pods on other nodes right away. There is no drain first: the
+  containers of the node stop with the agent anyway, and the 10 seconds of
+  `docker stop` are too short to wait for PodDisruptionBudgets. A node whose
+  agent dies without a bye (`docker kill`, a lost network) stays `NotReady`,
+  and its pods move after the 300 second toleration, as in a real cluster.
+- `join --kubectl` lets kubectl, helm or k9s on the Docker machine reach the
+  cluster, see [kubectl outside the browser](#kubectl-outside-the-browser).
 
 ## The tab node
 
@@ -567,6 +578,44 @@ a real one, with `fallback: true`. Firefox and Safari have no JSPI or no
 WebGPU in workers in some versions; `wasmJSPI` and a missing slice show that.
 A lost device is noticed at the next probe, within a minute.
 
+## kubectl outside the browser
+
+`join --kubectl` prints a `docker run` command like `join` does. The agent
+runs in kubectl mode: it starts no kubelet and creates no namespaces, so it
+needs none of the flags of a node. It forwards every TCP connection to port
+6443 of the container through its own WebRTC data channel to the apiserver
+in the tab, like the `api` channels of a node.
+
+```bash
+docker run --rm -p 127.0.0.1:<udp port>:<udp port>/udp -p 127.0.0.1:6443:6443 \
+  --name tabernetes-kubectl-1 --pull always <image> \
+  kubectl <token> > tabernetes.kubeconfig
+kubectl --kubeconfig tabernetes.kubeconfig get nodes
+```
+
+- The agent writes the kubeconfig to stdout and its logs, the `accept` line
+  included, to stderr. So the command has no `-t`: with a TTY, Docker mixes
+  both. `docker logs <name> 2>/dev/null` prints the kubeconfig again.
+- The kubeconfig trusts the CA of the tab and uses the token of a
+  ServiceAccount `tabernetes-kubectl-<n>` in `kube-system`, bound to
+  `cluster-admin`. Each `join --kubectl` makes a new one.
+- The token is valid for 24 hours. A reload of the page makes a new cluster
+  with a new CA and signing key, so the kubeconfig works only until then.
+- `rmnode kubectl-<n>` closes the connection and deletes the ServiceAccount
+  and its ClusterRoleBinding, which voids the token. The agent stops. When the
+  agent stops first, it says `bye`, and the tab deletes both, too.
+- The port is published only on `127.0.0.1`. The token is `cluster-admin`, so
+  do not publish it on the LAN. If port 6443 is taken, publish another one,
+  for example `-p 127.0.0.1:16443:6443`, and add
+  `--server https://127.0.0.1:16443` before `kubectl`. The certificate of the
+  apiserver is valid for `127.0.0.1` and `localhost` on any port.
+- A token from `join --kubectl` does not join a node, and a token from `join`
+  gives no kubectl access. The agent checks the kind of the token and names
+  the right command.
+- The control plane runs on the one thread of the tab. A busy kubectl
+  outside, for example `kubectl get -A -w` or a large `helm install`, slows
+  the whole cluster.
+
 ## NetworkPolicy
 
 NetworkPolicies and ClusterNetworkPolicies (`policy.networking.k8s.io/v1alpha2`)
@@ -798,7 +847,8 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 - Containers on the tab nodes get no signals. A container that stops gets
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
-- No persistence: a reload starts a new cluster.
+- No persistence: a reload starts a new cluster. Docker nodes and the
+  kubeconfigs of `join --kubectl` do not survive it.
 - The static pod manifests in `/etc/kubernetes/manifests` are not watched:
   an edit changes nothing. A component that exits stays down, its pod shows
   `CrashLoopBackOff`. The `etcd-tab` pod is the etcd shim.
