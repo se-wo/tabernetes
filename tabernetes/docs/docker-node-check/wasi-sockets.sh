@@ -80,12 +80,13 @@ step_wasi_sockets() {
 	[ "$out" = "echo tcp" ] && [ "$a" = c=true ] || ok=1
 	check "TC1, TC8" "$ok" "nc through the Service wasi-echo-tcp gives '$out' (want echo tcp); the tcpSocket probe on 0.0.0.0:7 gives $a (want c=true)"
 
-	# TC2, TC3, TC4, TC5, TC17. busybox nc writes the error of the connect
-	# ("Connection refused") only with -v.
+	# TC2, TC3, TC4, TC5, TC17. busybox nc writes no text for a refused
+	# connection; busybox wget writes "can't connect ... Connection refused"
+	# (and "download timed out" for a timeout).
 	ip="$(pod_ip wasi-echo-lo)"
 	a="$(so_logs wasi-echo-lo client)"
 	s="$(so_logs wasi-echo-lo c)"
-	b="$(so_exec "echo x | nc -v -w 2 $ip 7; echo rc=\$?")"
+	b="$(so_exec "wget -qO- -T 3 $ip:7; echo rc=\$?")"
 	lport="$(sed -n 's/^local 127\.0\.0\.1:\([0-9]*\) peer 127\.0\.0\.1:7$/\1/p' <<<"$a")"
 	ok=0
 	grep -qx 'tcp echo on 127.0.0.1:7' <<<"$s" || ok=1
@@ -139,7 +140,7 @@ step_wasi_sockets() {
 	if grep -q '^tc6 create ipv6: ' <<<"$s"; then
 		result SKIP "TC6, TC7: the host has no IPv6 ('$s')"
 	else
-		b="$(so_exec "echo x | nc -v -w 2 $(pod_ip wasi-sockets-errors) 7006; echo rc=\$?")"
+		b="$(so_exec "wget -qO- -T 3 $(pod_ip wasi-sockets-errors):7006; echo rc=\$?")"
 		ok=0
 		[ "$s" = 'tc6 bind [::]:7006: ok listen: ok' ] && grep -q 'Connection refused' <<<"$b" || ok=1
 		check "TC6, TC7" "$ok" "'$s' (want ok ok); another pod to the IPv4 pod IP on port 7006: '$(head -1 <<<"$b")' (want Connection refused)"
