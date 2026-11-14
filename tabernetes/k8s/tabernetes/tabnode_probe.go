@@ -137,7 +137,7 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 		if host == "" {
 			host = ip
 		}
-		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		conn, err := dialFromNodeHost(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
 			return err
 		}
@@ -172,9 +172,10 @@ func (c *ctr) probeOnce(ctx context.Context, p *v1.Probe) error {
 
 // HTTPS probes do not verify the certificate, like the kubelet's: pods serve
 // self-signed ones (metrics-server).
+// The dial examines the loopback table (section 8.11, TC15).
 var probeClient = &http.Client{
 	Transport: &http.Transport{
-		DialContext:       (&net.Dialer{}).DialContext,
+		DialContext:       dialFromNodeHost,
 		DisableKeepAlives: true,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 	},

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -21,7 +22,16 @@ import (
 // grpc.health.v1.Health/Check on the pod IP over the in-process network. The
 // error text is the one of the kubelet event, for example
 // `service unhealthy (responded with "NOT_SERVING")`.
+//
+// A row of the loopback table refuses the probe: its source is 127.0.0.1,
+// not the pod IP (section 8.11, TC15). The probe of the kubelet dials with
+// grpc.WithBlock and tries again after a refused connection until its
+// timeout, so the probe waits and gives the text of the timeout.
 func grpcProbe(host, service string, port int, timeout time.Duration) error {
+	if dst := (&net.TCPAddr{IP: net.ParseIP(host), Port: port}); loopbackRefused("tcp", loopbackIP, dst) {
+		time.Sleep(timeout)
+		return fmt.Errorf("timeout: failed to connect service %q within %v: %+v", dst.String(), timeout, context.DeadlineExceeded)
+	}
 	res, out, _ := grpcprobe.New().Probe(host, service, port, timeout, grpcprobe.ProbeOptions{})
 	if res != probe.Success {
 		return errors.New(out)

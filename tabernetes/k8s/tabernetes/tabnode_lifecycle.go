@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -136,10 +135,11 @@ func discardBody(resp *http.Response) {
 
 // hookClient sends the requests of httpGet hooks. Like the one of the
 // kubelet, it does not verify certificates (there is nothing to verify them
-// against) and follows redirects on the same host only.
+// against) and follows redirects on the same host only. The dial examines the
+// loopback table (section 8.11, TC15).
 var hookClient = &http.Client{
 	Transport: &http.Transport{
-		DialContext:       (&net.Dialer{}).DialContext,
+		DialContext:       dialFromNodeHost,
 		DisableKeepAlives: true,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 	},

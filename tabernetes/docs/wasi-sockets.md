@@ -1325,9 +1325,9 @@ rules. They close gaps of the requirements:
   stderr, and the container exits with 137. An IP that is not the pod IP,
   not a wildcard IP and not a loopback IP gives "Address not available (os
   error 99)" (PX33). A port in use gives "Address in use (os error 98)".
-- A loopback IP (`127.0.0.0/8` or `::1`) listens on the pod IP. Until
-  package W3.1a adds the loopback table, it accepts connections from all
-  clients (PX5).
+- A loopback IP (`127.0.0.0/8` or `::1`) listens on the pod IP. `listenPod`
+  adds a row to the loopback table, so only the pod itself can connect (PX5,
+  section 8.11).
 - For port 0, the proxy server tries the ports 32768 to 60999 in sequence
   and listens on the first free port (PX32).
 - The pod worker gets no arguments and no preopened directories for a proxy
@@ -1858,10 +1858,10 @@ The column "Nodes" gives the nodes for the test:
 | CR10 | The component discards a client request to a Service that does not answer. The Go side closes the connection. | tab |
 | CR11 | A unit test with a short timer makes sure that the Go side gives `connection-timeout`. | tab |
 | TC1, TC8 | The TCP echo pod gives answers through a Service. | tab, worker, Docker |
-| TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. | tab, Docker |
-| TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. | tab, Docker |
+| TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. The unit tests `TestListenPodLoopback` and `TestLoopbackDialFromPod` examine the Go side. | tab, Docker |
+| TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. The unit tests of `tabnode_loopback_test.go` examine each path of section 8.11, and `TestProxyLoopback` examines PX5. A gRPC probe of a row fails after its timeout, as the kubelet does. | tab, Docker |
 | TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. | tab, Docker |
-| TC9 | A client that connects before it binds has a local port from 32768 to 60999. | tab, Docker |
+| TC9 | A client that connects before it binds has a local port from 32768 to 60999. The unit tests `TestReservePort` and `TestDialClusterFrom` examine the table of the ports in use. | tab, Docker |
 | TC10 | A unit test with a clock that the test controls: a denied client gets `timeout` after `synTimeout`. A real wait of 127 seconds is not permitted (`wasi-sockets-plan.md`, rule 5). | tab, Docker (deferred) |
 | TC11 | A client to a closed port gets `connection-refused`. | tab, Docker |
 | TC12 | A unit test sends 10 MB to a server that does not read. The buffer of the Go side for this connection stays at 256 KiB or less. | tab |
@@ -1933,6 +1933,7 @@ These differences stay after this design. `README.md` must show them.
 | `connection-refused` for UDP between nodes | Not available | Available |
 | Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). |
 | A dial from a pod to its own socket on `127.0.0.1` through the pod IP or through a Service of the pod | It connects (section 8.11) | `connection-refused` |
+| A socket of a `hostNetwork` pod on `127.0.0.1` | It listens on the node IP without a row in the loopback table. Other pods can connect. | Only the host of the node can connect |
 | The addresses of a connection that a socket on `0.0.0.0` accepts from a client of the same pod that used `127.0.0.1` | The pod IP | `127.0.0.1` |
 | ICMP | Only on one tab node, each echo request examined | Between all nodes, only the first echo request examined |
 | Writes of a WebAssembly container to a volume | They change only the copy in the worker. A restart does not show them. | They change the volume. A restart shows them. |
