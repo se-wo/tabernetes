@@ -84,9 +84,9 @@ test("a component gives JavaScript and compiled core modules", async () => {
   assert.equal(FakeWorker.started[0].opts.type, "module");
 });
 
-test("a caller without components gets unsupported until the pod worker can run components", async () => {
+test("a caller without components gets unsupported", async () => {
   const r = await runtime().load({ layers: [layer("http://x/c")], headers: {} });
-  assert.match(r.unsupported, /WASI preview 2 component.*cannot run components yet/);
+  assert.match(r.unsupported, /WASI preview 2 component.*did not ask for components/);
 });
 
 test("CO8: one transpiler run for each key; a second entrypoint gives a second run", async () => {
@@ -151,8 +151,20 @@ test("CO14: wasi.js does not run the generated JavaScript", async () => {
   assert.match(r.component.js, /__tabernetesEvaluated/);
   assert.equal(globalThis.__tabernetesEvaluated, undefined);
   // No code of the page or of the Go thread can run a text as code.
-  for (const f of ["wasi.js", "transpile.js", "transpile.worker.js", "async_lists.js"]) {
-    const src = readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+  for (const f of ["wasi.js", "transpile.js", "transpile.worker.js", "async_lists.js", "wasi_messages.js"]) {
+    let src = readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+    if (f === "wasi.js") {
+      // The one exception: newPodWorkers starts the pod worker of components
+      // from a data: URL or a Blob URL with the text of component.worker.js
+      // (decision 13). wasi_transport.test.mjs makes sure that the generated
+      // JavaScript never goes into these URLs.
+      const start = src.indexOf("function newPodWorkers(");
+      const end = start + src.slice(start + 1).search(/\n(async )?function /) + 1;
+      assert.ok(start >= 0 && end > start, "wasi.js has no newPodWorkers");
+      const pod = src.slice(start, end);
+      assert.deepEqual([...pod.matchAll(/new Blob\(\[(\w+)\]|"data:text\/javascript," \+ encodeURIComponent\((\w+)\)/g)].map((m) => m[1] ?? m[2]), ["textValue", "textValue"]);
+      src = src.slice(0, start) + src.slice(end);
+    }
     for (const re of [/\beval\s*\(/, /\bFunction\s*\(/, /\bimport\s*\(/, /createObjectURL/, /importScripts/, /["'`]data:/]) {
       assert.doesNotMatch(src, re, `${f} contains ${re}`);
     }
