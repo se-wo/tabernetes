@@ -237,6 +237,10 @@ test("TC22: the socket options keep their values", () => {
   assert.equal(sock.sendBufferSize(), 8_192n);
   sock.setKeepAliveIdleTime(1_500_000_000n);
   assert.equal(sock.keepAliveIdleTime(), 2_000_000_000n);
+  sock.setReceiveBufferSize(1n);
+  sock.setSendBufferSize(1n);
+  assert.equal(sock.receiveBufferSize(), 1_152n);
+  assert.equal(sock.sendBufferSize(), 2_304n);
   sock.setKeepAliveEnabled(true);
   sock.setKeepAliveIdleTime(5_000_000_000n);
   sock.setKeepAliveInterval(1_000_000_000n);

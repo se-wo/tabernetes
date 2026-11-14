@@ -127,6 +127,9 @@ const TCP_DEFAULTS = Object.freeze({
 });
 
 const SECOND = 1_000_000_000n;
+// The smallest buffer sizes that runwasi gives after a set (Linux).
+const MIN_RECEIVE_BUFFER = 1_152n;
+const MIN_SEND_BUFFER = 2_304n;
 
 const UDP_DEFAULTS = Object.freeze({
   unicastHopLimit: 64,
@@ -902,16 +905,17 @@ class TcpOptions {
   receiveBufferSize() {
     return this.#options.receiveBufferSize;
   }
+  // As on runwasi, a small size reads as the minimum of the kernel.
   setReceiveBufferSize(v) {
     if (v === 0n) throw "invalid-argument";
-    this.#options.receiveBufferSize = v;
+    this.#options.receiveBufferSize = v < MIN_RECEIVE_BUFFER ? MIN_RECEIVE_BUFFER : v;
   }
   sendBufferSize() {
     return this.#options.sendBufferSize;
   }
   setSendBufferSize(v) {
     if (v === 0n) throw "invalid-argument";
-    this.#options.sendBufferSize = v;
+    this.#options.sendBufferSize = v < MIN_SEND_BUFFER ? MIN_SEND_BUFFER : v;
   }
 }
 
