@@ -8,8 +8,14 @@ package main
 // (web/src/wasi.js):
 //
 //	mirror: string                        base URL of the same-origin OCI mirror, "" for none
-//	load(source): Promise<{module} | {unsupported: string}>
+//	load(source): Promise<{module} | {component} | {unsupported: string}>
 //	start({module, args, env, preopens, stdin}): {onStdout, onStderr, onExit, write, kill}
+//	start({component: true, name}): {onMessage, post, kill, close}
+//
+// A WASI preview 2 component runs in a pod worker of its own, which talks
+// with the Go side only through the messages of tabnode_wasi_msg.go
+// (docs/wasi-sockets.md, section 8.3). This file runs a command component
+// (wasi:cli/run); other components get an "unsupported" status.
 //
 // Browsers cannot pull from most registries: ghcr.io and Docker Hub send no
 // CORS headers. Images come from a mirror next to the page instead, a
@@ -35,6 +41,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall/js"
@@ -115,7 +122,7 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 	// ctx ends with the kill; the pull already ends when the pod stops.
 	pullCtx, stopPull := context.WithCancel(ctx)
 	unhook := context.AfterFunc(c.w.ctx, stopPull)
-	img, mod, err := c.pullWasm(pullCtx, rt)
+	img, res, err := c.pullWasm(pullCtx, rt)
 	unhook()
 	stopPull()
 	if err != nil {
@@ -159,12 +166,16 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 		all = append(all, "PWD="+dir)
 	}
 
+	if comp := res.Get("component"); comp.Type() == js.TypeObject {
+		return c.startComponent(ctx, logs, rt, comp, argv, all, dir)
+	}
+
 	preopens, err := wasmPreopens(root)
 	if err != nil {
 		return nil, err
 	}
 	opts := js.Global().Get("Object").New()
-	opts.Set("module", mod)
+	opts.Set("module", res.Get("module"))
 	opts.Set("args", jsStrings(argv))
 	opts.Set("env", jsStrings(all))
 	opts.Set("preopens", preopens)
@@ -229,13 +240,14 @@ func (c *ctr) runtimeClass() string {
 	return ""
 }
 
-// pullWasm resolves the image and loads its module. Pull errors are
+// pullWasm resolves the image and loads its module or component: the result
+// of load, {module} or {component}. Pull errors are
 // retried with a back-off like the kubelet does (ErrImagePull,
 // ImagePullBackOff), so the error is a non-pull error or the end of ctx.
-func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (img *wasmImage, mod js.Value, err error) {
+func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (img *wasmImage, res js.Value, err error) {
 	err = c.pullWithBackOff(ctx, func() error {
 		var err error
-		img, mod, err = c.pullWasmOnce(ctx, rt)
+		img, res, err = c.pullWasmOnce(ctx, rt)
 		return err
 	}, func(err error) bool {
 		var unsupported unsupportedError
@@ -244,7 +256,7 @@ func (c *ctr) pullWasm(ctx context.Context, rt js.Value) (img *wasmImage, mod js
 	if err != nil {
 		return nil, js.Undefined(), err
 	}
-	return img, mod, nil
+	return img, res, nil
 }
 
 type unsupportedError struct{ msg string }
@@ -269,10 +281,15 @@ func (c *ctr) pullWasmOnce(ctx context.Context, rt js.Value) (*wasmImage, js.Val
 	if u := res.Get("unsupported"); u.Type() == js.TypeString {
 		return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, u.String())}
 	}
+	if comp := res.Get("component"); comp.Type() == js.TypeObject {
+		if why := componentUnsupported(jsStringList(comp.Get("imports")), componentExports(comp.Get("exports"))); why != "" {
+			return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, why)}
+		}
+	}
 	wasmImages.Lock()
 	wasmImages.m[ref] = img
 	wasmImages.Unlock()
-	return img, res.Get("module"), nil
+	return img, res, nil
 }
 
 // source tells the page where the module is: a module layer, or a file in
@@ -293,6 +310,8 @@ func (img *wasmImage) source() js.Value {
 		headers.Set(k, v)
 	}
 	o.Set("headers", headers)
+	// The pod worker runs components (startComponent).
+	o.Set("components", true)
 	if !img.artifact {
 		p := ""
 		if len(img.entrypoint) > 0 {
@@ -791,4 +810,161 @@ func jsBytes(v js.Value) []byte {
 	b := make([]byte, v.Get("length").Int())
 	js.CopyBytesToGo(b, v)
 	return b
+}
+
+// The interfaces that the pod worker gives a command component, by
+// "<package>/<interface>". jco gives the name of an import without its
+// version if the component imports one version of the interface; else the
+// version must be 0.2.x. A command component gets no wasi:http, the same as
+// on runwasi (fact 5).
+var componentImports = map[string]bool{
+	"cli/environment": true, "cli/exit": true, "cli/stdin": true, "cli/stdout": true, "cli/stderr": true,
+	"cli/terminal-input": true, "cli/terminal-output": true, "cli/terminal-stdin": true, "cli/terminal-stdout": true, "cli/terminal-stderr": true,
+	"clocks/monotonic-clock": true, "clocks/wall-clock": true,
+	"filesystem/preopens": true, "filesystem/types": true,
+	"io/error": true, "io/poll": true, "io/streams": true,
+	"random/random": true, "random/insecure": true, "random/insecure-seed": true,
+	"sockets/instance-network": true, "sockets/network": true, "sockets/ip-name-lookup": true,
+	"sockets/tcp": true, "sockets/tcp-create-socket": true, "sockets/udp": true, "sockets/udp-create-socket": true,
+}
+
+var componentImportRE = regexp.MustCompile(`^wasi:([a-z0-9-]+/[a-z0-9-]+)(@0\.2\.[0-9]+)?$`)
+
+// componentUnsupported gives the reason why the tab node cannot run a
+// component, or "". It finds the world as runwasi does (fact 5): the first
+// export with the prefix wasi:http/incoming-handler or wasi:cli/run.
+func componentUnsupported(imports []string, exports []string) string {
+	world := ""
+	for _, e := range exports {
+		if strings.HasPrefix(e, "wasi:http/incoming-handler") {
+			world = "proxy"
+			break
+		}
+		if strings.HasPrefix(e, "wasi:cli/run") {
+			world = "command"
+			break
+		}
+	}
+	switch world {
+	case "proxy":
+		return "it is a WASI preview 2 proxy component (it exports wasi:http/incoming-handler): the tab node cannot serve proxy components yet, only command components (wasi:cli/run)"
+	case "":
+		return "it is a WASI preview 2 component without the export wasi:cli/run: the tab node cannot call the function of an entrypoint yet, only command components (wasi:cli/run)"
+	}
+	for _, i := range imports {
+		m := componentImportRE.FindStringSubmatch(i)
+		if m == nil || !componentImports[m[1]] {
+			return fmt.Sprintf("the component imports %s, which the tab node does not give to a command component", i)
+		}
+	}
+	return ""
+}
+
+func jsStringList(v js.Value) []string {
+	if v.Type() != js.TypeObject {
+		return nil
+	}
+	out := make([]string, v.Length())
+	for i := range out {
+		out[i] = v.Index(i).String()
+	}
+	return out
+}
+
+// componentExports gives the names of [[name, kind]] of the transpile cache.
+func componentExports(v js.Value) []string {
+	if v.Type() != js.TypeObject {
+		return nil
+	}
+	out := make([]string, v.Length())
+	for i := range out {
+		out[i] = v.Index(i).Index(0).String()
+	}
+	return out
+}
+
+// wasiCLIHandlers handle the CLI messages of a pod worker: they go to the
+// container (section 8.3).
+var wasiCLIHandlers = map[string]wasiHandler{
+	"stdout": func(p *wasiPeer, m wasiMsg) {
+		if p.cli != nil {
+			p.cli.stdout.Write(m.Bytes("bytes"))
+		}
+	},
+	"stderr": func(p *wasiPeer, m wasiMsg) {
+		if p.cli != nil {
+			p.cli.stderr.Write(m.Bytes("bytes"))
+		}
+	},
+	"exit": func(p *wasiPeer, m wasiMsg) {
+		if p.cli != nil {
+			msg := ""
+			if m.Has("error") {
+				msg = m.Str("error")
+			}
+			p.cli.exit(m.Int("code"), msg)
+		}
+	},
+	"mem": func(p *wasiPeer, m wasiMsg) {
+		if p.cli != nil && p.cli.mem != nil {
+			p.cli.mem(int64(m.Float("size")))
+		}
+	},
+}
+
+func init() {
+	for typ, h := range wasiCLIHandlers {
+		wasiHandle(typ, h)
+	}
+}
+
+// startComponent runs a command component in a pod worker of its own. The
+// pod worker gets the component and its CLI in the message "start"; all
+// other traffic goes through the messages of tabnode_wasi_msg.go.
+func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Value, argv, env []string, dir string) (*process, error) {
+	name := c.w.namespace + "/" + c.w.name + "/" + c.spec.Name
+	opts := js.Global().Get("Object").New()
+	opts.Set("component", true)
+	opts.Set("name", name)
+
+	ctx, cancel := context.WithCancel(ctx)
+	p := newProcess(cancel)
+	h := rt.Call("start", opts)
+	peer := newWasiPeer(name, func(msg, transfer js.Value) { h.Call("post", msg, transfer) })
+	stdout, stderr := logs.writer("stdout"), logs.writer("stderr")
+	var onMsg js.Func
+	var once sync.Once
+	peer.cli = &wasiCLI{
+		stdout: stdout,
+		stderr: stderr,
+		exit: func(code int, msg string) {
+			once.Do(func() {
+				if msg != "" {
+					stderr.Write([]byte(msg + "\n"))
+				}
+				// No more messages: the pod worker ends here.
+				h.Call("close")
+				peer.Close()
+				go onMsg.Release()
+				cancel()
+				p.exit(code)
+			})
+		},
+		// The memory of the instance counts for limits.memory.
+		mem: func(n int64) { go c.chargeMem(p, "wasm", n) },
+	}
+	onMsg = js.FuncOf(func(_ js.Value, a []js.Value) any {
+		if len(a) > 0 {
+			peer.dispatch(a[0])
+		}
+		return nil
+	})
+	h.Call("onMessage", onMsg)
+	if err := peer.send("start", map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir}); err != nil {
+		peer.cli.exit(128, "the pod worker cannot start: "+err.Error())
+		return p, nil
+	}
+	// kill and the end of the pod terminate the pod worker: exit code 137.
+	context.AfterFunc(ctx, func() { h.Call("kill") })
+	return p, nil
 }

@@ -6,23 +6,29 @@
 // A WASI preview 2 component goes to the transpile worker of this Go thread
 // (transpile.worker.js, docs/wasi-sockets.md section 8.2). This side keeps
 // the generated JavaScript only as text: it runs only in a pod worker (CO14).
+// The pod worker of a component (component.worker.js) starts from a data:
+// URL, so it has an opaque origin (decision 13). This side moves its messages
+// (wasi_messages.js) to the Go side and back, and does not interpret them:
+// the Go side examines them (tabnode_wasi_msg.go).
 import { ASYNC_IMPORTS, ASYNC_EXPORTS, JCO_VERSION } from "./async_lists.js";
 import { isLabel } from "./transpile.js";
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 
-export function installWasi({ workerURL, mirror, transpileURL } = {}) {
+export function installWasi({ workerURL, mirror, transpileURL, componentWorkerURL } = {}) {
   workerURL = new URL(workerURL || "wasi.worker.js", workerURL ? location.href : import.meta.url).href;
   mirror = mirror === "" ? "" : new URL(mirror || "oci/", mirror ? location.href : import.meta.url).href;
   // The transpile worker is in transpile/ next to wasi.worker.js, so that
   // the core modules of jco-transpile are in vendor/ next to them.
   transpileURL = new URL(transpileURL || "transpile/transpile.worker.js", transpileURL ? location.href : workerURL).href;
-  globalThis.tabernetesWasi = createRuntime({ workerURL, mirror, transpileURL });
+  // The pod worker of components is next to wasi.worker.js.
+  componentWorkerURL = new URL(componentWorkerURL || "component.worker.js", componentWorkerURL ? location.href : workerURL).href;
+  globalThis.tabernetesWasi = createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL });
 }
 
 // createRuntime gives the object of globalThis.tabernetesWasi. The tests
 // give it their own Worker and fetch.
-export function createRuntime({ workerURL, mirror, transpileURL, Worker: W = globalThis.Worker, fetch: f = globalThis.fetch }) {
+export function createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL, Worker: W = globalThis.Worker, fetch: f = globalThis.fetch }) {
   // Compiled modules (and the bytes of components) by layer digests and
   // path: restarts and other pods of the same image start without a
   // download.
@@ -31,6 +37,7 @@ export function createRuntime({ workerURL, mirror, transpileURL, Worker: W = glo
   const components = new Map();
   const transpiler = newTranspiler(transpileURL, W);
   const fetchLayer = (l, headers) => fetchLayerWith(f, l, headers);
+  const podWorkers = newPodWorkers(componentWorkerURL, W, f);
   return {
     mirror,
     // load({layers: [{url, digest, kind}], headers, path, components})
@@ -65,11 +72,21 @@ export function createRuntime({ workerURL, mirror, transpileURL, Worker: W = glo
         return loadComponent({ digests, path, entrypoint: fn, bytes: r.componentBytes }).then((c) => {
           if (c.unsupported) return c;
           if (src.components) return { component: { ...c.component, entrypoint } };
-          return { unsupported: "it is a WASI preview 2 component: the tab node transpiles it, but cannot run components yet, only WASI preview 1 modules (wasm32-wasip1, GOOS=wasip1)" };
+          return { unsupported: "it is a WASI preview 2 component, and the caller of load did not ask for components (components: true)" };
         });
       });
     },
-    start: (opts) => start(workerURL, opts),
+    // start({module, ...}) runs a module (start below). start({component:
+    // true, name}) starts the pod worker of a component and gives the
+    // transport of its messages:
+    //
+    //   onMessage(fn)          fn(msg) gets each message of the pod worker
+    //   post(msg, transfer)    sends a message to the pod worker
+    //   kill()                 stops the pod worker; fn then gets {type: "exit", code: 137}
+    //   close()                stops the pod worker without a message
+    //
+    // If the pod worker fails, fn gets {type: "exit", code: 128, error}.
+    start: (opts) => (opts.component ? podWorkers.start(opts) : start(workerURL, opts)),
     // stats gives the count of transpiler runs, for tests (CO8).
     stats: () => ({ transpiles: transpiler.runs, transpileWorker: transpiler.started }),
   };
@@ -140,6 +157,97 @@ function newTranspiler(url, W) {
     },
   };
   return t;
+}
+
+// newPodWorkers starts the pod workers of components. The script is
+// component.worker.js, which has all its code in one bundle. This side gets
+// the text one time and starts each pod worker from a data: URL with it: the
+// worker then has an opaque origin (decision 13). If a data: worker does not
+// start in this browser, the next pod workers start from a Blob URL on the
+// origin of the page. The JavaScript of a component never goes into these
+// URLs: it goes to the pod worker in a message (CO14).
+function newPodWorkers(url, W, f) {
+  let text = null;
+  let blobURL = null;
+  const p = {
+    mode: "data",
+    start({ name }) {
+      text ??= f(url).then((r) => {
+        if (!r.ok) throw new Error(`GET ${url}: ${r.status} ${r.statusText}`);
+        return r.text();
+      });
+      text.catch(() => { text = null; });
+      let fn = null, worker = null, ready = false, ended = false;
+      const early = [], queue = [];
+      const deliver = (msg) => (fn ? fn(msg) : early.push(msg));
+      const end = (msg) => {
+        if (ended) return;
+        ended = true;
+        worker?.terminate();
+        queue.length = 0;
+        if (msg) deliver(msg);
+      };
+      const launch = (mode) => {
+        let w;
+        try {
+          if (mode === "data") w = new W("data:text/javascript," + encodeURIComponent(textValue), { name: name ? `wasm ${name}` : "wasm" });
+          else {
+            blobURL ??= URL.createObjectURL(new Blob([textValue], { type: "text/javascript" }));
+            w = new W(blobURL, { name: name ? `wasm ${name}` : "wasm" });
+          }
+        } catch (e) {
+          return fail(mode, e?.message ?? String(e));
+        }
+        worker = w;
+        w.onmessage = ({ data }) => {
+          if (ended || worker !== w) return;
+          // The transport consumes the first message, ready.
+          if (!ready && data?.type === "ready") {
+            ready = true;
+            for (const [m, t] of queue.splice(0)) w.postMessage(m, t);
+            return;
+          }
+          deliver(data);
+        };
+        w.onerror = (e) => {
+          e.preventDefault?.();
+          if (worker === w) fail(mode, e.message || "it did not start");
+        };
+        w.onmessageerror = () => {};
+      };
+      const fail = (mode, why) => {
+        if (ended) return;
+        // A data: worker that does not start: the Blob URL for this pod
+        // worker and the next ones.
+        if (!ready && mode === "data") {
+          p.mode = "blob";
+          worker?.terminate();
+          worker = null;
+          return launch("blob");
+        }
+        end({ type: "exit", code: 128, error: `the pod worker failed: ${String(why).slice(0, 2000)}` });
+      };
+      let textValue = "";
+      text.then((t) => {
+        textValue = t;
+        if (!ended) launch(p.mode);
+      }, (e) => end({ type: "exit", code: 128, error: `the pod worker cannot start: ${String(e?.message ?? e).slice(0, 2000)}` }));
+      return {
+        onMessage(handler) {
+          fn = handler;
+          for (const m of early.splice(0)) handler(m);
+        },
+        post(msg, transfer = []) {
+          if (ended) return;
+          if (ready) worker.postMessage(msg, transfer);
+          else queue.push([msg, transfer]);
+        },
+        kill: () => end({ type: "exit", code: 137 }),
+        close: () => end(null),
+      };
+    },
+  };
+  return p;
 }
 
 async function loadModule({ layers, headers, path }, fetchLayer) {
