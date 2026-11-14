@@ -1325,9 +1325,9 @@ rules. They close gaps of the requirements:
   stderr, and the container exits with 137. An IP that is not the pod IP,
   not a wildcard IP and not a loopback IP gives "Address not available (os
   error 99)" (PX33). A port in use gives "Address in use (os error 98)".
-- A loopback IP (`127.0.0.0/8` or `::1`) listens on the pod IP. Until
-  package W3.1a adds the loopback table, it accepts connections from all
-  clients (PX5).
+- A loopback IP (`127.0.0.0/8` or `::1`) listens on the pod IP. `listenPod`
+  adds a row to the loopback table, so only the pod itself can connect (PX5,
+  section 8.11).
 - For port 0, the proxy server tries the ports 32768 to 60999 in sequence
   and listens on the first free port (PX32).
 - The pod worker gets no arguments and no preopened directories for a proxy
@@ -1858,10 +1858,10 @@ The column "Nodes" gives the nodes for the test:
 | CR10 | The component discards a client request to a Service that does not answer. The Go side closes the connection. | tab |
 | CR11 | A unit test with a short timer makes sure that the Go side gives `connection-timeout`. | tab |
 | TC1, TC8 | The TCP echo pod gives answers through a Service. | tab, worker, Docker |
-| TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. | tab, Docker |
-| TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. | tab, Docker |
+| TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. The unit tests `TestListenPodLoopback` and `TestLoopbackDialFromPod` examine the Go side. | tab, Docker |
+| TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. The unit tests of `tabnode_loopback_test.go` examine each path of section 8.11, and `TestProxyLoopback` examines PX5. A gRPC probe of a row fails after its timeout, as the kubelet does. | tab, Docker |
 | TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`: wasmtime makes IPv6 sockets IPv6 only. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. | tab, Docker |
-| TC9 | A client that connects before it binds has a local port from 32768 to 60999. On runwasi, a client to a Service shows the ClusterIP as its remote address (section 8.3.2, rule 2). | tab, Docker |
+| TC9 | A client that connects before it binds has a local port from 32768 to 60999. The unit tests `TestReservePort` and `TestDialClusterFrom` examine the table of the ports in use. On runwasi, a client to a Service shows the ClusterIP as its remote address (rule 2 of section 8.3.2). | tab, Docker |
 | TC10 | A unit test with a clock that the test controls: a denied client gets `timeout` after `synTimeout`. A real wait of 127 seconds is not permitted (`wasi-sockets-plan.md`, rule 5). | tab, Docker (deferred) |
 | TC11 | A client to a closed port gets `connection-refused`. | tab, Docker |
 | TC12 | A unit test sends 10 MB to a server that does not read. The buffer of the Go side for this connection stays at 256 KiB or less. | tab |
@@ -1871,6 +1871,16 @@ The column "Nodes" gives the nodes for the test:
 | TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, all options other than the buffer sizes agree (section 11). The defaults of runwasi: keep-alive off, 7,200 s, 75 s, count 9, hop limit 64, buffers 65,536 and 8,192 bytes. An idle time of 1.5 s gives 2 s. The value 0 gives `invalid-argument`. | tab, Docker |
 | NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). | tab, worker, Docker |
 | NL3 | The name `example.com` fails with `name-unresolvable`. | tab |
+| TC5, TC17 (pod worker) | A unit test with a fake Go side (`web/test/tcp.test.mjs`). A socket on `127.0.0.1` shows `127.0.0.1` with the port of `bound`. Its accepted connections show `127.0.0.1` at the two ends. A socket on `0.0.0.0` shows the addresses of `accepted`. A connection to a ClusterIP shows the ClusterIP as its remote address, with the local port of `connected`. | tab |
+| TC6, TC20, TC21 (pod worker) | A unit test: an IPv6 socket sends `bind` with `::` and the family `ipv6`. The wrong family and an IPv4-mapped address give `invalid-argument` without a message. As in wasmtime, multicast, broadcast, and in `connect` the unspecified address and port 0, also give `invalid-argument`. A backlog of 0 gives `invalid-argument`. | tab |
+| TC21, TC22 (pod worker) | A unit test: `listen` sends the backlog 128 (the default of wasmtime), or the value of `set-listen-backlog-size` within 1 to 4096. Each socket option has the default of runwasi, keeps its value and sends no message. As on runwasi, the keep-alive idle time goes up to whole seconds. A buffer size of 1 gives 1152 (receive) or 2304 (send). | tab |
+| TC12, TC13 (pod worker) | A unit test: the pod worker never sends more than 256 KiB of `data` without `credit`. It sends `credit` for the bytes that the component read, at 64 KiB or when its buffer is empty. `shutdown` sends the message. After `send`, writes give `closed`. After `receive`, reads give `closed`. `data` with 0 bytes gives `closed` after the bytes before it. | tab |
+| Rule 8, rule 9 (pod worker) | A unit test: after `error`, the reads first give the bytes before it. Then one read or write gives `last-operation-failed`, and the two streams then give `closed`. The drop of a socket sends `closed`, also after an error answer. The drop of a listener sends `closed` for each connection in its queue. `accepted` after the drop gets `closed`. | tab |
+| Rule 9 (pod worker) | A unit test: after `closed` from Go, reads and writes give `last-operation-failed` with the error code of `closed` (else `connection-aborted`). Socket calls give `invalid-state`, and the drop sends no `closed`. After a `bind` that failed, the next `bind` or `connect` sends `closed` for the old ID and uses a new ID. | tab |
+| TC1 to TC22 (pod worker) | A unit test: a call of `start-bind`, `start-connect` or `start-listen` while one of these operations is in progress gives `concurrency-conflict`, as in wasmtime. Other calls in the wrong state give `invalid-state` or `not-in-progress` (`tcp.wit`). | tab |
+| NL1, NL2, NL3 (pod worker) | A unit test (`web/test/lookup.test.mjs`): an IP literal gives its address without a message. A correct name has 1 to 253 characters and labels of 1 to 63 ASCII letters, digits, `-` or `_`. A dot at the end is permitted. Another name gives `invalid-argument` without a message. A correct name sends `lookup`. | tab |
+| NL3 (pod worker) | A unit test: the error code of `addresses` comes from `resolve-next-address` one time. Then the stream is empty. `addresses` for a dropped stream is discarded. | tab |
+| CO17 (pod worker) | A unit test: 1,000 TCP reads without bytes, 1,000 calls of `check-write` that give 0, or 1,000 calls of `resolve-next-address` that give `would-block`, give a pause. A read with bytes, a `check-write` with credit, and `finish-connect`, `finish-bind`, `finish-listen` or `accept` without an error reset the count. | tab |
 | UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
 | UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. | tab |
 | AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. | tab |
@@ -1929,10 +1939,12 @@ These differences stay after this design. `README.md` must show them.
 | Bodies of HTTP requests and responses | Complete blocks, a maximum of 16 MiB | Streams, no maximum |
 | An instance after the client closes the connection | The pod worker discards it | It runs until `handle` returns |
 | Client requests and name lookup to the internet | They fail | They work |
+| A name with characters outside ASCII in `ip-name-lookup` | `invalid-argument` | wasmtime changes the name with IDNA, then looks it up |
 | UDP in the tab node | No loss before a queue has no space | Loss is possible |
 | `connection-refused` for UDP between nodes | Not available | Available |
 | Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). |
 | A dial from a pod to its own socket on `127.0.0.1` through the pod IP or through a Service of the pod | It connects (section 8.11) | `connection-refused` |
+| A socket of a `hostNetwork` pod on `127.0.0.1` | It listens on the node IP without a row in the loopback table. Other pods can connect. | Only the host of the node can connect |
 | The addresses of a connection that a socket on `0.0.0.0` accepts from a client of the same pod that used `127.0.0.1` | The pod IP | `127.0.0.1` |
 | ICMP | Only on one tab node, each echo request examined | Between all nodes, only the first echo request examined |
 | Writes of a WebAssembly container to a volume | They change only the copy in the worker. A restart does not show them. | They change the volume. A restart shows them. |

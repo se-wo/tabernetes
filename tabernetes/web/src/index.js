@@ -32,6 +32,8 @@ installGPU();
 // The status line under the terminal: the nodes (Docker, then Web Workers),
 // then the forwarded ports.
 const status = document.getElementById("tabernetes-status");
+// The connections of join (Docker nodes and kubectl), for rmnode.
+const connections = new Map();
 const nodes = document.createElement("span");
 const workerNodes = document.createElement("span");
 const ports = document.createElement("span");
@@ -45,8 +47,9 @@ startTerminal(el, {
       image: el.dataset.image || TABERNETES_IMAGE,
       stun: el.dataset.stun ?? undefined,
       status: status && nodes,
+      connections,
     }),
-    ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes }),
+    ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes, connections }),
     ...proxyBuiltins({ status: status && ports, terminal: el }),
     // The VNC screen covers the terminal, the panel of "proxy" and the status line.
     ...vncBuiltins({ box: el.closest(".tabernetes-wrap") || el.parentElement }),

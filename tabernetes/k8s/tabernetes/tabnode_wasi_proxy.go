@@ -96,10 +96,8 @@ func proxyListenHost(a netip.Addr, podIP string) (string, string) {
 		// [::] (fact 4).
 		return "0.0.0.0", ""
 	case a.IsLoopback():
-		// TODO(W3.1): PX5. 127.0.0.1 must accept only connections from the
-		// pod IP, with the loopback table (section 8.11). Until then, it
-		// listens on the pod IP for all clients, as listenPod does for each
-		// program of a container.
+		// PX5: listenPod listens on the pod IP and adds a row to the
+		// loopback table (section 8.11). Only the pod itself connects.
 		return "127.0.0.1", ""
 	case a.Unmap().String() == podIP:
 		return podIP, ""

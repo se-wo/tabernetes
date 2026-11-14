@@ -353,7 +353,9 @@ func (s *serviceProxy) endpointFor(addr, client string) (e endpoint, ok bool, er
 
 // dialEndpoint connects to an endpoint: on this node directly, from src if
 // it is set, to a pod IP of another node over a pod channel (podlink.go)
-// with src or the node IP as the source, else through the apiserver.
+// with src or the node IP as the source, else through the apiserver. An
+// endpoint on this node with a row in the loopback table refuses a source
+// that is not its pod IP: src nil is the node IP (section 8.11, TC15).
 func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint, src *net.TCPAddr) (io.ReadWriteCloser, error) {
 	if e.remote && theTabNode.podLinkTarget(e.node, e.ip) {
 		from := src
@@ -372,6 +374,14 @@ func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint, src *net.TC
 	if ip == advertiseIP && e.port == 6443 { // the apiserver, also from a node in a Web Worker
 		// The kubernetes service: the apiserver listens on 127.0.0.1 only.
 		ip = "127.0.0.1"
+	}
+	dst := &net.TCPAddr{IP: net.ParseIP(ip), Port: int(e.port)}
+	var from net.IP
+	if src != nil {
+		from = src.IP
+	}
+	if loopbackRefused("tcp", from, dst) {
+		return nil, refusedError(dst)
 	}
 	d := &net.Dialer{}
 	if src != nil {

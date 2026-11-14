@@ -367,6 +367,23 @@ func main() {
 			return c.prepareJoin(open)
 		})
 	}))
+	// prepareKubectl(): Promise<{name, token, ca}> for "join
+	// --kubectl": a ServiceAccount bound to cluster-admin and its token
+	// (kubectlaccess.go).
+	api.Set("prepareKubectl", js.FuncOf(func(this js.Value, a []js.Value) any {
+		return promise(func() (any, error) {
+			if c == nil {
+				return nil, fmt.Errorf("cluster is not ready yet")
+			}
+			return c.grantKubectl()
+		})
+	}))
+	// revokeKubectl(name): Promise, deletes the ServiceAccount of a kubectl
+	// connection, which voids its token.
+	api.Set("revokeKubectl", js.FuncOf(func(this js.Value, a []js.Value) any {
+		name := a[0].String()
+		return promise(func() (any, error) { return nil, revokeKubectl(name) })
+	}))
 	// prepareWorkerNode(open: (label: string) => Promise<channel>, gpu: boolean): Promise<config>
 	// for a node in a Web Worker (web/src/nodes.js, nodeworker.go).
 	api.Set("prepareWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
@@ -388,13 +405,14 @@ func main() {
 				"--delete-emptydir-data", "--force", "--timeout=120s"}, nil, w, w), nil
 		})
 	}))
-	// removeWorkerNode(name): Promise, after its worker is gone. The node is
-	// gone for good, so its pods are deleted at once (the pod GC would wait
-	// for a while) and their controllers make new ones on other nodes.
-	api.Set("removeWorkerNode", js.FuncOf(func(this js.Value, a []js.Value) any {
+	// removeNode(name): Promise, after a node is gone: its worker stopped
+	// (rmnode) or its Docker agent said bye. The node is gone for good, so
+	// its pods are deleted at once (the pod GC would wait for a while) and
+	// their controllers make new ones on other nodes.
+	api.Set("removeNode", js.FuncOf(func(this js.Value, a []js.Value) any {
 		name := a[0].String()
 		return promise(func() (any, error) {
-			removeWorkerNode(name)
+			forgetNode(name)
 			ctx := context.Background()
 			if code := runKubectl(ctx, []string{"delete", "node", name, "--wait=false"}, nil, io.Discard, os.Stderr); code != 0 {
 				return nil, fmt.Errorf("deleting node %s failed (exit %d)", name, code)

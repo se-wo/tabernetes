@@ -4,7 +4,7 @@
 # the CKAD checks of issue #56 on it. See ../docker-node-check.md.
 #
 # Steps, in this order when none are given:
-#   images join apply coredns storage metrics ingress sanity
+#   images join kubectl apply coredns storage metrics ingress sanity
 #   wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave
 # Each step prints PASS, FAIL or SKIP with the reason, and writes what it ran
 # and saw to $OUT/<step>.txt. browser.mjs must already run. "leave" removes
@@ -22,6 +22,9 @@
 #   OUT         directory for the output (default ./out)
 #   OCI         the OCI mirror of the page with the test images for wasi-images
 #               (default .build/site/oci, from mise run site)
+#   KUBECTL     the kubectl of the step kubectl (default: kubectl
+#               KUBECTL_VERSION, downloaded into $OUT/bin)
+#   KUBECTL_PORT  the host port of "join --kubectl" (default 6443)
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="${IMAGE:-ghcr.io/se-wo/tabernetes:latest}"
@@ -29,6 +32,8 @@ IMAGE="${IMAGE:-ghcr.io/se-wo/tabernetes:latest}"
 NODE_FLAGS="${NODE_FLAGS:---memory 2g --pids-limit 4096 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined --device /dev/net/tun}"
 IMPORT_IMAGES="${IMPORT_IMAGES:-busybox:latest rancher/local-path-provisioner:v0.0.31}"
 OUT="${OUT:-$PWD/out}"
+KUBECTL_VERSION="${KUBECTL_VERSION:-v1.37.2}"
+KUBECTL_PORT="${KUBECTL_PORT:-6443}"
 N=tabernetes-node-1
 mkdir -p "$OUT"
 
@@ -155,6 +160,96 @@ step_join() {
 	result PASS "node-1 Ready"
 }
 
+# get_kubectl sets KUBECTL: the kubectl of KUBECTL_VERSION for this host.
+get_kubectl() {
+	[ -z "${KUBECTL:-}" ] || return 0
+	local arch
+	case "$(uname -m)" in
+	x86_64) arch=amd64 ;;
+	aarch64 | arm64) arch=arm64 ;;
+	*) arch="$(uname -m)" ;;
+	esac
+	KUBECTL="$OUT/bin/kubectl"
+	if [ ! -x "$KUBECTL" ] || ! "$KUBECTL" version --client 2>/dev/null | grep -q "$KUBECTL_VERSION\$"; then
+		mkdir -p "$OUT/bin"
+		curl -fsSLo "$KUBECTL" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl" && chmod +x "$KUBECTL"
+	fi
+}
+
+# kubectl runs a real kubectl on this host against the tab: "join --kubectl",
+# the agent in kubectl mode forwards KUBECTL_PORT and prints the kubeconfig
+# on stdout. Then "rmnode" in the tab closes the connection and voids the
+# token. It needs only the step join before it.
+step_kubectl() {
+	local c=tabernetes-kubectl j token port name line="" kc="$OUT/kubectl.kubeconfig" server=()
+	get_kubectl
+	if ! "$KUBECTL" version --client >/dev/null 2>&1; then
+		result FAIL "no kubectl $KUBECTL_VERSION"
+		return 1
+	fi
+	docker rm -f "$c" >/dev/null 2>&1
+	j="$(tab join --kubectl)" || {
+		result FAIL "join --kubectl did not start"
+		return 1
+	}
+	token="$(jq -r .token <<<"$j")" port="$(jq -r .port <<<"$j")" name="$(jq -r .name <<<"$j")"
+	# The node mode refuses a kubectl token.
+	run sh -c "docker run --rm '$IMAGE' join '$token' 2>&1; echo exit \$?"
+	if ! grep -q 'join --kubectl' "$OUT/$step.txt" || grep -q '^exit 0$' "$OUT/$step.txt"; then
+		result FAIL "the node mode took a kubectl token"
+		return 1
+	fi
+	[ "$KUBECTL_PORT" = 6443 ] || server=(--server "https://127.0.0.1:$KUBECTL_PORT")
+	echo "\$ docker run -d --name $c -p 127.0.0.1:$port:$port/udp -p 127.0.0.1:$KUBECTL_PORT:6443 $IMAGE --stun '' ${server[*]} kubectl <token>" >>"$OUT/$step.txt"
+	docker run -d --name "$c" -p "127.0.0.1:$port:$port/udp" -p "127.0.0.1:$KUBECTL_PORT:6443" \
+		"$IMAGE" --stun "" "${server[@]}" kubectl "$token" >>"$OUT/$step.txt" 2>&1
+	for _ in $(seq 30); do
+		line="$(docker logs "$c" 2>&1 | grep -m1 '^accept ')" && break
+		sleep 2
+	done
+	if [ -z "$line" ]; then
+		result FAIL "no accept line, see docker logs $c"
+		return 1
+	fi
+	run tab accept "$line"
+	# stdout of the agent is the kubeconfig and nothing else.
+	for _ in $(seq 30); do
+		docker logs "$c" 2>/dev/null >"$kc"
+		grep -q '^current-context:' "$kc" && break
+		sleep 2
+	done
+	run docker logs "$c"
+	if grep -q accept "$kc" || ! grep -q '^current-context:' "$kc"; then
+		result FAIL "stdout of the agent is not a kubeconfig, see $kc"
+		return 1
+	fi
+	run "$KUBECTL" --kubeconfig "$kc" version
+	run "$KUBECTL" --kubeconfig "$kc" get nodes -o wide
+	run "$KUBECTL" --kubeconfig "$kc" auth whoami
+	run "$KUBECTL" --kubeconfig "$kc" create configmap kubectl-check --from-literal=from=outside
+	if ! grep -q "Server Version: $KUBECTL_VERSION" "$OUT/$step.txt" ||
+		! grep -q "system:serviceaccount:kube-system:tabernetes-$name" "$OUT/$step.txt" ||
+		! wait_for 'kubectl get cm kubectl-check -o jsonpath={.data.from}' '^outside' 30; then
+		result FAIL "kubectl on this host did not reach the tab"
+		return 1
+	fi
+	k delete cm kubectl-check
+	run tab run "rmnode $name"
+	for _ in $(seq 15); do
+		[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || break
+		sleep 1
+	done
+	run docker logs --tail 3 "$c"
+	if [ "$(docker inspect -f '{{.State.Running}}' "$c")" = true ]; then
+		result FAIL "the agent still runs after rmnode $name"
+	elif ! wait_for "kubectl get sa -n kube-system tabernetes-$name" 'NotFound|not found' 30; then
+		result FAIL "the ServiceAccount of $name is still there"
+	else
+		result PASS "kubectl $KUBECTL_VERSION on this host reached the tab; rmnode $name stopped the agent and voided the token"
+	fi
+	docker rm -f "$c" >/dev/null 2>&1
+}
+
 # apply moves the local-path provisioner to node-1 and creates the test objects.
 step_apply() {
 	k -n local-path-storage rollout restart deploy/local-path-provisioner
@@ -230,16 +325,23 @@ step_sanity() {
 	fi
 }
 
+# leave stops the node like Ctrl-C or docker stop would: the agent says bye,
+# and the tab deletes the node and its pods at once, without the 300 s
+# toleration for not-ready.
 step_leave() {
-	run docker rm -f "$N"
-	wait_for 'kubectl get node node-1' 'NotReady' 120
-	# The pods of a lost node go after the 300 s toleration for not-ready.
-	if wait_for 'kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide' '1/1 +Running .* tab ' 600; then
+	local start=$SECONDS
+	run docker stop "$N"
+	run sh -c "docker logs $N 2>&1 | tail -5"
+	if ! wait_for 'kubectl get node node-1' 'NotFound|not found' 30; then
+		result FAIL "node-1 is still there after docker stop: no bye?"
+	elif wait_for 'kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide' '1/1 +Running .* tab ' 180; then
 		k get pods -n kube-system -o wide
-		result PASS "CoreDNS back on tab"
+		result PASS "node-1 left at once, CoreDNS back on tab after $((SECONDS - start)) s"
 	else
-		result FAIL "CoreDNS not back on tab after 10 minutes"
+		k get pods -n kube-system -o wide
+		result FAIL "node-1 left, but CoreDNS is not back on tab after 3 minutes"
 	fi
+	docker rm -f "$N" >/dev/null 2>&1
 }
 
 for f in "$here"/wasi-*.sh; do
@@ -248,7 +350,7 @@ for f in "$here"/wasi-*.sh; do
 done
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(images join apply coredns storage metrics ingress sanity
+[ ${#steps[@]} -gt 0 ] || steps=(images join kubectl apply coredns storage metrics ingress sanity
 	wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave)
 for step in "${steps[@]}"; do
 	: >"$OUT/$step.txt"

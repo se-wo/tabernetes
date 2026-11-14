@@ -1,10 +1,14 @@
-// Unit tests of the stub of wasi:sockets (web/src/sockets.js) and of the
-// count of CO17. The stub gives the results of the proxy world on runwasi
-// (docs/wasi-sockets.md, section 9.2, item 7). The end-to-end test of CO17
-// and CO19 with a socket is in phase 3 (W3.3).
+// Unit tests of the stub of wasi:sockets (web/src/sockets.js), of the count
+// of CO17 and of the choice between the socket table and the stub in
+// runComponent. The stub gives the results of the proxy world on runwasi
+// (docs/wasi-sockets.md, section 9.2, item 7). TCP is in tcp.test.mjs, name
+// lookup in lookup.test.mjs. The end-to-end test of CO17 and CO19 with a
+// socket is in package W3.3b.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createIdle, createSockets, nextTask, IDLE_LIMIT } from "../src/sockets.js";
+import { runComponent } from "../src/component.js";
+import { createPeer } from "../src/wasi_messages.js";
 import * as io from "../node_modules/@bytecodealliance/preview2-shim/dist/browser/io.js";
 
 const addr = { tag: "ipv4", val: { port: 80, address: [10, 0, 0, 1] } };
@@ -79,4 +83,56 @@ test("CO19: nextTask continues through a MessageChannel", async () => {
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
+});
+
+// runComponent makes the socket table for the command path (and the
+// function of an entrypoint). The proxy path keeps the stub (rule 12, PX15).
+test("runComponent gives the command path the socket table; the proxy path keeps the stub", async () => {
+  const run = async (world, load) => {
+    const sent = [];
+    const drops = [];
+    const peer = createPeer({ post: (m) => sent.push(m), onDrop: (why) => drops.push(why) });
+    let config = null;
+    const configs = new Promise((resolve) => {
+      class Shim {
+        constructor(c) {
+          config = c;
+          resolve(c);
+        }
+        getImportObject() {
+          return {};
+        }
+      }
+      const exports = world === "proxy" ? [["wasi:http/incoming-handler@0.2.3", "instance"]] : [["wasi:cli/run@0.2.3", "instance"]];
+      const component = { js: "", modules: {}, imports: [], exports, names: { imports: [], exports: [] }, world, entrypoint: "" };
+      runComponent({ component, args: [], env: [], cwd: "/" }, { peer, WASIShim: Shim, io, load }).catch(() => {});
+    });
+    await configs;
+    return { sent, drops, peer, sockets: config.sockets };
+  };
+
+  const cmd = await run("command", async () => {
+    throw new Error("no module in this test");
+  });
+  const tcp = cmd.sockets.tcpCreateSocket.createTcpSocket("ipv4");
+  tcp.startBind(cmd.sockets.instanceNetwork.instanceNetwork(), addr);
+  assert.deepEqual(cmd.sent.filter((m) => m.type === "bind"), [{ type: "bind", socket: 1, protocol: "tcp", family: "ipv4", address: "10.0.0.1", port: 80 }]);
+  cmd.peer.dispatch({ type: "bound", socket: 1, port: 80 });
+  tcp.finishBind();
+  assert.deepEqual(cmd.drops, []);
+
+  const memory = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 0, 1, 7, 10, 1, 6, 109, 101, 109, 111, 114, 121, 2, 0]));
+  const proxy = await run("proxy", async () => ({
+    async instantiate(_get, _imports, instantiateCore) {
+      await instantiateCore(memory);
+      return { "wasi:http/incoming-handler@0.2.3": { handle() {} } };
+    },
+  }));
+  const ptcp = proxy.sockets.tcpCreateSocket.createTcpSocket("ipv4");
+  assert.throws(() => ptcp.startBind(proxy.sockets.instanceNetwork.instanceNetwork(), addr), (e) => e === "access-denied");
+  assert.throws(() => proxy.sockets.ipNameLookup.resolveAddresses(undefined, "kubernetes"), (e) => e === "permanent-resolver-failure");
+  assert.deepEqual(proxy.sent.filter((m) => !["mem", "stderr"].includes(m.type)), []);
+  // The proxy path has no handlers of the socket messages.
+  proxy.peer.dispatch({ type: "bound", socket: 1, port: 80 });
+  assert.deepEqual(proxy.drops, ["no handler for bound"]);
 });
