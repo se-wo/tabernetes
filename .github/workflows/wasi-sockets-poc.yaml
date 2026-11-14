@@ -102,7 +102,9 @@ jobs:
 
       - name: Checks
         working-directory: tabernetes
-        run: docs/wasi-sockets-poc/run.sh docker 2>&1 | tee "${RUNNER_TEMP}/checks.txt"
+        run: |
+          set -o pipefail
+          docs/wasi-sockets-poc/run.sh docker 2>&1 | tee "${RUNNER_TEMP}/checks.txt"
 
       - name: Summary
         if: always()

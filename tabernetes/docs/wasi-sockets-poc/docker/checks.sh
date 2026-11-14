@@ -29,6 +29,14 @@ for _ in $(seq 60); do
 	tab 'kubectl get pod client' | grep -q Running && break
 	sleep 5
 done
+if ! tab 'kubectl get pod client' | grep -q Running; then
+	echo "the pod client does not run: no checks"
+	tab 'kubectl describe pod client | tail -20; kubectl describe pod proxy | tail -10'
+	docker exec "$N" crictl pods 2>&1 | head -20
+	docker exec "$N" sh -c 'tail -40 /var/log/kubelet.log' 2>&1
+	docker logs "$N" 2>&1 | tail -40
+	exit 1
+fi
 sleep 20 # the command components end
 tab 'kubectl get pods -l poc=wasi -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount,EXIT:.status.containerStatuses[0].state.terminated.exitCode,LAST:.status.containerStatuses[0].lastState.terminated.exitCode'
 echo "== NL1 and CO3"
