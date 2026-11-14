@@ -1019,6 +1019,9 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 	h.Call("onMessage", onMsg)
 	// The cpu messages go to the account of this container (AC2).
 	peer.State(wasiCPUState, func() any { return c })
+	// The pod of the client requests (tabnode_wasi_fetch.go).
+	podCtx := c.wasiPodCtx(ctx)
+	peer.State(wasiCtxState, func() any { return podCtx })
 	if err := peer.send("start", map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir, "preopens": preopens}); err != nil {
 		peer.cli.exit(128, "the pod worker cannot start: "+err.Error())
 		return p, nil

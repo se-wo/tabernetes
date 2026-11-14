@@ -60,8 +60,9 @@ type admission struct {
 const admitTTL = 30 * time.Second
 
 // synTimeout is how long a dropped connection takes to fail when the dial
-// has no deadline: the SYN retries of Linux.
-const synTimeout = 127 * time.Second
+// has no deadline: the SYN retries of Linux. A variable, so that tests can
+// make it short.
+var synTimeout = 127 * time.Second
 
 // newNetPolicy starts the informers of the engine: all pods, namespaces,
 // nodes, NetworkPolicies and ClusterNetworkPolicies of the cluster. Pods of
