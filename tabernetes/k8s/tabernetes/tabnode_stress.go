@@ -223,29 +223,29 @@ func parseStress(args []string) (*stressArgs, error) {
 	return a, nil
 }
 
-const stressUsage = `'stress' imposes certain types of compute stress on your system
+const stressUsage = `stress: load the CPU, memory and disk of a container
 
 Usage: stress [OPTION [ARG]] ...
- -?, --help         show this help statement
-     --version      show version statement
- -v, --verbose      be verbose
- -q, --quiet        be quiet
- -n, --dry-run      show what would have been done
- -t, --timeout N    timeout after N seconds
-     --backoff N    wait factor of N microseconds before work starts
- -c, --cpu N        spawn N workers spinning on sqrt()
- -i, --io N         spawn N workers spinning on sync()
- -m, --vm N         spawn N workers spinning on malloc()/free()
-     --vm-bytes B   malloc B bytes per vm worker (default is 256MB)
-     --vm-stride B  touch a byte every B bytes (default is 4096)
-     --vm-hang N    sleep N secs before free (default none, 0 is inf)
-     --vm-keep      redirty memory instead of freeing and reallocating
- -d, --hdd N        spawn N workers spinning on write()/unlink()
-     --hdd-bytes B  write B bytes per hdd worker (default is 1GB)
+ -?, --help         print this help
+     --version      print the version
+ -v, --verbose      print more messages
+ -q, --quiet        print fewer messages
+ -n, --dry-run      print what would run, run nothing
+ -t, --timeout N    stop after N seconds
+     --backoff N    wait N microseconds before the workers start
+ -c, --cpu N        N workers that keep a CPU busy
+ -i, --io N         N workers that call sync() in a loop
+ -m, --vm N         N workers that allocate and free memory in a loop
+     --vm-bytes B   memory per vm worker (256M by default)
+     --vm-stride B  write one byte in every B bytes of it
+     --vm-hang N    hold the memory N seconds before freeing it
+     --vm-keep      keep the memory and write it again, without freeing
+ -d, --hdd N        N workers that write and delete files
+     --hdd-bytes B  bytes each hdd worker writes
 
-Example: stress --cpu 8 --io 4 --vm 2 --vm-bytes 128M --timeout 10s
+Example: stress --cpu 2 --vm 1 --vm-bytes 64M --timeout 30s
 
-Note: Numbers may be suffixed with s,m,h,d,y (time) or B,K,M,G (size).
+N takes the suffixes s, m, h, d and y (time), B takes B, K, M and G (size).
 `
 
 func stressProg(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
@@ -386,19 +386,19 @@ func (h *hogs) vmWorker(ctx context.Context, n, pid int, dbug func(pid int, form
 const stressNgUsage = `stress-ng, version 0.17.08
 
 Usage: stress-ng [OPTION [ARG]]
- -?, --help                 show help
-     --version              show version
- -t N, --timeout N          timeout after N seconds (suffixes s, m, h, d, w, y)
- -c N, --cpu N              start N workers spinning on sqrt(rand())
- -i N, --io N               start N workers spinning on sync()
- -m N, --vm N               start N workers spinning on anonymous mmap
-       --vm-bytes N         allocate N bytes per vm worker, or N% of the memory
-       --vm-hang N          sleep N seconds before unmapping memory
-       --vm-keep            redirty memory instead of unmapping it
-       --metrics-brief      show only the metrics of busy stressors
- -v, --verbose              show all debug, warning and normal information output
+ -?, --help                 print this help
+     --version              print the version
+ -t N, --timeout N          stop after N (seconds, or with s, m, h, d, w, y)
+ -c N, --cpu N              N workers that keep a CPU busy
+ -i N, --io N               N workers that call sync() in a loop
+ -m N, --vm N               N workers that map and write anonymous memory
+       --vm-bytes N         memory per vm worker, in bytes or as N% of the memory
+       --vm-hang N          hold the memory N seconds before unmapping it
+       --vm-keep            keep the memory and write it again, without unmapping
+       --metrics-brief      print the metrics of the workers that ran
+ -v, --verbose              print all messages
 
-Example: stress-ng --vm 2 --vm-bytes 128M --timeout 60s
+Example: stress-ng --vm 2 --vm-bytes 50% --timeout 60s
 `
 
 // stressNgFlags are the options without a value.

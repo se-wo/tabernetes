@@ -498,41 +498,25 @@ func base64Cmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	})
 }
 
-// lsUsage is what BusyBox 1.38 prints after "ls: invalid option -- 'Z'".
-const lsUsage = `BusyBox v1.38.0 (2026-05-13 02:21:49 UTC) multi-call binary.
+// lsUsage follows "ls: invalid option -- 'Z'": the options of this ls.
+const lsUsage = `Usage: ls [-1aAdhilLnrRSt] [--color[=WHEN]] [FILE]...
 
-Usage: ls [-1AaCxdLHRFplinshrSXvctu] [-w WIDTH] [FILE]...
+List the files of each FILE, or of the current directory.
 
-List directory contents
-
-	-1	One column output
-	-a	Include names starting with .
-	-A	Like -a, but exclude . and ..
-	-x	List by lines
-	-d	List directory names, not contents
-	-L	Follow symlinks
-	-H	Follow symlinks on command line
-	-R	Recurse
-	-p	Append / to directory names
-	-F	Append indicator (one of */=@|) to names
-	-l	Long format
-	-i	List inode numbers
-	-n	List numeric UIDs and GIDs instead of names
-	-s	List allocated blocks
-	-lc	List ctime
-	-lu	List atime
-	--full-time	List full date/time
-	-h	Human readable sizes (1K 243M 2G)
-	--group-directories-first
-	-S	Sort by size
-	-X	Sort by extension
-	-v	Sort by version
-	-t	Sort by mtime
-	-tc	Sort by ctime
-	-tu	Sort by atime
-	-r	Reverse sort order
-	-w N	Format N columns wide
-	--color[={always,never,auto}]
+	-1	one name per line
+	-a	show names that start with a dot
+	-A	the same, without . and ..
+	-d	list a directory itself, not its files
+	-h	sizes as 1K, 243M, 2G
+	-i	print the inode number of each file
+	-l	long listing: mode, links, owner, group, size, time
+	-L	follow symbolic links
+	-n	like -l, with numeric user and group IDs
+	-r	reverse the order
+	-R	list subdirectories, recursively
+	-S	sort by size, largest first
+	-t	sort by modification time, newest first
+	--color[=always|never|auto]	color the names by type
 `
 
 // lsEntry is one line of ls: a name and what lstat (or stat with -L) says.

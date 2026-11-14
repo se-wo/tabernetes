@@ -29,7 +29,6 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/vishvananda/netlink"
 )
 
 const apiserverIP = "10.0.0.1"
@@ -352,16 +351,19 @@ func splice(c net.Conn, raw io.ReadWriteCloser) {
 
 // ---- node bootstrap ----
 
-func addLoopbackIP(ip string) error {
-	lo, err := netlink.LinkByName("lo")
-	if err != nil {
-		return err
+func addLoopbackIP(addr string) error {
+	if net.ParseIP(addr) == nil {
+		return fmt.Errorf("invalid IP address %q", addr)
 	}
-	addr, err := netlink.ParseAddr(ip + "/32")
-	if err != nil {
-		return err
+	return ipCmd("addr", "replace", addr+"/32", "dev", "lo")
+}
+
+// ipCmd runs ip of iproute2, with its message in the error.
+func ipCmd(args ...string) error {
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ip %s: %v: %s", strings.Join(args, " "), err, bytes.TrimSpace(out))
 	}
-	return netlink.AddrReplace(lo, addr)
+	return nil
 }
 
 func writeFile(path, content string, mode os.FileMode) error {
