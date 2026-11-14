@@ -30,6 +30,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -498,12 +499,14 @@ func tcpConnect(p *wasiPeer, m wasiMsg) {
 	}
 	k.mu.Lock()
 	switch {
-	case k.v6 && a.Is4():
-		// TC20. The pod worker gives this code first.
+	case k.v6 && a.Is4(), a.Is4In6():
+		// TC20. The pod worker gives this code first. runwasi also gives
+		// invalid-argument for an IPv4-mapped IPv6 address: it is not an
+		// IPv4 address.
 		k.mu.Unlock()
 		connected("invalid-argument")
 		return
-	case a.Is6() && !a.Is4In6():
+	case a.Is6():
 		// Rule 5: the cluster has no IPv6 (section 2). Linux gives
 		// ENETUNREACH for an address without a route.
 		k.state = tcpFailed
@@ -514,7 +517,7 @@ func tcpConnect(p *wasiPeer, m wasiMsg) {
 	k.state = tcpConnecting
 	port := k.port
 	k.mu.Unlock()
-	addr := net.JoinHostPort(a.Unmap().String(), strconv.Itoa(m.Int("port")))
+	addr := net.JoinHostPort(a.String(), strconv.Itoa(m.Int("port")))
 	go func() {
 		// Rule 5: the deadline of synTimeout. A SYN that NetworkPolicy
 		// drops and a listener with a full queue give timeout.
@@ -833,7 +836,7 @@ func tcpLookup(p *wasiPeer, m wasiMsg) {
 }
 
 // lookupAddrs gives the addresses of a name: first the names of /etc/hosts
-// of the pod, in the sequence of the file, then the resolver of nslookup
+// of the pod, IPv6 first and else in the sequence of the file, then the resolver of nslookup
 // with the search path of the pod (rule 11).
 func lookupAddrs(ctx context.Context, name string) []string {
 	if a, err := netip.ParseAddr(name); err == nil {
@@ -841,6 +844,11 @@ func lookupAddrs(ctx context.Context, name string) []string {
 		return []string{a.WithZone("").String()}
 	}
 	if ips := hostsLookup(podHosts(ctx), name); len(ips) > 0 {
+		// runwasi gives the order of getaddrinfo: IPv6 first, so
+		// localhost gives ::1 and then 127.0.0.1.
+		slices.SortStableFunc(ips, func(a, b string) int {
+			return cmpBool(strings.Contains(b, ":"), strings.Contains(a, ":"))
+		})
 		return ips
 	}
 	a, ok := dnsLookup(ctx, name)
@@ -871,6 +879,17 @@ func podHosts(ctx context.Context) []byte {
 		}
 	}
 	return b.Bytes()
+}
+
+// cmpBool orders true before false.
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 // hostsLookup gives the addresses of name in a hosts file, in the sequence

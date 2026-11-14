@@ -334,6 +334,14 @@ func TestWasiTCPIPv6(t *testing.T) {
 	if e := errOf(w.connect(6, "10.244.252.4", 80)); e != "invalid-argument" {
 		t.Errorf("TC20: %q, want invalid-argument", e)
 	}
+	// An IPv4-mapped address is not IPv4 (runwasi), also for a socket that
+	// is not bound.
+	w.listenOn(7, "0.0.0.0", 8080, 1)
+	for id, addr := range map[uint32]string{6: "::ffff:10.244.252.4", 8: "::ffff:10.244.252.4"} {
+		if e := errOf(w.connect(id, addr, 8080)); e != "invalid-argument" {
+			t.Errorf("connect %d to %s: %q, want invalid-argument", id, addr, e)
+		}
+	}
 }
 
 // TC11: a port without a listener gives connection-refused at once.
@@ -636,8 +644,8 @@ func TestWasiTCPLookup(t *testing.T) {
 	w := tcpPeer(t, "10.244.252.17", nil, pw)
 	lookupNode(t)
 	for i, c := range []struct{ name, want, err string }{
-		{"localhost", "127.0.0.1 ::1", ""},
-		{"LOCALHOST.", "127.0.0.1 ::1", ""},
+		{"localhost", "::1 127.0.0.1", ""}, // the order of runwasi
+		{"LOCALHOST.", "::1 127.0.0.1", ""},
 		{"client", "10.244.252.17", ""},
 		{"web", "10.96.5.5", ""},                           // NL1: the search path
 		{"web.default.svc.cluster.local", "10.96.5.5", ""}, // NL2

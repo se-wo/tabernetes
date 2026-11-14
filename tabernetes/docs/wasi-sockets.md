@@ -1218,10 +1218,13 @@ steps in `k8s/tabernetes/tabnode_wasi_tcp.go`. The pod worker does them in
     - For each other name, the pod worker sends `lookup`. The Go side
       answers with `addresses`, or with `name-unresolvable` (NL3).
     - The Go side first uses the names of `/etc/hosts` of the pod
-      (`localhost` and the hostname of the pod), in the sequence of the
-      file. Then it uses the resolver of `nslookup` (NL1, NL2). runwasi uses
-      the resolver of the system, which reads `/etc/hosts`. Package W3.3a
-      records the addresses of `localhost` on runwasi.
+      (`localhost` and the hostname of the pod). Then it uses the resolver
+      of `nslookup` (NL1, NL2). runwasi uses the resolver of the system,
+      which reads `/etc/hosts` and sorts the addresses as `getaddrinfo`
+      does. Package W3.3a recorded `::1` and then `127.0.0.1` for
+      `localhost` on runwasi, although `/etc/hosts` has `127.0.0.1` first.
+      So the Go side gives the IPv6 addresses of `/etc/hosts` first, and
+      else keeps the sequence of the file.
     - The lookup messages have no cancel. The pod worker ignores
       `addresses` for a stream that the component dropped.
 12. Proxy components. The instances of a proxy component keep the results
@@ -1871,7 +1874,7 @@ The column "Nodes" gives the nodes for the test:
 | TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. Each call gives the error code of fact 12. The second bind occurs with a listener on the first socket and without one (section 8.3.2, rule 3). | tab, Docker |
 | TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Until phase 4, `bind` and `connect` with the protocol `udp` give `not-supported`. | tab |
 | TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, the test records the values. The kernel can change the buffer sizes, so only the other options must agree there (section 11). | tab, Docker |
-| NL1, NL2 | A component finds a Service by its short name. The unit test of the Go side is `TestWasiTCPLookup`. It also makes sure that `localhost` gives `127.0.0.1` and then `::1`, and that the hostname of the pod gives the pod IP. | tab, worker, Docker |
+| NL1, NL2 | A component finds a Service by its short name. The unit test of the Go side is `TestWasiTCPLookup`. It also makes sure that `localhost` gives `::1` and then `127.0.0.1`, as on runwasi, and that the hostname of the pod gives the pod IP. | tab, worker, Docker |
 | NL3 | The name `example.com` fails with `name-unresolvable`. The unit test of the Go side is `TestWasiTCPLookup`. | tab |
 | UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
 | UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. | tab |
