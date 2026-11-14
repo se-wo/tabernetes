@@ -42,6 +42,7 @@ type offerToken struct {
 	SDP    string `json:"sdp"`
 	Port   int    `json:"p"`
 	Server string `json:"s,omitempty"`
+	Use    string `json:"use,omitempty"` // useNode or useKubectl (kubectlmode.go)
 }
 
 type answerToken struct {
@@ -86,8 +87,10 @@ func main() {
 	stun := flag.String("stun", "stun:stun.l.google.com:19302", "STUN server, empty to disable")
 	noKubelet := flag.Bool("no-kubelet", false, "only run the tunnel (for testing)")
 	advertise := flag.String("advertise", "127.0.0.1", "extra host ICE candidate addresses, comma separated (for docker -p port mappings), empty to disable")
+	server := flag.String("server", defaultServer, "kubectl: the apiserver address in the kubeconfig, for a host port other than 6443")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: tabernetes [flags] join <token>\n")
+		fmt.Fprintf(os.Stderr, "usage: tabernetes [flags] join <token>     join a node (token of \"join\")\n")
+		fmt.Fprintf(os.Stderr, "       tabernetes [flags] kubectl <token>  forward port 6443 to the apiserver and print a kubeconfig (token of \"join --kubectl\")\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -95,7 +98,11 @@ func main() {
 	if len(args) == 1 {
 		args = []string{"join", args[0]}
 	}
-	if len(args) != 2 || args[0] != "join" {
+	mode := ""
+	if len(args) == 2 {
+		mode = map[string]string{"join": useNode, "kubectl": useKubectl}[args[0]]
+	}
+	if mode == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -105,6 +112,13 @@ func main() {
 	}
 	if tok.V != 1 {
 		log.Fatalf("unsupported token version %d", tok.V)
+	}
+	if err := checkUse(tok, mode); err != nil {
+		log.Fatal(err)
+	}
+	if mode == useKubectl {
+		// No kubelet, no namespaces: only the tunnel.
+		*noKubelet = true
 	}
 
 	if inUserNS {
@@ -123,7 +137,22 @@ func main() {
 		log.Fatal(err)
 	}
 	defer pc.Close()
-	pc.OnDataChannel(onDataChannel)
+	ctl := newCtlLink(func() {
+		log.Print("the browser tab removed this connection")
+		cancel()
+	})
+	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		switch {
+		case dc.Label() == "ctl":
+			ctl.attach(dc)
+		case mode == useKubectl:
+			// Only this side opens channels in kubectl mode.
+			log.Printf("ignoring data channel %q", dc.Label())
+			dc.Close()
+		default:
+			onDataChannel(dc)
+		}
+	})
 
 	connected := make(chan struct{})
 	var once sync.Once
@@ -141,13 +170,23 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("\n\033[1mPaste this into the browser terminal:\033[0m\n\naccept %s\n\n", answer)
+	// In kubectl mode stdout is the kubeconfig, so the line goes to stderr.
+	acceptOut := os.Stdout
+	if mode == useKubectl {
+		acceptOut = os.Stderr
+	}
+	fmt.Fprintf(acceptOut, "\n\033[1mPaste this into the browser terminal:\033[0m\n\naccept %s\n\n", answer)
 
 	select {
 	case <-connected:
 	case <-time.After(10 * time.Minute):
 		log.Fatal("timed out waiting for the browser")
 	case <-ctx.Done():
+		return
+	}
+	if mode == useKubectl {
+		serveKubectl(ctx, pc, *server, tok)
+		ctl.sayBye(pc)
 		return
 	}
 	log.Printf("connected to the control plane in the browser, joining as %s (%s)", tok.Name, tok.IP)
@@ -175,6 +214,26 @@ func main() {
 		}
 		go t.servePodLinks(ctx)
 	}
+	<-ctx.Done()
+	ctl.sayBye(pc)
+}
+
+// serveKubectl forwards the TCP connections of kubectl to the apiserver in the
+// tab and prints the kubeconfig for them on stdout. It returns when ctx ends.
+func serveKubectl(ctx context.Context, pc *webrtc.PeerConnection, server string, tok offerToken) {
+	// All addresses: docker -p forwards to the address of the container,
+	// not to its 127.0.0.1.
+	l, err := net.Listen("tcp", ":"+kubectlPort)
+	if err != nil {
+		log.Fatalf("kubectl: %v", err)
+	}
+	t := &tunnel{pc: pc}
+	go t.serve(ctx, l)
+	if err := writeKubeconfig(os.Stdout, server, tok); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("connected as %s: kubectl reaches the cluster in the browser tab through port %s.", tok.Name, kubectlPort)
+	log.Print("The kubeconfig is on stdout. It works until this agent stops or the page reloads.")
 	<-ctx.Done()
 }
 
