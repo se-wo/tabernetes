@@ -10,7 +10,8 @@
 //   "command"  the pod worker calls run of wasi:cli/run
 //   ""         the pod worker calls the function that the entrypoint names,
 //              or _start (CO3, CO4)
-//   "proxy"    phase 2; the Go side does not start a pod worker for it
+//   "proxy"    the pod worker serves the request messages of the Go side
+//              with a new instance for each request (serveProxy, section 8.6)
 //
 // The Go side examines the imports before it starts the pod worker (CO11,
 // CR6). A function that the shim does not give (exit-with-code of CO18, or a
@@ -23,6 +24,7 @@ import { createIdle, createSockets, nextTask } from "./sockets.js";
 
 import { browserFilesystem } from "./files.js";
 import { tickImports } from "./cpu.js";
+import { createHttp, responseFields } from "./http.js";
 
 // The exit code of a trap, of an error result of run, of a function that is
 // not there and of a component that cannot instantiate. runwasi gives 137 for
@@ -300,14 +302,17 @@ export async function loadBlob(js) {
 // on peer. Memory is the class InMemoryFilesystemAdapter of the shim: with
 // it, the component gets the files of preopens (files.js, FS1 to FS3). meter
 // is the CPU meter of cpu.js (AC2), or null.
-export async function runComponent({ component, args, env, cwd, preopens }, { peer, WASIShim, io, load = loadBlob, Memory = null, meter = null }) {
+//
+// For a proxy component, the other options go to serveProxy.
+export async function runComponent({ component, args, env, cwd, preopens }, { peer, WASIShim, io, load = loadBlob, Memory = null, meter = null, ...proxy }) {
   const error = (text) => {
     const b = new TextEncoder().encode(text + "\n");
     peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
     return ERROR_EXIT;
   };
   const world = component.world ?? "";
-  if (world === "proxy") return error("the component is a proxy component (wasi:http/incoming-handler): the tab node cannot serve proxy components yet");
+  // A proxy component gets no preopens (fact 4): Memory is not used.
+  if (world === "proxy") return serveProxy({ component, env }, { peer, WASIShim, io, load, meter, ...proxy });
   const fn = world === "command" ? "" : component.entrypoint || DEFAULT_FUNCTION;
 
   const memory = createMemory(peer);
@@ -371,4 +376,408 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
     meter?.end();
     memory.report();
   }
+}
+
+// The proxy path (docs/wasi-sockets.md, section 8.6, PX7 to PX15, PX21 to
+// PX27, PX34). The Go side serves the address of the container and sends one
+// request message for each request. The pod worker makes a new instance for
+// each request, calls handle, sends one response message and discards the
+// instance.
+
+// MAX_INSTANCES is the maximum of instances of one container at the same
+// time (PX9). More requests wait in a queue (PX10).
+export const MAX_INSTANCES = 16;
+
+// MEMORY_RETRY_MS is the time after which a request that could not get the
+// memory of its instance (PX34) tries again, if no other instance of the
+// container ends before.
+export const MEMORY_RETRY_MS = 1000;
+
+// isMemoryError tells if an instantiation failed because the browser cannot
+// make one more Wasm memory (section 9.2, item 15). Chrome gives a RangeError
+// "Out of memory: Cannot allocate Wasm memory for new instance".
+export function isMemoryError(e) {
+  return /out of memory|cannot allocate wasm memory|could not allocate memory/i.test(String(e?.message ?? e));
+}
+
+// createScope gives the waits of one instance (PX24). wait(promise) gives a
+// promise that also fails when cancel() runs. sleep(ms) is a timer of the
+// instance. onCancel(fn) adds a step of cancel and gives a function that
+// removes it. cancel() stops the timers, does the steps and continues each
+// wait with an exception: Chrome frees a suspended instance only after its
+// call continues (section 9.2, item 15).
+export function createScope() {
+  const timers = new Set();
+  const rejects = new Set();
+  const steps = new Set();
+  let cancelled = false;
+  const failure = () => new Error("the request is cancelled");
+  const scope = {
+    get cancelled() {
+      return cancelled;
+    },
+    wait(promise) {
+      if (cancelled) return Promise.reject(failure());
+      return new Promise((resolve, reject) => {
+        rejects.add(reject);
+        promise.then(
+          (v) => {
+            rejects.delete(reject);
+            resolve(v);
+          },
+          (e) => {
+            rejects.delete(reject);
+            reject(e);
+          },
+        );
+      });
+    },
+    sleep(ms) {
+      return scope.wait(new Promise((resolve) => {
+        let left = ms;
+        const next = () => {
+          timers.delete(t);
+          if (left <= 0) return resolve();
+          const d = Math.min(left, 0x7fffffff);
+          left -= d;
+          t = setTimeout(next, d);
+          timers.add(t);
+        };
+        let t = null;
+        next();
+      }));
+    },
+    onCancel(fn) {
+      if (cancelled) {
+        fn();
+        return () => {};
+      }
+      steps.add(fn);
+      return () => steps.delete(fn);
+    },
+    cancel() {
+      if (cancelled) return;
+      cancelled = true;
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+      for (const fn of steps) {
+        try {
+          fn();
+        } catch {
+          // A step that fails must not stop the other steps.
+        }
+      }
+      steps.clear();
+      const e = failure();
+      for (const r of rejects) r(e);
+      rejects.clear();
+    },
+  };
+  return scope;
+}
+
+// clocksFor gives the clocks of one instance (decision 3): the timers of
+// monotonic-clock belong to the scope, so a cancel fails their waits.
+export function clocksFor(scope, pollableCreate) {
+  const now = () => BigInt(Math.floor(performance.now() * 1e6));
+  const monotonicClock = {
+    resolution: () => 1_000_000n,
+    now,
+    subscribeDuration(ns) {
+      if (ns <= 0n) return pollableCreate();
+      const ms = Number((ns + 999_999n) / 1_000_000n);
+      let done = false;
+      const p = scope.sleep(ms).then(() => {
+        done = true;
+      });
+      p.catch(() => {});
+      return pollableCreate({ ready: () => done, wait: () => p });
+    },
+    subscribeInstant(instant) {
+      return monotonicClock.subscribeDuration(instant - now());
+    },
+  };
+  const wallClock = {
+    now() {
+      const ms = Date.now();
+      return { seconds: BigInt(Math.floor(ms / 1000)), nanoseconds: (ms % 1000) * 1e6 };
+    },
+    resolution: () => ({ seconds: 0n, nanoseconds: 1e6 }),
+  };
+  return { monotonicClock, wallClock };
+}
+
+// createFetches gives the client requests of one pod worker (CR9, CR10):
+// start(req) sends fetch and gives {result, cancel}; fetched(msg) gives the
+// fetched message to its request. cancel sends fetch-cancel only before
+// fetched (section 8.3.1). The fetch IDs go from 1 to 0x7fffffff.
+export function createFetches(peer) {
+  const pending = new Map();
+  let next = 0;
+  const newID = () => {
+    do next = next >= 0x7fffffff ? 1 : next + 1;
+    while (pending.has(next));
+    return next;
+  };
+  return {
+    get size() {
+      return pending.size;
+    },
+    start({ method, url, headers, body }) {
+      const id = newID();
+      let resolve;
+      const result = new Promise((r) => (resolve = r));
+      const hs = headers.map(([k, v]) => [k, v.slice().buffer]);
+      const b = body.slice().buffer;
+      try {
+        peer.send("fetch", { fetch: id, method, url, headers: hs, body: b }, [b, ...hs.map(([, v]) => v)]);
+      } catch {
+        // The message fails the examination (too many headers, for example).
+        return { result: Promise.resolve({ error: "HTTP-request-header-section-size" }), cancel() {} };
+      }
+      pending.set(id, resolve);
+      return {
+        result,
+        cancel() {
+          if (pending.delete(id)) peer.send("fetch-cancel", { fetch: id });
+        },
+      };
+    },
+    fetched(msg) {
+      const r = pending.get(msg.fetch);
+      if (!r) return;
+      pending.delete(msg.fetch);
+      r(msg);
+    },
+  };
+}
+
+// emptyStdin is the stdin of an instance: no bytes (PX13).
+function emptyStdin(pollableCreate) {
+  const closed = () => {
+    throw { tag: "closed" };
+  };
+  return { read: closed, blockingRead: closed, skip: closed, blockingSkip: closed, subscribe: () => pollableCreate() };
+}
+
+// handlerExport gives the key of wasi:http/incoming-handler in the export list
+// of jco, else "".
+export function handlerExport(exports) {
+  for (const [name] of exports ?? []) {
+    if (name.startsWith("wasi:http/incoming-handler")) return name;
+  }
+  return "";
+}
+
+// serveProxy serves the request messages for a proxy component. It gives a
+// promise of an exit code only for a component that cannot start; else the
+// container runs until the Go side stops the pod worker.
+//
+// The handlers of request, cancel and fetched go on peer, one for each type;
+// they find the request or the client request by its ID. stdin of the Go
+// side has a handler that discards the bytes (PX13).
+export function serveProxy({ component, env }, { peer, WASIShim, io, load = loadBlob, meter = null, limit = MAX_INSTANCES, retryMs = MEMORY_RETRY_MS, onInstance = () => {} }) {
+  const memory = createMemory(peer);
+  const idle = createIdle({ onCall: () => memory.report() });
+  const fetches = createFetches(peer);
+  const base = environment(env);
+  const requests = new Map(); // request ID of Go -> entry
+  const queue = [];
+  let nextRequestID = 0;
+  let running = 0;
+  let instantiate = null;
+  let memoryWait = null; // the timer of PX34, or true while no timer runs
+  const key = handlerExport(component.exports);
+
+  const textExit = (text) => {
+    const b = new TextEncoder().encode(text + "\n");
+    peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
+    return ERROR_EXIT;
+  };
+
+  // reply sends the one response message of a request.
+  const reply = (entry, fields) => {
+    if (entry.done) return;
+    entry.done = true;
+    requests.delete(entry.msg.request);
+    const transfer = [];
+    if (fields.body) transfer.push(fields.body);
+    for (const [, v] of fields.headers ?? []) transfer.push(v);
+    try {
+      peer.send("response", { request: entry.msg.request, ...fields }, transfer);
+    } catch {
+      // The response fails the examination (too many headers, for example):
+      // the Go side closes the connection, as for an error code.
+      peer.send("response", { request: entry.msg.request, error: "HTTP-response-header-section-size" });
+    }
+  };
+
+  // newInstance makes the instance of one request: a new WASIShim with the
+  // context of runwasi (PX11 to PX15) and its own clocks and wasi:http.
+  const newInstance = async (requestID, scope) => {
+    const http = createHttp({
+      io,
+      idle,
+      wait: (p) => scope.wait(p),
+      fetch: (req) => {
+        const f = fetches.start(req);
+        const off = scope.onCancel(f.cancel);
+        f.result.then(off);
+        return f;
+      },
+    });
+    const environment = Object.assign(Object.create(null), base);
+    if (requestID !== null) environment.REQUEST_ID = String(requestID);
+    const discard = { write: () => idle.call(true), flush() {}, blockingFlush() {} };
+    const poll = pollWithTask(() => idle.call(true));
+    const scoped = (list) => scope.wait(Promise.resolve(poll(list)));
+    const shim = new WASIShim({
+      arguments: [],
+      environment,
+      stdin: emptyStdin(io.pollableCreate),
+      stdout: discard,
+      stderr: discard,
+      io: { ...io, poll: { ...io.poll, poll: scoped, pollList: scoped } },
+      sockets: createSockets({ idle, pollableCreate: io.pollableCreate }),
+      http: http.http,
+      clocks: clocksFor(scope, io.pollableCreate),
+    });
+    const missing = [];
+    const imports = importObject(shim, component.imports, missing);
+    const group = memory.group();
+    meter?.begin();
+    try {
+      const instance = await instantiate((file) => component.modules[file], meter ? tickImports(meter, imports) : imports, group.instantiateCore);
+      return { instance, group, http, missing };
+    } catch (e) {
+      group.release();
+      e.missing = missing;
+      throw e;
+    } finally {
+      meter?.end();
+    }
+  };
+
+  const handlerOf = (instance) => {
+    const iface = instance[key] ?? instance.incomingHandler;
+    return typeof iface?.handle === "function" ? iface : null;
+  };
+
+  // run serves one request with one instance.
+  const run = async (entry) => {
+    const scope = (entry.scope = createScope());
+    let made;
+    try {
+      made = await newInstance(entry.id, scope);
+    } catch (e) {
+      running--;
+      if (isMemoryError(e) && !entry.done) {
+        // PX34: the request waits at the front of the queue.
+        queue.unshift(entry);
+        entry.scope = null;
+        waitForMemory();
+        return;
+      }
+      // runwasi gives an error to hyper for an instance that fails.
+      reply(entry, { error: "trap" });
+      pump();
+      return;
+    }
+    memory.report();
+    onInstance(made.instance);
+    const { instance, group, http } = made;
+    made = null;
+    let trapped = false;
+    const [out, state] = http.outparam();
+    if (!entry.done) {
+      meter?.begin();
+      try {
+        // handle is in asyncMode.val.exports: it gives a promise.
+        await handlerOf(instance).handle(http.incoming(entry.msg), out);
+      } catch {
+        trapped = true;
+      } finally {
+        meter?.end();
+      }
+      reply(entry, responseFields(state, trapped));
+    }
+    // PX25: discard the instance. Its timers and client requests end.
+    scope.cancel();
+    entry.scope = null;
+    group.release();
+    running--;
+    memoryFree();
+    pump();
+  };
+
+  const waitForMemory = () => {
+    if (memoryWait) return;
+    if (running > 0) {
+      // The end of another instance of this container starts the queue again.
+      memoryWait = true;
+      return;
+    }
+    memoryWait = setTimeout(() => {
+      memoryWait = null;
+      pump();
+    }, retryMs);
+  };
+
+  const memoryFree = () => {
+    if (memoryWait && memoryWait !== true) clearTimeout(memoryWait);
+    memoryWait = null;
+  };
+
+  const pump = () => {
+    while (instantiate && !memoryWait && running < limit && queue.length) {
+      const entry = queue.shift();
+      if (entry.done) continue;
+      running++;
+      run(entry);
+    }
+  };
+
+  peer.on("stdin", () => {});
+  peer.on("request", (msg) => {
+    if (requests.has(msg.request)) return;
+    // PX11, PX12: REQUEST_ID in the sequence of arrival, from 0.
+    const entry = { msg, id: nextRequestID++, done: false, scope: null };
+    requests.set(msg.request, entry);
+    queue.push(entry);
+    pump();
+  });
+  peer.on("cancel", (msg) => {
+    const entry = requests.get(msg.request);
+    if (!entry) return;
+    reply(entry, { error: "cancelled" });
+    // A request in the queue stays there until pump removes it.
+    entry.scope?.cancel();
+  });
+  peer.on("fetched", (msg) => fetches.fetched(msg));
+
+  return (async () => {
+    try {
+      ({ instantiate } = await load(component.js));
+    } catch (e) {
+      return textExit(`the component cannot instantiate: ${e?.message ?? e}`);
+    }
+    // runwasi links the component before it serves (instance_pre). The pod
+    // worker makes one instance without a request for the same examination
+    // (CO11, CO12), and discards it.
+    try {
+      const { instance, group } = await newInstance(null, createScope());
+      memory.report();
+      group.release();
+      memory.report();
+      if (!handlerOf(instance)) return textExit("the component has no function handle in wasi:http/incoming-handler");
+    } catch (e) {
+      if (!isMemoryError(e)) {
+        const why = missingText(e.missing ?? [], e?.message ?? e, component.names?.imports);
+        return textExit(why || `the component cannot instantiate: ${e?.message ?? e}`);
+      }
+    }
+    pump();
+    // The container runs until the Go side stops the pod worker.
+    return new Promise(() => {});
+  })();
 }
