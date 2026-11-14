@@ -38,10 +38,12 @@ jobs:
         with:
           working_directory: tabernetes
 
-      # Same key as ci.yaml and pages.yaml.
+      # Same key as ci.yaml and pages.yaml, but restore only. ci.yaml skips
+      # `mise run test` on a cache hit, so only the workflows that run the
+      # tests (ci.yaml, pages.yaml) save this cache.
       - name: Cache tabernetes
         id: cache-tabernetes
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             tabernetes/.build/assets/tabernetes.wasm.zst
