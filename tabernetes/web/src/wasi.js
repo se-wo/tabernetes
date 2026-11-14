@@ -2,34 +2,147 @@
 // wasmtime runs its WASI preview 1 module in a Web Worker (wasi.worker.js),
 // a thread and a memory of its own. The Go side (tabnode_wasi.go) resolves
 // the image and calls this as globalThis.tabernetesWasi.
+//
+// A WASI preview 2 component goes to the transpile worker of this Go thread
+// (transpile.worker.js, docs/wasi-sockets.md section 8.2). This side keeps
+// the generated JavaScript only as text: it runs only in a pod worker (CO14).
+import { ASYNC_IMPORTS, ASYNC_EXPORTS, JCO_VERSION } from "./async_lists.js";
+import { isLabel } from "./transpile.js";
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 
-export function installWasi({ workerURL, mirror } = {}) {
+export function installWasi({ workerURL, mirror, transpileURL } = {}) {
   workerURL = new URL(workerURL || "wasi.worker.js", workerURL ? location.href : import.meta.url).href;
   mirror = mirror === "" ? "" : new URL(mirror || "oci/", mirror ? location.href : import.meta.url).href;
-  // Compiled modules by layer digests and path: restarts and other pods of
-  // the same image start without a download.
+  // The transpile worker is in transpile/ next to wasi.worker.js, so that
+  // the core modules of jco-transpile are in vendor/ next to them.
+  transpileURL = new URL(transpileURL || "transpile/transpile.worker.js", transpileURL ? location.href : workerURL).href;
+  globalThis.tabernetesWasi = createRuntime({ workerURL, mirror, transpileURL });
+}
+
+// createRuntime gives the object of globalThis.tabernetesWasi. The tests
+// give it their own Worker and fetch.
+export function createRuntime({ workerURL, mirror, transpileURL, Worker: W = globalThis.Worker, fetch: f = globalThis.fetch }) {
+  // Compiled modules (and the bytes of components) by layer digests and
+  // path: restarts and other pods of the same image start without a
+  // download.
   const modules = new Map();
-  globalThis.tabernetesWasi = {
+  // Transpile results by the key of decision 2.
+  const components = new Map();
+  const transpiler = newTranspiler(transpileURL, W);
+  const fetchLayer = (l, headers) => fetchLayerWith(f, l, headers);
+  return {
     mirror,
-    // load({layers: [{url, digest, kind}], headers, path}) resolves to
-    // {module} or {unsupported: "why"} and rejects when a download fails.
+    // load({layers: [{url, digest, kind}], headers, path, components})
+    // resolves to {module}, {component} or {unsupported: "why"} and rejects
+    // when a download fails. path can end with "#<function>", the function
+    // that the entrypoint names (runwasi). Only a caller that sets
+    // components: true gets a {component}:
+    //
+    //   {js: string, modules: {file: WebAssembly.Module}, imports: [string],
+    //    exports: [[name, "function" | "instance"]], entrypoint: string}
+    //
+    // The pod worker gives js and modules to jco: js exports instantiate(
+    // getCoreModule, imports), getCoreModule(file) gives modules[file].
+    // Other callers get {unsupported} for a component.
     load(src) {
-      const key = src.layers.map((l) => l.digest).join(",") + "#" + (src.path || "");
+      const hash = (src.path || "").indexOf("#");
+      const path = hash < 0 ? src.path || "" : src.path.slice(0, hash);
+      const entrypoint = hash < 0 ? "" : src.path.slice(hash + 1);
+      const digests = src.layers.map((l) => l.digest).join(",");
+      const key = digests + "#" + path;
       let p = modules.get(key);
       if (!p) {
-        p = loadModule(src);
+        p = loadModule({ ...src, path }, fetchLayer);
         modules.set(key, p);
         p.then((r) => r.unsupported && modules.delete(key), () => modules.delete(key));
       }
-      return p;
+      return p.then((r) => {
+        if (!r.componentBytes) return r;
+        // Only a WIT label can name an export. Another entrypoint does not
+        // go into the lists of jco; the pod worker then finds no function.
+        const fn = isLabel(entrypoint) ? entrypoint : "";
+        return loadComponent({ digests, path, entrypoint: fn, bytes: r.componentBytes }).then((c) => {
+          if (c.unsupported) return c;
+          if (src.components) return { component: { ...c.component, entrypoint } };
+          return { unsupported: "it is a WASI preview 2 component: the tab node transpiles it, but cannot run components yet, only WASI preview 1 modules (wasm32-wasip1, GOOS=wasip1)" };
+        });
+      });
     },
     start: (opts) => start(workerURL, opts),
+    // stats gives the count of transpiler runs, for tests (CO8).
+    stats: () => ({ transpiles: transpiler.runs, transpileWorker: transpiler.started }),
   };
+
+  function loadComponent({ digests, path, entrypoint, bytes }) {
+    // CO10: without JSPI, a component cannot run.
+    if (typeof WebAssembly.Suspending !== "function" || typeof WebAssembly.promising !== "function") {
+      return Promise.resolve({ unsupported: "it is a WASI preview 2 component, and this browser has no JavaScript Promise Integration (WebAssembly.Suspending, WebAssembly.promising), which components need: use Chrome or Edge 137, Firefox 153, Safari 27 or newer" });
+    }
+    // The key of decision 2.
+    const key = JSON.stringify([digests, path, JCO_VERSION, entrypoint, ASYNC_IMPORTS, ASYNC_EXPORTS]);
+    let p = components.get(key);
+    if (!p) {
+      p = transpiler.run(bytes, entrypoint).then(async (r) => {
+        if (r.error) return { unsupported: `the component cannot run: ${r.error}` };
+        const compiled = {};
+        try {
+          for (const [file, b] of Object.entries(r.modules)) compiled[file] = await WebAssembly.compile(b);
+        } catch (e) {
+          return { unsupported: `the transpiled component does not compile: ${e.message}` };
+        }
+        return { component: { js: r.js, modules: compiled, imports: r.imports, exports: r.exports } };
+      });
+      components.set(key, p);
+      p.then((r) => r.unsupported && components.delete(key), () => components.delete(key));
+    }
+    return p;
+  }
 }
 
-async function loadModule({ layers, headers, path }) {
+// newTranspiler gives the transpile worker of this Go thread. The worker
+// starts with the first component; a Go thread without components does not
+// load jco (section 8.2). If the worker fails, the next run starts a new
+// one.
+function newTranspiler(url, W) {
+  let worker = null, nextID = 0;
+  const pending = new Map();
+  const t = {
+    runs: 0,
+    started: false,
+    run(bytes, entrypoint) {
+      if (!worker) {
+        worker = new W(url, { type: "module", name: "transpile" });
+        t.started = true;
+        worker.onmessage = ({ data }) => {
+          const p = pending.get(data.id);
+          if (!p) return;
+          pending.delete(data.id);
+          p.resolve(data);
+        };
+        const fail = (msg) => {
+          worker?.terminate?.();
+          worker = null;
+          for (const p of pending.values()) p.reject(new Error(msg));
+          pending.clear();
+        };
+        worker.onerror = (e) => { e.preventDefault?.(); fail(`the transpile worker failed: ${e.message || "it did not start (is transpile/transpile.worker.js there?)"}`); };
+        worker.onmessageerror = () => fail("the transpile worker sent a message that cannot be read");
+      }
+      t.runs++;
+      const id = ++nextID;
+      // A copy: the cache keeps the bytes for a second entrypoint.
+      const copy = bytes.slice().buffer;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ id, bytes: copy, entrypoint }, [copy]);
+      });
+    },
+  };
+  return t;
+}
+
+async function loadModule({ layers, headers, path }, fetchLayer) {
   let bytes = null;
   if (!path) bytes = await fetchLayer(layers[0], headers);
   else {
@@ -46,9 +159,7 @@ async function loadModule({ layers, headers, path }) {
     return { unsupported: `${path ? "/" + path : "the module layer"} is not a WebAssembly module` };
   }
   // A component has layer 1 in the version field (bytes 6 and 7).
-  if (bytes[6] === 1 && bytes[7] === 0) {
-    return { unsupported: "it is a WASI preview 2 component: components are not supported in the browser yet, only WASI preview 1 modules (wasm32-wasip1, GOOS=wasip1)" };
-  }
+  if (bytes[6] === 1 && bytes[7] === 0) return { componentBytes: bytes };
   try {
     return { module: await WebAssembly.compile(bytes) };
   } catch (e) {
@@ -56,7 +167,7 @@ async function loadModule({ layers, headers, path }) {
   }
 }
 
-async function fetchLayer({ url, digest, kind }, headers) {
+async function fetchLayerWith(fetch, { url, digest, kind }, headers) {
   let resp;
   try {
     resp = await fetch(url, { headers });
