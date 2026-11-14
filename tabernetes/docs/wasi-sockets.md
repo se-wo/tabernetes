@@ -561,7 +561,7 @@ not a requirement.
 | CR5 | The cluster client must not decompress the body. | |
 | CR6 | A command component with an import of `wasi:http` must get the status that runwasi gives. | Fact 5. Phase 0, item 7. |
 | CR7 | A client request to an IP outside the cluster must fail with `connection-refused`. | wasmtime gives this code for a connect error that is not a timeout (fact 20). |
-| CR8 | A client request that NetworkPolicy denies must fail after the same time and with the same error code as on a Docker node. | Phase 0, item 17. |
+| CR8 | A client request that NetworkPolicy denies must fail after the same time and with the same error code as on a Docker node. | Phase 0, item 17: `connection-refused` after 134 seconds. |
 | CR9 | The pod worker must give the error code of the Go side to the component without a change. | The shim changes each failure of `fetch` (fact 9). The `wasi:http` of Tabernetes does not use `fetch`. |
 | CR10 | If the component discards a client request, the pod worker must send `fetch-cancel`. The Go side must then close the connection. | |
 | CR11 | A client request must fail with `connection-timeout` if the connection does not occur in 600 seconds. | The default of wasmtime (fact 20). |
@@ -1134,7 +1134,13 @@ pod status and not the restart count. The command `docker` runs
 `docs/wasi-sockets-poc/docker/checks.sh` on a Docker node that joined with
 the Docker check. That node runs kubelet, so it records the pod status and
 the restart count. The test host has cgroups v1 and nested Docker: the
-Docker check needs `--privileged` and `OOM_WORKAROUND=1` there.
+Docker check needs `--privileged` and `OOM_WORKAROUND=1` there. The
+workflow `.github/workflows/wasi-sockets-poc.yaml` runs the command `docker`
+again on a GitHub runner with Ubuntu, Linux 7.0, cgroups v2 and IPv6. That
+runner needs two changes before the join: the sysctl
+`kernel.apparmor_restrict_unprivileged_userns=0` and the kernel module
+`br_netfilter`. Without the sysctl, the node agent cannot make its user
+namespace. Without the module, flannel does not start on the node.
 
 | Item | Result | Effect on the design |
 | --- | --- | --- |
@@ -1146,11 +1152,11 @@ Docker check needs `--privileged` and `OOM_WORKAROUND=1` there.
 | 7, PX11 | The environment contains the variables of the container spec, for example `PATH` and `HOSTNAME`, and `REQUEST_ID`. | PX11 stays. |
 | 7, PX3, PX32 | A value that does not parse gives `0.0.0.0:8080`. Port 0 gives an ephemeral port of the kernel. | PX3 and PX32 stay. |
 | 7, PX33 | The IP 192.0.2.7 gives "Address not available (os error 99)". The task exits with status 137. | The tab node gives the same status. |
-| 7, PX4 | Not examined. The kernel of the test host has no IPv6. On the Docker node, `[::]:8080` gives "Address family not supported by protocol" and a restart loop with status 137. | A host with IPv6 must examine `[::]:8080`. |
+| 7, PX4 | On the GitHub runner, the proxy component on `[::]:8080` runs without a restart and answers on the IPv4 pod IP. On the test host without IPv6, `[::]:8080` gives "Address family not supported by protocol" and a restart loop with status 137. | PX4 stays. |
 | 7, CO11, CR6 | A component with an import that the linker does not have does not start. The log names the interface, for example `wasi:http/types@0.2.12`. The task exits with status 137. A command component with `wasi:http` gets this result. | CO11, CR6. |
 | 7, CO3, CO4 | On the Docker node, the entrypoint `/core.wasm#go` calls the export `go`, and the pod ends with `Completed`. Without `#go`, runwasi looks for `_start`: "component does not have exported function", status 137, reason `Error`. | CO3 and CO4. |
 | 7, NL1 | On the Docker node, a command component finds `kubernetes` and `kubernetes.default.svc.cluster.local`: 10.96.0.1. | NL1 stays. |
-| 7, CR2, CR7 | On the Docker node, a client request to a name that does not resolve gives `DNS-error` with the rcode "address not available". A ClusterIP port without a Service gives `connection-refused`. | CR2 and CR7 stay. |
+| 7, CR2, CR7 | On the Docker node, a client request to a name that does not resolve gives `DNS-error` with the rcode "address not available". A ClusterIP port without a Service gives `connection-refused`. On the GitHub runner, this request has no response after 30 seconds. | CR2 and CR7 stay. |
 | 7, CO11, CR6, 13 | On the Docker node, the pods with `exit-with-code` and with `wasi:http` in a command component end with status 137 and the reason `Error`. `exit(3)` gives the exit code 1. | CO11, CR6 and CO18. |
 | 13 | `std::process::exit` of Rust gives 0 for 0, 1 for 1 and 1 for 3. Rust 1.97 imports only `exit`. A component with an import of `exit-with-code` does not link (status 137). | CO18: exit codes 0 and 1 only. |
 | 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. On the Docker node, the container ends with 139 and the reason `Error`. kubelet starts it again, with the restart count 1. `REQUEST_ID` then starts at 0 again. A trap and an error code cause no restart. | PX26. |
@@ -1174,7 +1180,7 @@ Docker check needs `--privileged` and `OOM_WORKAROUND=1` there.
 | 9 | `docs/wasi-sockets-poc/udptable/` binds TCP in the in-process network and UDP in a UDP table on `10.244.0.2:53`. The in-process network alone gives "Address already in use". Ephemeral ports start at 32768 for each IP. A queue of 256 KiB keeps 256 datagrams of 1,024 bytes. | UD1, UD3 to UD6. |
 | 10 | Chrome 153 and pion v4.2.26 each open a channel `udp`. The other side sees `ordered: false` and `maxRetransmits: 0` for each channel. Messages of 65,521 bytes and of 65,537 bytes arrive in the two directions. Chrome gives `sctp.maxMessageSize` 262,144. | ND3 and ND5 stay. |
 | 8 | On the Docker node, the echo component answers through the Services `echo-tcp` (TCP) and `echo-udp` (UDP). The Rust standard library on `wasm32-wasip2` has no `TcpStream::try_clone`. | Section 10.1. |
-| 17 | Not examined. On the test host, kube-network-policies cannot write its nftables rules ("netlink receive: no such file or directory"). A NetworkPolicy then has no effect on the Docker node. | A deferred test (decision 16). |
+| 17 | On the GitHub runner, a NetworkPolicy allows only DNS for the egress of the proxy pod. A client request to a pod gives `connection-refused` after 134 seconds. Before the policy, the same request gives the status code 200. The kernel stops the connect after its SYN retries, and wasmtime gives `connection-refused` for this error (fact 20). On the test host, kube-network-policies cannot write its nftables rules. | CR8: the tab node gives `connection-refused` after `synTimeout` (127 seconds). The test on the tab node stays a deferred test (decision 16). |
 | 18 | The Docker check imports the images from the Docker of the host with `ctr images import`, as `IMPORT=1` does. The pods use `imagePullPolicy: Never`. | Section 10.2: the import step. |
 | 16 | In Chrome 153, a module worker from a `data:` URL has the origin `null`. A `WebAssembly.Module` from the page arrives through `postMessage` and runs. IndexedDB and `caches` throw `SecurityError`. A `fetch` to the origin of the page fails. Firefox and Safari: not examined. | Decision 13 stays. |
 
