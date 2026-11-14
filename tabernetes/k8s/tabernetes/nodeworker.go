@@ -68,9 +68,9 @@ func (c *cluster) prepareWorkerNode(open js.Value, gpu bool) (map[string]any, er
 	}, nil
 }
 
-// removeWorkerNode stops forwarding to the kubelet of a worker node that
-// is gone.
-func removeWorkerNode(name string) {
+// forgetNode stops forwarding to the kubelet of a node that is gone: a
+// node in a worker or a Docker node.
+func forgetNode(name string) {
 	nodesMu.Lock()
 	jn := nodes[name]
 	delete(nodes, name)
