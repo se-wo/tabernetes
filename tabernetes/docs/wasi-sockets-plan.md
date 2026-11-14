@@ -16,7 +16,7 @@ order. Packages with the same predecessors can run at the same time.
    for the nodes that your package can reach. A test that needs a later
    package stays for that package. Name it in your pull request.
 4. Use the message names and fields of `web/src/wasi_messages.js` and
-   `k8s/tabernetes/tabnode_wasi_msg.go` (package W1.3). A new message or
+   `k8s/tabernetes/tabnode_wasi_msg.go` (package W1.4a). A new message or
    field goes into both files in the same pull request.
 5. Tests that wait 30 seconds or more of real time use a clock that the
    test controls (CR8, CR11, TC10, PX23, FL2, FL3).
@@ -39,10 +39,11 @@ order. Packages with the same predecessors can run at the same time.
 | W1.1 | 1 | Test images of section 10.1, the Docker check in CI | `wasm-images/` (Rust images for phases 1 to 4, from the components of phase 0), `images.txt`, `docs/docker-node-check/` (image import, one script and one manifest file for each `wasi-*` step), `.github/workflows/docker-check.yaml` (new) | `mise.toml`: Rust in `[tools]`. `ci.yaml`: Rust. | none | L |
 | W1.2 | 1 | Test harness for "tab" and "worker" | `web/test/` (new): unit tests of the JavaScript with `node --test`. An end-to-end job in CI that starts the page with `browser.mjs` and runs commands with `tab.mjs`, on the tab node and on a node worker. | `mise.toml`: a task `test-web`. `ci.yaml`: the new jobs. | none | M |
 | W1.3 | 1 | CO8 to CO10, CO14 to CO16 | `web/src/transpile.worker.js` (new), the cache in `web/src/wasi.js` | `web/package.json`, `mise.toml` (task `web`), `site/build.mjs` | none | L |
-| W1.4 | 1 | CO1 to CO5, CO11 to CO13, CO18, CO17 and CO19 (tests in W3.3), MS1, MS6 | `web/src/wasi_messages.js` and `k8s/tabernetes/tabnode_wasi_msg.go` (new: names, fields and dispatchers of section 8.3), the component path of `web/src/wasi.worker.js` and `tabnode_wasi.go`, `web/src/sockets.js` (a stub that denies, and the count of CO17) | `web/src/wasi.js` | W1.1, W1.2, W1.3 | XL |
-| W1.5 | 1 | FS1 to FS4, CO6, CO7, AC2 | `web/src/files.js` (new), the `cpu` message in `tabnode_acct.go` | `wasi.worker.js` (start of the adapter), `README.md` (phase 1) | W1.4 | M |
+| W1.4a | 1 | CO1, CO5 (arguments, environment, stdout, stderr), the exit codes of CO18, CO13, MS1, MS6 | `web/src/wasi_messages.js`, `k8s/tabernetes/tabnode_wasi_msg.go` (new, with dispatchers), the transport, `component.worker.js` (from `data:`), `wasi:cli/run` | `wasi.js`, `wasi.worker.js`, `tabnode_wasi.go`, `mise.toml` (task `web`), `site/build.mjs` | W1.2, W1.3 (end-to-end: W1.1) | L |
+| W1.4b | 1 | CO2 to CO4, CO11, CO12, CO17 and CO19 (tests in W3.3), CR6, the rest of CO5 and CO18, MS1 and MS6 for new messages | the selection of the world, the statuses of runwasi, stdin and memory of components, `web/src/sockets.js` (a stub that denies, and the count of CO17) | the files of W1.4a | W1.4a, W1.1 | L |
+| W1.5 | 1 | FS1 to FS4, CO6, CO7, AC2 | `web/src/files.js` (new), the `cpu` message in `tabnode_acct.go` | `component.js` (start of the adapter), `README.md` (phase 1) | W1.4 | M |
 | W2.1 | 2 | PX1 to PX4, PX6, PX16 to PX20, PX23, PX28 to PX33, CR1 to CR8, CR10, CR11, MS5, AC1 (proxy server) | `k8s/tabernetes/tabnode_wasi_proxy.go` (new), the cluster client in `tabnode_dial.go` | `tabnode_wasi_msg.go` | phase 1 | L |
-| W2.2 | 2 | PX7 to PX15, PX21, PX22, PX24 to PX27, PX34, CR9 | `web/src/http.js` (new, from `http-own.js` of phase 0), the proxy path of `wasi.worker.js` | `wasi_messages.js` | phase 1 | L |
+| W2.2 | 2 | PX7 to PX15, PX21, PX22, PX24 to PX27, PX34, CR9 | `web/src/http.js` (new, from `http-own.js` of phase 0), the proxy path of `component.js` and `component.worker.js` | `wasi_messages.js` | phase 1 | L |
 | W2.3 | 2 | All PX and CR tests end-to-end, open question 2 | step `wasi-proxy`, `README.md` (phase 2) | `wasi-sockets.md` (the answer to open question 2) | W2.1, W2.2 | M |
 | W3.1 | 3 | TC1 to TC4, TC7 to TC12, TC14 to TC16, TC18, TC19, NL1 to NL3, MS2 to MS4, AC1 (TCP) | `k8s/tabernetes/tabnode_wasi_tcp.go` (new), `tabnode_loopback.go` (new), the loopback checks in `tabnode_dial.go`, `tabnode_net.go`, `tabnode_netpol.go` and `podlink.go` | `tabnode_wasi_msg.go` | phase 2 | L |
 | W3.2 | 3 | TC5, TC6, TC13, TC17, TC20 to TC22, NL in the pod worker | the TCP and lookup part of `web/src/sockets.js` | `wasi_messages.js` | phase 2 | L |
@@ -63,11 +64,11 @@ Phase 5 has only deferred tests. So W6.1 can run at the same time as phase
 
 ## Files that more than one package changes
 
-- `tabnode_wasi.go` and `wasi.worker.js`: W1.4 moves the message handling
-  into the dispatchers. Later packages add handlers in files of their own.
+- `tabnode_wasi.go`, `component.js` and `component.worker.js`: W1.4a puts
+  the message handling into the dispatchers. Later packages add handlers in files of their own.
 - `tabnode_dial.go`: W2.1, W3.1 and W4.1, in the order of the phases.
 - `tabnode_net.go`, `tabnode_netpol.go`: W3.1, W4.2 and W6.1.
-- `sockets.js`: W1.4, W3.2 and W4.4.
+- `sockets.js`: W1.4b, W3.2 and W4.4.
 - `mise.toml`: W1.1 changes `[tools]`, W1.2 adds a task, W1.3 changes the
   task `web`. The package that merges later rebases.
 - `check.sh`, `manifests.yaml`: W1.1 makes one file for each step. Later

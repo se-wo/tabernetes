@@ -84,7 +84,7 @@ These items are not in the scope of this document:
 | Docker node | A node in a Docker container, with containerd, runwasi and the node agent (`node/`). |
 | Go thread | The thread that runs the Wasm binary of one tab node. It also runs `web/src/wasi.js` of that tab node. Each tab node has its own Go thread. |
 | Go side | The code of a tab node on its Go thread that starts pod workers and has the sockets of their pods. |
-| pod worker | The Web Worker that runs one container of a WebAssembly pod (`web/src/wasi.worker.js`). |
+| pod worker | The Web Worker that runs one container of a WebAssembly pod: `web/src/wasi.worker.js` for a module, `web/src/component.worker.js` for a component. |
 | transpile worker | A new Web Worker that transpiles components with jco. Each Go thread has one transpile worker. |
 | module | A WASI preview 1 core module (`wasm32-wasip1`, `GOOS=wasip1`). |
 | component | A WASI preview 2 component (`wasm32-wasip2`). |
@@ -785,6 +785,25 @@ label.
 The pod worker of a component starts from a `data:` URL (decision 13). It
 loads the generated JavaScript from a `Blob` URL that it makes.
 
+A worker from a `data:` URL cannot load other files of the page. So the task
+`web` bundles `web/src/component.worker.js` with `WASIShim` and
+`wasi_messages.js` into one script, as each `*.worker.js`. The pod worker of
+modules (`wasi.worker.js`) stays a different script. `wasi.js` gets the text
+of `component.worker.js` one time. It starts each pod worker of a component
+from `data:text/javascript,` and this text. If the worker sends an `error`
+event before its first message `ready`, `wasi.js` starts it again from a
+`Blob` URL with the same text. The next pod workers of the page or of the
+node worker then also start from this `Blob` URL. The generated JavaScript
+never goes into these URLs. It goes to the pod worker in the message
+`start`.
+
+jco gives the names of imports without a version, for example
+`wasi:cli/exit`, if the component imports one version of the interface. The
+version is then only in the generated JavaScript. The pod worker makes the
+import object with the same names: `getImportObject()` of `WASIShim` for a
+name without a version, `getImportObject({asVersion})` for a name with a
+version.
+
 ### 8.3 Messages
 
 The pod worker and the Go side use the current message channel of the pod
@@ -832,6 +851,94 @@ Other messages:
 | Type | Direction | Contents |
 | --- | --- | --- |
 | `cpu` | worker to Go | busy time of the instances since the last `cpu` message (AC2) |
+
+CLI messages of a component:
+
+| Type | Direction | Contents |
+| --- | --- | --- |
+| `ready` | worker to Go | none. The first message of the pod worker. `wasi.js` uses it and does not send it to the Go side. |
+| `start` | Go to worker | the transpile result (section 8.2), arguments, environment, working directory |
+| `stdout`, `stderr` | worker to Go | bytes |
+| `stdin` | Go to worker | bytes, and a flag for the end of stdin |
+| `mem` | worker to Go | the size of the memory of the instances (CO6) |
+| `exit` | worker to Go | exit code, and a text for stderr or none |
+
+#### 8.3.1 Format of the messages
+
+`web/src/wasi_messages.js` and `k8s/tabernetes/tabnode_wasi_msg.go` contain
+the same table of the messages. A unit test compares the two tables. These
+rules apply to all messages:
+
+- A message is a plain object with the field `type` and the fields of the
+  table. Other fields are not permitted.
+- Bytes are an `ArrayBuffer`. The sender transfers it.
+- Each ID is an integer from 1 to 4,294,967,295. The pod worker makes the IDs
+  from 1 to 2,147,483,647. The Go side makes the IDs from 2,147,483,648. So
+  the two sides never make the same ID.
+- The ID of `lookup` and `addresses` is the field `lookup`. The ID of the HTTP
+  messages `request`, `response` and `cancel` is the field `request`. The
+  ID of `fetch`, `fetched` and `fetch-cancel` is the field `fetch`.
+- A socket ID belongs to the container after `bind` or `connect` with a new
+  ID, or after `accepted`. It stops to belong to the container after
+  `closed`. A request ID belongs to the container after `request` and until
+  `response`. A fetch ID belongs to it after `fetch` and until `fetched` or
+  `fetch-cancel`. A lookup ID belongs to it after `lookup` and until
+  `addresses`.
+- `response` and `fetched` give an error code in the field `error`, or a
+  status code, headers and a body. `response` also gives the result of an
+  instance that traps in the field `error`.
+
+The fields have these limits in addition to section 8.4:
+
+| Field | Limit |
+| --- | --- |
+| Bytes of `stdout`, `stderr` and `stdin` | 1 MiB in one message |
+| Bytes of `datagram` | 65,535 |
+| Credits of `credit` | 256 KiB |
+| Backlog of `listen` | 1 to 4,096 |
+| Name of `lookup` | 1 to 253 characters |
+| URL | 8,192 characters |
+| Headers | 1,000 lines, a name of 256 characters, a value of 64 KiB |
+| Addresses of `addresses` | 256 |
+| Text of `exit` | 4,096 characters |
+| Arguments and environment of `start` | 65,536 items, each 1 MiB |
+
+If a message from a pod worker fails the examination (MS6), the Go side
+drops it. If the message has a correct ID in its first ID field, the Go side
+closes this ID:
+
+- It releases the ID, if the ID belongs to the container. The handlers of
+  later phases register a function for this step.
+- It sends a message to the pod worker that ends the ID:
+
+| ID | Message to the pod worker |
+| --- | --- |
+| socket | `closed` with the error code `invalid-argument` |
+| request | `cancel` |
+| fetch | `fetched` with the error code `internal-error` |
+| lookup | `addresses` with the error code `invalid-argument` |
+
+Each side has a registry of handlers by message type. A later phase adds its
+handlers in a file of its own. On the Go side, an `init` function calls
+`wasiHandle(type, handler)` and `wasiOnClose(kind, function)`. In the pod
+worker, the code calls `peer.on(type, handler)` on the dispatcher of
+`createPeer`.
+
+`wasi.js` does not examine the messages. It sends them between the pod
+worker and the Go side with no change. `kill` and the errors of the worker
+stay in `wasi.js`. For these, it gives the Go side the message `exit` with
+the exit code 137 or 128. The path of modules has no messages of this table
+(CO13).
+
+The pod worker of a command component gives these exit codes:
+
+- `exit` of `wasi:cli/exit` gives 0 for `ok` and 1 for `err` (CO18). The pod
+  worker does not give `exit-with-code`.
+- A return of `run` without an error gives 0.
+- A trap, an error result of `run` and a component that cannot instantiate
+  give 137, with a text on stderr. Phase 0 did not examine a trap and an
+  error result of `run`. 137 is the exit status of all other errors of
+  runwasi in section 9.2.
 
 ### 8.4 Credits and queues
 
@@ -1028,7 +1135,8 @@ connection and then its end.
 | --- | --- |
 | `web/src/transpile.worker.js` (new) | Transpile components with jco (section 8.2). |
 | `web/src/wasi.js` | Start components. Keep the results of the transpile worker in the cache. |
-| `web/src/wasi.worker.js` | Run components in JSPI mode with `WASIShim`. Instantiate proxy components for each request. Send the messages of section 8.3. |
+| `web/src/wasi.worker.js` | No change: the pod worker of modules (CO13). |
+| `web/src/component.worker.js` (new), `web/src/component.js` (new) | The pod worker of components (section 8.2). Run components in JSPI mode with `WASIShim`. Instantiate proxy components for each request. Send the messages of section 8.3. |
 | `web/src/sockets.js` (new) | The `sockets` object for `WASIShim`, with `ip-name-lookup`. The count of CO17. |
 | `web/src/wasi_messages.js` (new), `k8s/tabernetes/tabnode_wasi_msg.go` (new) | The names and the fields of the messages of section 8.3, and the dispatcher of each side. Phase 1 makes them. Later phases add a handler for each message in a file of their own, for example `tabnode_wasi_proxy.go`. |
 | `web/src/http.js` (new) | The `wasi:http` of Tabernetes (decision 4), with `fetch` and `fetch-cancel`. The base is `docs/wasi-sockets-poc/browser/src/http-own.js`. |

@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { apply, forEachNode, getJSON, namespace, nodeName, onNode, pod, waitFor } from "./harness.mjs";
+import { apply, forEachNode, getJSON, namespace, nodeName, onNode, pod, podPhase, waitFor, waitForPod } from "./harness.mjs";
 import { component, withName } from "../component_fixtures.mjs";
 
 // require() also finds a global install through NODE_PATH; import does not.
@@ -200,10 +200,10 @@ forEachNode(["tab", "worker"], (kind) => {
     await record(node);
     const before = (await stats(node)).transpiles;
     await apply([cmdPod("a", node), cmdPod("b", node)], ns);
+    // The pod worker runs the command component (W1.4a).
     for (const name of ["a", "b"]) {
-      const w = await waitFor(() => notStarted(ns, name), { what: `the state of pod ${name}` });
-      assert.ok(NOT_STARTED.includes(w.reason), `${w.reason}: ${w.message}`);
-      assert.match(w.message, /WASI preview 2 component: the tab node transpiles it, but cannot run components yet/);
+      const p = await waitForPod(ns, name, podPhase("Succeeded", "Failed"));
+      assert.equal(p.status.containerStatuses[0].state.terminated?.exitCode, 0, JSON.stringify(p.status.containerStatuses[0].state));
     }
     const s = await stats(node);
     assert.equal(s.transpileWorker, true);
