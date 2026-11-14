@@ -32,7 +32,7 @@ globalThis.RTCPeerConnection = FakePeer;
 // The calls of join.js to the WebAssembly binary.
 const calls = [];
 globalThis.tabernetes = {
-  prepareJoin: async () => ({ name: "node-1", ip: "10.0.0.2", token: "abcdef.0123456789abcdef", ca: "CA" }),
+  prepareJoin: async () => ({ name: "node-1", ip: "10.0.0.2", token: "bootstrap-token", ca: "CA" }),
   prepareKubectl: async () => ({ name: "kubectl-1", token: "eyJ.sa.token", ca: "CA" }),
   removeNode: async (name) => { calls.push(["removeNode", name]); },
   revokeKubectl: async (name) => { calls.push(["revokeKubectl", name]); },
