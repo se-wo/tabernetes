@@ -845,6 +845,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
     not streams. When the client closes its connection, the pod worker
     discards the instance and its client requests; runwasi lets `handle`
     run to its end.
+  - A request of HTTP/1.1 without a `Host` header gets 400 from the tab
+    node; runwasi closes the connection with no response (as both do for
+    HTTP/1.0 without `Host`).
   - `127.0.0.1` in `WASMTIME_HTTP_PROXY_SOCKET_ADDR` listens on the pod IP
     and accepts all clients until phase 3 (on runwasi, only the pod reaches
     it). A NetworkPolicy for client requests is not tested on a Docker node
