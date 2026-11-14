@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -740,14 +742,12 @@ func pipeConn(ctx context.Context, hc interp.HandlerContext, conn net.Conn) {
 }
 
 // nc connects stdin and stdout to a TCP connection: nc [-v] [-z] [-w secs]
-// host port, and nc -l [-p] port for one incoming connection. TCP only.
+// host port, and nc -l [-p] port for one incoming connection. -u is UDP
+// (ncUDP).
 func ncCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, rest, err := opts("nc", args, "vzlukw:p:s:q:i:nd46CN", nil)
 	if err != nil {
 		return fail(hc, 1, "%v", err)
-	}
-	if has(o, "u") {
-		return fail(hc, 1, "nc: UDP is not supported")
 	}
 	var timeout time.Duration
 	if v, ok := o["w"]; ok {
@@ -756,6 +756,9 @@ func ncCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 			return fail(hc, 1, "nc: invalid timeout %s", v)
 		}
 		timeout = time.Duration(f * float64(time.Second))
+	}
+	if has(o, "u") {
+		return ncUDP(ctx, hc, o, rest, timeout)
 	}
 	if has(o, "l") {
 		ps := o["p"]
@@ -808,6 +811,134 @@ func ncCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 	}
 	pipeConn(ctx, hc, conn)
 	return nil
+}
+
+// The result of busybox nc -u when its connected socket gets
+// connection-refused (UD9): the next send after a refused datagram fails.
+// W4.5a records the text and the exit code on runwasi; these are the values
+// until then.
+const (
+	ncUDPRefusedText = ""
+	ncUDPRefusedCode = 1
+)
+
+// ncUDPBuf is the largest read of stdin, one datagram (busybox: BIGSIZ).
+const ncUDPBuf = 8192
+
+// ncUDP is nc -u (UD19): the client "nc -u [-w secs] host port" and the
+// server "nc -u -l [-p] port", on the UDP table.
+func ncUDP(ctx context.Context, hc interp.HandlerContext, o map[string]string, rest []string, wait time.Duration) error {
+	if has(o, "l") {
+		ps := o["p"]
+		if len(rest) > 0 {
+			ps = rest[len(rest)-1]
+		}
+		port, ok := parsePort(ps)
+		if !ok {
+			return fail(hc, 1, "nc: bad local port '%s'", ps)
+		}
+		c, err := listenPodUDP(ctx, ":"+strconv.Itoa(port))
+		if err != nil {
+			return fail(hc, 1, "nc: bind: %s", connError(err))
+		}
+		defer c.Close()
+		// Like busybox: the first datagram gives the remote address.
+		if wait > 0 {
+			c.SetReadDeadline(time.Now().Add(wait))
+		}
+		buf := make([]byte, udpMaxDatagram)
+		n, from, err := c.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return interp.ExitStatus(1)
+		}
+		c.SetReadDeadline(time.Time{})
+		hc.Stdout.Write(buf[:n])
+		if err := c.Connect(from.(*net.UDPAddr).AddrPort()); err != nil {
+			return fail(hc, 1, "nc: connect: %s", connError(err))
+		}
+		return ncUDPCopy(ctx, hc, c, wait)
+	}
+	if len(rest) != 2 {
+		return fail(hc, 1, "usage: nc -u [-w secs] host port | nc -u -l [-p] port")
+	}
+	host, ps := rest[0], rest[1]
+	port, ok := parsePort(ps)
+	if !ok {
+		return fail(hc, 1, "nc: bad port '%s'", ps)
+	}
+	ip, ok := resolveName(ctx, host)
+	if !ok {
+		return fail(hc, 1, "nc: bad address '%s'", host)
+	}
+	c, err := dialClusterUDP(ctx, net.JoinHostPort(ip, strconv.Itoa(port)))
+	if err != nil {
+		return fail(hc, 1, "nc: %s", connError(err))
+	}
+	defer c.Close()
+	return ncUDPCopy(ctx, hc, c, wait)
+}
+
+// ncUDPCopy sends each read of stdin as one datagram and writes each
+// datagram that arrives to stdout. At the end of stdin, it waits wait for
+// more datagrams (each datagram starts the wait again) and then ends; with
+// wait 0 it reads until ctx ends. A refused datagram ends it with
+// ncUDPRefusedText and ncUDPRefusedCode.
+func ncUDPCopy(ctx context.Context, hc interp.HandlerContext, c *udpConn, wait time.Duration) error {
+	var eof, refused atomic.Bool
+	if hc.Stdin == nil {
+		eof.Store(true)
+		if wait > 0 {
+			c.SetReadDeadline(time.Now().Add(wait))
+		}
+	} else {
+		// A read of stdin that never returns stays behind, as in pipeConn.
+		go func() {
+			buf := make([]byte, ncUDPBuf)
+			for {
+				n, err := hc.Stdin.Read(buf)
+				if n > 0 {
+					if _, werr := c.Write(buf[:n]); werr != nil {
+						if errors.Is(werr, syscall.ECONNREFUSED) {
+							refused.Store(true)
+						}
+						c.Close()
+						return
+					}
+				}
+				if err != nil {
+					eof.Store(true)
+					if wait > 0 {
+						c.SetReadDeadline(time.Now().Add(wait))
+					}
+					return
+				}
+			}
+		}()
+	}
+	buf := make([]byte, udpMaxDatagram)
+	for {
+		n, err := c.Read(buf)
+		switch {
+		case err == nil:
+			hc.Stdout.Write(buf[:n])
+			if eof.Load() && wait > 0 {
+				c.SetReadDeadline(time.Now().Add(wait))
+			}
+			continue
+		case errors.Is(err, syscall.ECONNREFUSED):
+			refused.Store(true)
+		}
+		if refused.Load() {
+			if ncUDPRefusedText != "" {
+				fmt.Fprintln(hc.Stderr, ncUDPRefusedText)
+			}
+			return interp.ExitStatus(ncUDPRefusedCode)
+		}
+		return nil // the end of the wait, of ctx, or a closed socket
+	}
 }
 
 // telnet connects to host [port 23] and copies stdin and stdout; there is no

@@ -3,9 +3,10 @@ package main
 // CoreDNS on the tab node. The Corefile of kube-system/coredns applies to the
 // names of the tab (hosts and rewrite name; the rest has no meaning in a
 // browser, which has no DNS), the built-in image registry.k8s.io/coredns/
-// coredns runs as a pod with logs, health, ready, metrics and DNS over TCP,
-// and a tab CoreDNS pod leaves the node once a Docker node can run the real
-// one (pods there need UDP).
+// coredns runs as a pod with logs, health, ready, metrics and DNS over UDP
+// (the UDP table, tabnode_udp.go) and TCP, and a tab CoreDNS pod leaves the
+// node once a Docker node can run the real one (until phase 5, pods there
+// cannot send datagrams to a tab node).
 
 import (
 	"bufio"
@@ -21,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +30,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -350,20 +353,21 @@ func (s *serviceProxy) lookupName(name string) (dnsAnswer, bool) {
 	return s.lookupFQDN(name, 0)
 }
 
-// --- DNS over TCP ---
+// --- DNS over UDP and TCP ---
 
 type corednsStats struct {
-	mu        sync.Mutex
-	req, resp map[string]uint64
+	mu   sync.Mutex
+	req  map[[2]string]uint64 // by protocol and type
+	resp map[string]uint64
 }
 
-func (st *corednsStats) count(typ, rcode string) {
+func (st *corednsStats) count(proto, typ, rcode string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.req == nil {
-		st.req, st.resp = map[string]uint64{}, map[string]uint64{}
+		st.req, st.resp = map[[2]string]uint64{}, map[string]uint64{}
 	}
-	st.req[typ]++
+	st.req[[2]string{proto, typ}]++
 	st.resp[rcode]++
 }
 
@@ -373,8 +377,15 @@ func (st *corednsStats) metrics() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# HELP coredns_build_info A metric with a constant '1' value labeled by version, revision, and goversion from which CoreDNS was built.\n# TYPE coredns_build_info gauge\ncoredns_build_info{goversion=%q,revision=%q,version=%q} 1\n", corednsGo, corednsCommit, corednsVersion)
 	b.WriteString("# HELP coredns_dns_requests_total Counter of DNS requests made per zone, protocol and family.\n# TYPE coredns_dns_requests_total counter\n")
-	for _, k := range sortedKeys(st.req) {
-		fmt.Fprintf(&b, "coredns_dns_requests_total{family=\"1\",proto=\"tcp\",server=\"dns://:53\",type=%q,zone=\".\"} %d\n", k, st.req[k])
+	reqs := make([][2]string, 0, len(st.req))
+	for k := range st.req {
+		reqs = append(reqs, k)
+	}
+	sort.Slice(reqs, func(i, j int) bool {
+		return reqs[i][0] < reqs[j][0] || reqs[i][0] == reqs[j][0] && reqs[i][1] < reqs[j][1]
+	})
+	for _, k := range reqs {
+		fmt.Fprintf(&b, "coredns_dns_requests_total{family=\"1\",proto=%q,server=\"dns://:53\",type=%q,zone=\".\"} %d\n", k[0], k[1], st.req[k])
 	}
 	b.WriteString("# HELP coredns_dns_responses_total Counter of response status codes.\n# TYPE coredns_dns_responses_total counter\n")
 	for _, k := range sortedKeys(st.resp) {
@@ -392,9 +403,17 @@ func sortedKeys(m map[string]uint64) []string {
 	return keys
 }
 
+// dnsUDPSize is the largest answer over UDP for a query without an EDNS0
+// OPT record (RFC 1035, UD22).
+const dnsUDPSize = 512
+
 // answerDNS answers one query message with what the service proxy knows. The
 // query is a FQDN, so the search path of the client is not applied again.
-func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
+// proto is "udp" or "tcp" (the metrics). Over UDP, an answer that is larger
+// than 512 bytes, or than the UDP size of the EDNS0 OPT record of the query,
+// has the TC bit, the header and the question only, so that the client asks
+// again over TCP (UD22). The message has no TCP length in front of it.
+func (s *serviceProxy) answerDNS(req []byte, proto string, st *corednsStats) ([]byte, error) {
 	var p dnsmessage.Parser
 	h, err := p.Start(req)
 	if err != nil {
@@ -403,6 +422,24 @@ func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
 	q, err := p.Question()
 	if err != nil {
 		return nil, err
+	}
+	// The EDNS0 OPT record of the query, if any: its class is the UDP size.
+	edns, udpSize := false, dnsUDPSize
+	if p.SkipAllQuestions() == nil && p.SkipAllAnswers() == nil && p.SkipAllAuthorities() == nil {
+		for {
+			rh, err := p.AdditionalHeader()
+			if err != nil {
+				break
+			}
+			if rh.Type == dnsmessage.TypeOPT {
+				edns = true
+				udpSize = max(dnsUDPSize, min(int(rh.Class), udpMaxDatagram))
+				break
+			}
+			if p.SkipAdditional() != nil {
+				break
+			}
+		}
 	}
 	name := strings.ToLower(q.Name.String())
 	bare := strings.TrimSuffix(name, ".")
@@ -427,6 +464,8 @@ func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
 		rhdr.Type = dnsmessage.TypePTR
 		answers = append(answers, dnsmessage.Resource{Header: rhdr, Body: &dnsmessage.PTRResource{PTR: ptr}})
 	default:
+		// One call of lookupName and so one chargeDNS for each query, over
+		// UDP and over TCP (AC3).
 		a, ok := s.lookup(name, "")
 		if !ok {
 			resp.RCode = dnsmessage.RCodeNameError
@@ -452,8 +491,20 @@ func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
 		}
 	}
 	rcode := map[dnsmessage.RCode]string{dnsmessage.RCodeSuccess: "NOERROR", dnsmessage.RCodeNameError: "NXDOMAIN", dnsmessage.RCodeNotImplemented: "NOTIMP"}[resp.RCode]
-	st.count(strings.TrimPrefix(q.Type.String(), "Type"), rcode)
-	b := dnsmessage.NewBuilder(make([]byte, 2, 512), resp)
+	st.count(proto, strings.TrimPrefix(q.Type.String(), "Type"), rcode)
+	msg, err := buildDNS(resp, q, answers, edns, udpSize)
+	if err != nil || proto != "udp" || len(msg) <= udpSize {
+		return msg, err
+	}
+	// Too large for UDP: the TC bit and no partial record set (UD22).
+	resp.Truncated = true
+	return buildDNS(resp, q, nil, edns, udpSize)
+}
+
+// buildDNS packs an answer. With edns, the answer has an OPT record with the
+// UDP size of the query, as CoreDNS does.
+func buildDNS(h dnsmessage.Header, q dnsmessage.Question, answers []dnsmessage.Resource, edns bool, udpSize int) ([]byte, error) {
+	b := dnsmessage.NewBuilder(make([]byte, 0, 512), h)
 	b.EnableCompression()
 	if err := b.StartQuestions(); err != nil {
 		return nil, err
@@ -464,6 +515,7 @@ func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
 	if err := b.StartAnswers(); err != nil {
 		return nil, err
 	}
+	var err error
 	for _, r := range answers {
 		switch body := r.Body.(type) {
 		case *dnsmessage.AResource:
@@ -477,12 +529,19 @@ func (s *serviceProxy) answerDNS(req []byte, st *corednsStats) ([]byte, error) {
 			return nil, err
 		}
 	}
-	msg, err := b.Finish()
-	if err != nil {
-		return nil, err
+	if edns {
+		if err := b.StartAdditionals(); err != nil {
+			return nil, err
+		}
+		var rh dnsmessage.ResourceHeader
+		if err := rh.SetEDNS0(udpSize, dnsmessage.RCodeSuccess, false); err != nil {
+			return nil, err
+		}
+		if err := b.OPTResource(rh, dnsmessage.OPTResource{}); err != nil {
+			return nil, err
+		}
 	}
-	binary.BigEndian.PutUint16(msg, uint16(len(msg)-2))
-	return msg, nil
+	return b.Finish()
 }
 
 // serveDNS answers queries of RFC 1035 TCP framing on ln until ctx ends.
@@ -507,16 +566,100 @@ func (s *serviceProxy) serveDNS(ctx context.Context, ln net.Listener, st *coredn
 				if _, err := io.ReadFull(r, req); err != nil {
 					return
 				}
-				resp, err := s.answerDNS(req, st)
+				resp, err := s.answerDNS(req, "tcp", st)
 				if err != nil {
 					return
 				}
-				if _, err := c.Write(resp); err != nil {
+				framed := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(resp)), uint16(len(resp)))
+				if _, err := c.Write(append(framed, resp...)); err != nil {
 					return
 				}
 			}
 		}()
 	}
+}
+
+// serveDNSUDP answers each query that arrives at the UDP socket c, to its
+// source, until ctx ends (UD18). A query that does not parse gets no answer.
+// The UDP table charges the time of each answer to the CoreDNS container
+// (AC1); lookupName charges the query (AC3).
+func (s *serviceProxy) serveDNSUDP(ctx context.Context, c *udpConn, st *corednsStats) {
+	defer c.Close()
+	buf := make([]byte, udpMaxDatagram)
+	for {
+		n, from, err := c.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue // a pending error: CoreDNS reads on
+		}
+		resp, err := s.answerDNS(buf[:n], "udp", st)
+		if err != nil {
+			continue
+		}
+		c.WriteTo(resp, from)
+	}
+}
+
+// kubeDNSProto is the protocol of nslookup to the default server, the
+// ClusterIP of kube-dns (UD19, section 8.7). "udp": kube-dns has a ready
+// endpoint for 53/UDP on this tab node. "tcp": else, kube-dns has an
+// endpoint for 53/TCP; the service proxy forwards TCP also to another node.
+// "": kube-dns has no endpoint (or the service proxy did not sync), and
+// nslookup answers from the service proxy as before.
+//
+// Phase 5 removes the TCP exception: then datagrams also go to CoreDNS on
+// another node.
+func (s *serviceProxy) kubeDNSProto() string {
+	if s == nil || !s.synced.Load() || s.slices == nil {
+		return ""
+	}
+	svc, err := s.services.Services(metav1.NamespaceSystem).Get("kube-dns")
+	if err != nil {
+		return ""
+	}
+	proto := ""
+	for _, sp := range svc.Spec.Ports {
+		if sp.Port != 53 {
+			continue
+		}
+		switch sp.Protocol {
+		case v1.ProtocolUDP:
+			if s.localUDPEndpoint(svc.Namespace, svc.Name, sp.Name) {
+				return "udp"
+			}
+		case v1.ProtocolTCP, "":
+			if len(s.endpoints(svcPort{namespace: svc.Namespace, name: svc.Name, portName: sp.Name})) > 0 {
+				proto = "tcp"
+			}
+		}
+	}
+	return proto
+}
+
+// localUDPEndpoint reports whether the service has a ready endpoint for its
+// UDP port portName with a pod IP of this tab node: a socket of the UDP
+// table can be there.
+func (s *serviceProxy) localUDPEndpoint(namespace, name, portName string) bool {
+	if theTabNode == nil {
+		return false
+	}
+	objs, _ := s.slices.ByIndex(sliceIndex, namespace+"/"+name)
+	for _, obj := range objs {
+		es := obj.(*discoveryv1.EndpointSlice)
+		if es.AddressType != discoveryv1.AddressTypeIPv4 || !slices.ContainsFunc(es.Ports, func(p discoveryv1.EndpointPort) bool {
+			return p.Port != nil && deref(p.Name) == portName && p.Protocol != nil && *p.Protocol == v1.ProtocolUDP
+		}) {
+			continue
+		}
+		for _, ep := range es.Endpoints {
+			if len(ep.Addresses) > 0 && (ep.Conditions.Ready == nil || *ep.Conditions.Ready) && theTabNode.isTabPodIP(ep.Addresses[0]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- the image ---
@@ -576,7 +719,7 @@ func corednsProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 
 	defer addCoreDNS(acctFrom(ctx))()
 	stats := &corednsStats{}
-	errs := make(chan error, 4)
+	errs := make(chan error, 8)
 	serve := func(addr string, h http.Handler) bool {
 		ln, err := listenPod(ctx, addr)
 		if err != nil {
@@ -625,7 +768,14 @@ func corednsProg(ctx context.Context, hc interp.HandlerContext, args []string, _
 		fmt.Fprintf(hc.Stderr, "listen tcp :53: %v\n", unwrap(err))
 		return interp.ExitStatus(1)
 	}
+	udp, err := listenPodUDP(ctx, ":53")
+	if err != nil {
+		ln.Close()
+		fmt.Fprintf(hc.Stderr, "listen udp :53: %v\n", unwrap(err))
+		return interp.ExitStatus(1)
+	}
 	go func() { proxy.serveDNS(ctx, ln, stats); errs <- nil }()
+	go func() { proxy.serveDNSUDP(ctx, udp, stats); errs <- nil }()
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()

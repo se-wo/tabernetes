@@ -156,7 +156,9 @@ These items are not in the scope of this document:
   hosts, it gives `http.DefaultClient`, which uses `fetch()` of the browser
   (lines 109 to 118).
 - `tabnode_net.go` (the kube-proxy and the DNS of the tab node) does not
-  forward UDP ports (lines 162 and 163). CoreDNS on a tab node uses TCP only.
+  forward UDP ports (lines 162 and 163). Until phase 4, CoreDNS on a tab node
+  used TCP only. Phase 4 (UD18) adds DNS over UDP on the UDP table (section
+  8.7).
 - `netPolicy.allowed` examines TCP only (`tabnode_netpol.go`, line 135).
 - `dialFromPod` decides NetworkPolicy before the connection exists
   (`tabnode_netpol.go`, lines 201 to 244). `policyListener.Accept` decides
@@ -2149,6 +2151,8 @@ These differences stay after this design. `README.md` must show them.
 | Writes of a WebAssembly container to a volume | They change only the copy in the worker. A restart does not show them. | They change the volume. A restart shows them. |
 | Files of a WebAssembly container | A copy of a maximum of 64 MiB | The volumes, no maximum |
 | CPU time of a component in `kubectl top` | Only from calls of imports and from waits. A loop without imports shows its time at its end. | The cgroup counts all time |
+| `nslookup` to the default server (the ClusterIP of `kube-dns`), until phase 5 | UDP only if `kube-dns` has a ready endpoint for 53/UDP on this tab node. Else TCP to the same ClusterIP. If `kube-dns` has no endpoint, the service proxy gives the answer (UD19, `kubeDNSProto` in `tabnode_coredns.go`). | UDP |
+| An answer of CoreDNS over UDP that is too large (UD22) | The header and the question with the TC bit, and no records | The TC bit and the records that fit |
 | NodePort and hostPort for UDP with an endpoint on `tab` | Out of scope | The host network namespace does not reach tab pods (issue #61) |
 
 ## 12 Risks

@@ -7,11 +7,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"maps"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -1788,25 +1791,136 @@ func dnsLookup(ctx context.Context, name string) (a dnsAnswer, found bool) {
 	return theTabNode.net.lookup(name, clusterNamespace(ctx))
 }
 
-// nslookup answers like the nslookup of busybox, from the cluster DNS of
-// the service proxy (tabnode_net.go), which is also what the CoreDNS of the
-// tab node (tabnode_coredns.go) answers from.
+// The retries of nslookup: each query goes up to nslookupTries times to the
+// server, and each try over UDP waits nslookupTimeout for the answer
+// (busybox: 2 seconds for each try). A try over TCP waits nslookupTCPTimeout
+// for the connection and the answer: the service proxy can forward it to
+// CoreDNS on another node. A test makes them shorter.
+var (
+	nslookupTries      = 2
+	nslookupTimeout    = 2 * time.Second
+	nslookupTCPTimeout = 5 * time.Second
+)
+
+// nslookupNoServer is what busybox nslookup writes when no try gets an
+// answer.
+const nslookupNoServer = ";; connection timed out; no servers could be reached"
+
+// nslookup answers like the nslookup of busybox. It sends DNS queries to
+// the server of the second argument over UDP, or to the default server, the
+// ClusterIP of kube-dns: over UDP with a ready endpoint of kube-dns on this
+// tab node, else over TCP until phase 5 (UD19, kubeDNSProto). An answer with
+// the TC bit makes it ask again over TCP (UD22); -vc uses TCP at once.
+// Without any endpoint of kube-dns, it answers from the service proxy
+// (tabnode_net.go), as CoreDNS of the tab node does.
 func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	var names []string
+	vc := false
 	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
+		switch {
+		case a == "-vc":
+			vc = true
+		case !strings.HasPrefix(a, "-"):
 			names = append(names, a)
 		}
 	}
 	if len(names) == 0 {
-		return fail(hc, 1, "usage: nslookup [-type=a] host [dns server]")
+		return fail(hc, 1, "usage: nslookup [-type=a] [-vc] host [dns server]")
+	}
+	var proxy *serviceProxy
+	if theTabNode != nil {
+		proxy = theTabNode.net
 	}
 	server := "10.96.0.10"
-	if theTabNode != nil && theTabNode.net != nil {
-		server = theTabNode.net.dnsServer()
+	if proxy != nil {
+		server = proxy.dnsServer()
 	}
+	proto := ""
+	if len(names) > 1 {
+		ip, ok := resolveName(ctx, names[1])
+		if !ok {
+			return fail(hc, 1, "nslookup: bad address '%s'", names[1])
+		}
+		server, proto = ip, "udp"
+	} else if proxy != nil {
+		proto = proxy.kubeDNSProto()
+	}
+	if vc && proto != "" {
+		proto = "tcp"
+	}
+	if proto == "" {
+		return nslookupDirect(ctx, hc, server, names[0])
+	}
+
+	name := strings.ToLower(names[0])
+	typ := dnsmessage.TypeA
+	var candidates []string
+	if ip := net.ParseIP(name); ip != nil {
+		candidates, typ = []string{reverseName(ip)}, dnsmessage.TypePTR
+	} else {
+		candidates = dnsSearch(name, clusterNamespace(ctx))
+	}
+	printed := false
+	for _, fqdn := range candidates {
+		m, err := dnsExchange(ctx, server, proto, fqdn, typ)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(hc.Stdout, "%s\n\n", nslookupNoServer)
+			return interp.ExitStatus(1)
+		}
+		if !printed {
+			fmt.Fprintf(hc.Stdout, "Server:\t\t%s\nAddress:\t%s:53\n\n", server, server)
+			printed = true
+		}
+		if m.RCode == dnsmessage.RCodeNameError {
+			continue
+		}
+		if m.RCode != dnsmessage.RCodeSuccess {
+			fmt.Fprintf(hc.Stdout, "** server can't find %s: %s\n\n", fqdn, strings.ToUpper(strings.TrimPrefix(m.RCode.String(), "RCode")))
+			return interp.ExitStatus(1)
+		}
+		for _, r := range m.Answers {
+			owner := strings.TrimSuffix(r.Header.Name.String(), ".")
+			switch b := r.Body.(type) {
+			case *dnsmessage.CNAMEResource:
+				fmt.Fprintf(hc.Stdout, "%s\tcanonical name = %s\n", owner, strings.TrimSuffix(b.CNAME.String(), "."))
+			case *dnsmessage.AResource:
+				fmt.Fprintf(hc.Stdout, "Name:\t%s\nAddress: %s\n", owner, net.IP(b.A[:]))
+			case *dnsmessage.PTRResource:
+				fmt.Fprintf(hc.Stdout, "%s\tname = %s\n", owner, strings.TrimSuffix(b.PTR.String(), "."))
+			}
+		}
+		fmt.Fprintln(hc.Stdout)
+		return nil
+	}
+	missing := candidates[0]
+	if typ == dnsmessage.TypeA {
+		missing = name
+		if !strings.Contains(name, ".") {
+			missing = name + "." + clusterNamespace(ctx) + ".svc.cluster.local"
+		}
+	}
+	fmt.Fprintf(hc.Stdout, "** server can't find %s: NXDOMAIN\n\n", strings.TrimSuffix(missing, "."))
+	return interp.ExitStatus(1)
+}
+
+// dnsSearch is the list of names that the resolver of a pod in namespace
+// asks for name, one after the other: the search path, then the name. A
+// name with a dot at the end has no search path.
+func dnsSearch(name, namespace string) []string {
+	if abs, ok := strings.CutSuffix(name, "."); ok {
+		return []string{abs}
+	}
+	return []string{name + "." + namespace + ".svc." + clusterDomain, name + ".svc." + clusterDomain, name + "." + clusterDomain, name}
+}
+
+// nslookupDirect answers from the service proxy without a DNS message:
+// kube-dns has no endpoint (a cluster without CoreDNS). Over TCP, this
+// query would get no answer.
+func nslookupDirect(ctx context.Context, hc interp.HandlerContext, server, name string) error {
 	fmt.Fprintf(hc.Stdout, "Server:\t\t%s\nAddress:\t%s:53\n\n", server, server)
-	name := names[0]
 	if ip := net.ParseIP(name); ip != nil {
 		if theTabNode != nil && theTabNode.net != nil {
 			if fqdn, ok := theTabNode.net.reverse(name); ok {
@@ -1838,6 +1952,118 @@ func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ in
 	}
 	fmt.Fprintln(hc.Stdout)
 	return nil
+}
+
+// dnsExchange asks server (an IP) on port 53 for name over proto ("udp" or
+// "tcp"), with nslookupTries tries of nslookupTimeout. An answer over UDP
+// with the TC bit makes it ask again over TCP (UD22). A refused datagram
+// counts as a try without an answer.
+func dnsExchange(ctx context.Context, server, proto, name string, typ dnsmessage.Type) (*dnsmessage.Message, error) {
+	id := uint16(rand.N(1 << 16))
+	q, err := dnsQueryMsg(id, name, typ)
+	if err != nil {
+		return nil, err
+	}
+	addr := net.JoinHostPort(server, "53")
+	err = errors.New(nslookupNoServer)
+	for range nslookupTries {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var m *dnsmessage.Message
+		if proto == "udp" {
+			m, err = dnsUDP(ctx, addr, id, q)
+			if err == nil && m.Truncated {
+				m, err = dnsTCP(ctx, addr, id, q)
+			}
+		} else {
+			m, err = dnsTCP(ctx, addr, id, q)
+		}
+		if err == nil {
+			return m, nil
+		}
+	}
+	return nil, err
+}
+
+func dnsQueryMsg(id uint16, name string, typ dnsmessage.Type) ([]byte, error) {
+	n, err := dnsmessage.NewName(name + ".")
+	if err != nil {
+		return nil, err
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, RecursionDesired: true})
+	if err := b.StartQuestions(); err != nil {
+		return nil, err
+	}
+	if err := b.Question(dnsmessage.Question{Name: n, Type: typ, Class: dnsmessage.ClassINET}); err != nil {
+		return nil, err
+	}
+	return b.Finish()
+}
+
+// dnsAnswerOf parses an answer to the query id.
+func dnsAnswerOf(b []byte, id uint16) (*dnsmessage.Message, bool) {
+	var m dnsmessage.Message
+	if m.Unpack(b) != nil || !m.Response || m.ID != id {
+		return nil, false
+	}
+	return &m, true
+}
+
+// dnsUDP sends one query over the UDP table and waits nslookupTimeout for
+// its answer.
+func dnsUDP(ctx context.Context, addr string, id uint16, q []byte) (*dnsmessage.Message, error) {
+	c, err := dialClusterUDP(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	if _, err := c.Write(q); err != nil {
+		return nil, err
+	}
+	c.SetReadDeadline(time.Now().Add(nslookupTimeout))
+	buf := make([]byte, udpMaxDatagram)
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		if m, ok := dnsAnswerOf(buf[:n], id); ok {
+			return m, nil
+		}
+	}
+}
+
+// dnsTCP sends one query over TCP (RFC 1035 framing) and waits
+// nslookupTCPTimeout for its answer.
+func dnsTCP(ctx context.Context, addr string, id uint16, q []byte) (*dnsmessage.Message, error) {
+	dctx, cancel := context.WithTimeout(ctx, nslookupTCPTimeout)
+	defer cancel()
+	c, err := dialCluster(dctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	stop := context.AfterFunc(dctx, func() { c.Close() })
+	defer stop()
+	c.SetDeadline(time.Now().Add(nslookupTCPTimeout))
+	if _, err := c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...)); err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(c)
+	for {
+		var l [2]byte
+		if _, err := io.ReadFull(r, l[:]); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, binary.BigEndian.Uint16(l[:]))
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		if m, ok := dnsAnswerOf(buf, id); ok {
+			return m, nil
+		}
+	}
 }
 
 // host answers like the host command of bind.
