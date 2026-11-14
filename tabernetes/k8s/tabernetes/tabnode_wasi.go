@@ -16,7 +16,8 @@ package main
 // with the Go side only through the messages of tabnode_wasi_msg.go
 // (docs/wasi-sockets.md, section 8.3). This file runs a command component
 // (wasi:cli/run) or the function of an entrypoint, with the statuses of
-// runwasi; a proxy component gets an "unsupported" status until phase 2.
+// runwasi. A proxy component (wasi:http/incoming-handler) gets the proxy
+// server of tabnode_wasi_proxy.go.
 //
 // Browsers cannot pull from most registries: ghcr.io and Docker Hub send no
 // CORS headers. Images come from a mirror next to the page instead, a
@@ -37,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -290,12 +292,7 @@ func (c *ctr) pullWasmOnce(ctx context.Context, rt js.Value) (*wasmImage, js.Val
 	if u := res.Get("unsupported"); u.Type() == js.TypeString {
 		return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, u.String())}
 	}
-	// A proxy component waits for phase 2 (docs/wasi-sockets.md, section
-	// 9). The other components start; startComponent gives the statuses of
-	// runwasi.
-	if comp := res.Get("component"); comp.Type() == js.TypeObject && comp.Get("world").Type() == js.TypeString && comp.Get("world").String() == "proxy" {
-		return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, componentProxyText)}
-	}
+	// Components start; startComponent gives the statuses of runwasi.
 	wasmImages.Lock()
 	wasmImages.m[ref] = img
 	wasmImages.Unlock()
@@ -849,31 +846,35 @@ var componentImports = map[string]bool{
 
 var componentImportRE = regexp.MustCompile(`^wasi:([a-z0-9-]+/[a-z0-9-]+)@0\.2\.[0-9]+$`)
 
-// componentProxyText is the status of a proxy component until phase 2.
-const componentProxyText = "it is a WASI preview 2 proxy component (its first export of the two worlds is wasi:http/incoming-handler): the tab node cannot serve proxy components yet (phase 2 of docs/wasi-sockets.md), only command components (wasi:cli/run) and the function of an entrypoint"
+// componentProxyImports are the interfaces that the linker of runwasi has
+// for a proxy component in addition to componentImports (fact 4,
+// instance.rs lines 263 to 265). A command component does not get them
+// (CR6).
+var componentProxyImports = map[string]bool{"http/types": true, "http/outgoing-handler": true}
 
 // componentDefaultFunction is the function that runwasi calls when the
 // entrypoint names no function (path#function).
 const componentDefaultFunction = "_start"
 
-// componentStatus gives the text of runwasi for a command component or a
-// component with the function of an entrypoint that cannot start, or "".
-// world is "command" or "" (the world of component_world.js), imports are
+// componentStatus gives the text of runwasi for a component that cannot
+// start, or "". world is "command", "proxy" or "" (the world of
+// component_world.js), imports are
 // the names of the component with their versions, exports its exports as
 // [name, kind], and fn the function of the entrypoint ("" for none).
 //
 // runwasi instantiates first: an import that its linker does not have gives
 // "component imports instance ..." (CO11, CO12, CR6). Then, without
 // wasi:cli/run, it looks for the function (CO4). The task exits with 137
-// (section 9.2).
+// (section 9.2). A proxy component also gets wasi:http/types and
+// wasi:http/outgoing-handler, and needs no function.
 func componentStatus(world string, imports []string, exports [][2]string, fn string) string {
 	for _, i := range imports {
 		m := componentImportRE.FindStringSubmatch(i)
-		if m == nil || !componentImports[m[1]] {
+		if m == nil || !(componentImports[m[1]] || world == "proxy" && componentProxyImports[m[1]]) {
 			return fmt.Sprintf("component imports instance `%s`, but a matching implementation was not found in the linker", i)
 		}
 	}
-	if world == "command" {
+	if world == "command" || world == "proxy" {
 		return ""
 	}
 	if fn == "" {
@@ -986,6 +987,27 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 
 	ctx, cancel := context.WithCancel(ctx)
 	p := newProcess(cancel)
+	// A proxy component (section 8.6): the proxy server listens before the
+	// pod worker starts. Its context has the procEnv of the pod, for
+	// listenPod, NetworkPolicy and the account of the container (AC1).
+	var proxyLn net.Listener
+	var proxyCtx context.Context
+	if world == "proxy" {
+		_, ip := c.w.podInfo()
+		proxyCtx = withProc(ctx, &procEnv{w: c.w, c: c, ip: ip, cpu: newThrottle(c.spec.Resources), proc: p})
+		var why string
+		proxyLn, env, why = startProxy(proxyCtx, env, ip)
+		if why != "" {
+			// PX33: the text of runwasi, and the exit code 137.
+			logs.writer("stderr").Write([]byte(why + "\n"))
+			cancel()
+			p.exit(wasiErrorExit)
+			return p, nil
+		}
+		// runwasi gives an instance no arguments and no preopened
+		// directories (fact 4, PX13).
+		argv, preopens = []string{}, js.Undefined()
+	}
 	h := rt.Call("start", opts)
 	peer := newWasiPeer(name, func(msg, transfer js.Value) { h.Call("post", msg, transfer) })
 	stdout, stderr := logs.writer("stdout"), logs.writer("stderr")
@@ -1019,9 +1041,20 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 	h.Call("onMessage", onMsg)
 	// The cpu messages go to the account of this container (AC2).
 	peer.State(wasiCPUState, func() any { return c })
-	if err := peer.send("start", map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir, "preopens": preopens}); err != nil {
+	var px *wasiProxy
+	if proxyLn != nil {
+		px = newWasiProxy(proxyCtx, peer, func(code int) { peer.cli.exit(code, "") })
+	}
+	start := map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir}
+	if preopens.Type() != js.TypeUndefined {
+		start["preopens"] = preopens
+	}
+	if err := peer.send("start", start); err != nil {
 		peer.cli.exit(128, "the pod worker cannot start: "+err.Error())
 		return p, nil
+	}
+	if px != nil {
+		px.serve(proxyLn)
 	}
 	// stdin of the component (CO5). Without stdin in the container spec,
 	// stdin ends at once, as /dev/null does.

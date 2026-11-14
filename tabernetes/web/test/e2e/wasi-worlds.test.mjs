@@ -105,11 +105,18 @@ forEachNode(["tab", "worker"], (kind) => {
     const out = await logs(ns, "both");
     assert.equal(state(both), "Failed 0 137 Error", out);
     assert.match(out, missingImport("wasi:http/types@0.2.12"));
-    // wasi:http/incoming-handler first: the proxy world. runwasi serves it;
-    // the tab node serves proxy components from phase 2 (W2.x) and gives a
-    // text that says so until then.
-    const st = await waitFor(async () => (await pod(ns, "bothrev")).status?.containerStatuses?.[0]?.state?.terminated, { what: "the end of bothrev" });
-    assert.equal(st.reason, "StartError");
-    assert.match(st.message, /proxy component \(its first export of the two worlds is wasi:http\/incoming-handler\)/);
+    // wasi:http/incoming-handler first: the proxy world. runwasi serves it.
+    // The Go side starts the proxy server since W2.1a. Until W2.2, the pod
+    // worker refuses a proxy component with the exit code 137; after W2.2,
+    // the container runs. W2.3 sends requests to it.
+    const st = await waitFor(async () => {
+      const s = (await pod(ns, "bothrev")).status?.containerStatuses?.[0]?.state;
+      return s?.running || s?.terminated ? s : undefined;
+    }, { what: "the start of bothrev" });
+    if (st.terminated) {
+      const out = await logs(ns, "bothrev");
+      assert.equal(st.terminated.exitCode, 137, out);
+      assert.match(out, /is a proxy component \(wasi:http\/incoming-handler\)/);
+    }
   });
 });
