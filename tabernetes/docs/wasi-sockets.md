@@ -1218,10 +1218,13 @@ steps in `k8s/tabernetes/tabnode_wasi_tcp.go`. The pod worker does them in
     - For each other name, the pod worker sends `lookup`. The Go side
       answers with `addresses`, or with `name-unresolvable` (NL3).
     - The Go side first uses the names of `/etc/hosts` of the pod
-      (`localhost` and the hostname of the pod), in the sequence of the
-      file. Then it uses the resolver of `nslookup` (NL1, NL2). runwasi uses
-      the resolver of the system, which reads `/etc/hosts`. Package W3.3a
-      records the addresses of `localhost` on runwasi.
+      (`localhost` and the hostname of the pod). Then it uses the resolver
+      of `nslookup` (NL1, NL2). runwasi uses the resolver of the system,
+      which reads `/etc/hosts` and sorts the addresses as `getaddrinfo`
+      does. Package W3.3a recorded `::1` and then `127.0.0.1` for
+      `localhost` on runwasi, although `/etc/hosts` has `127.0.0.1` first.
+      So the Go side gives the IPv6 addresses of `/etc/hosts` first, and
+      else keeps the sequence of the file.
     - The lookup messages have no cancel. The pod worker ignores
       `addresses` for a stream that the component dropped.
 12. Proxy components. The instances of a proxy component keep the results
@@ -1857,20 +1860,22 @@ The column "Nodes" gives the nodes for the test:
 | CR9 | A unit test of the pod worker gives each error code in `fetched`. The component gets the same code. | tab |
 | CR10 | The component discards a client request to a Service that does not answer. The Go side closes the connection. | tab |
 | CR11 | A unit test with a short timer makes sure that the Go side gives `connection-timeout`. | tab |
-| TC1, TC8 | The TCP echo pod gives answers through a Service. | tab, worker, Docker |
+| TC1, TC8 | The TCP echo pod gives answers through a Service. The unit tests of the Go side are `TestWasiTCPEcho` and `TestWasiTCPConnect` (`tabnode_wasi_tcp_test.go`). | tab, worker, Docker |
 | TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. The unit tests `TestListenPodLoopback` and `TestLoopbackDialFromPod` examine the Go side. | tab, Docker |
 | TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. The unit tests of `tabnode_loopback_test.go` examine each path of section 8.11, and `TestProxyLoopback` examines PX5. A gRPC probe of a row fails after its timeout, as the kubelet does. | tab, Docker |
-| TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`: wasmtime makes IPv6 sockets IPv6 only. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. | tab, Docker |
+| TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`: wasmtime makes IPv6 sockets IPv6 only. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. The unit test of the Go side is `TestWasiTCPIPv6`. | tab, Docker |
+| TC6, TC7 (Go side) | An IPv6 socket gets no reservation in the table of ports. For port 0, it gets a port from 32768 to 60999 from a counter. `TestWasiTCPIPv6` makes sure of this. | tab |
 | TC9 | A client that connects before it binds has a local port from 32768 to 60999. The unit tests `TestReservePort` and `TestDialClusterFrom` examine the table of the ports in use. On runwasi, a client to a Service shows the ClusterIP as its remote address (rule 2 of section 8.3.2). | tab, Docker |
-| TC10 | A unit test with a clock that the test controls: a denied client gets `timeout` after `synTimeout`. A real wait of 127 seconds is not permitted (`wasi-sockets-plan.md`, rule 5). | tab, Docker (deferred) |
-| TC11 | A client to a closed port gets `connection-refused`. | tab, Docker |
-| TC12 | A unit test sends 10 MB to a server that does not read. The buffer of the Go side for this connection stays at 256 KiB or less. | tab |
+| TC10 | A unit test with a clock that the test controls: a denied client gets `timeout` after `synTimeout`. A real wait of 127 seconds is not permitted (`wasi-sockets-plan.md`, rule 5). The unit test is `TestWasiTCPPolicyTimeout`. `TestWasiTCPFullQueue` makes sure that a listener with a full queue also gives `timeout`. | tab, Docker (deferred) |
+| TC11 | A client to a closed port gets `connection-refused`. The unit test of the Go side is `TestWasiTCPRefused`. | tab, Docker |
+| TC12 | A unit test sends 10 MB to a server that does not read. The buffer of the Go side for this connection stays at 256 KiB or less. The unit test is `TestWasiTCPCredit`. | tab |
 | TC13 | The client closes its send direction. The server reads the end of the stream and sends its answer. | tab, Docker |
-| TC14 | After `kubectl delete pod --grace-period=0` of the server, the client gets the end of its connection. | tab |
+| TC14 | After `kubectl delete pod --grace-period=0` of the server, the client gets the end of its connection. The unit test of the Go side is `TestWasiTCPStop`. At the stop, the Go side closes each connection at once. It does not write the bytes of `data` that it did not write yet. After `closed` from the pod worker, it writes them first (`TestWasiTCPClosedDrains`). | tab |
 | TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. On runwasi, a second bind without a listener gives no error. With a listener, it gives `address-in-use` (rule 3 of section 8.3.2). The other calls give the error codes of fact 12. | tab, Docker |
+| TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Until phase 4, `bind` and `connect` with the protocol `udp` give `not-supported`. | tab |
 | TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, all options other than the buffer sizes agree (section 11). The defaults of runwasi: keep-alive off, 7,200 s, 75 s, count 9, hop limit 64, buffers 65,536 and 8,192 bytes. An idle time of 1.5 s gives 2 s. The value 0 gives `invalid-argument`. | tab, Docker |
-| NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). | tab, worker, Docker |
-| NL3 | The name `example.com` fails with `name-unresolvable`. | tab |
+| NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). The unit test of the Go side is `TestWasiTCPLookup`. It also makes sure that the hostname of the pod gives the pod IP. | tab, worker, Docker |
+| NL3 | The name `example.com` fails with `name-unresolvable`. The unit test of the Go side is `TestWasiTCPLookup`. | tab |
 | TC5, TC17 (pod worker) | A unit test with a fake Go side (`web/test/tcp.test.mjs`). A socket on `127.0.0.1` shows `127.0.0.1` with the port of `bound`. Its accepted connections show `127.0.0.1` at the two ends. A socket on `0.0.0.0` shows the addresses of `accepted`. A connection to a ClusterIP shows the ClusterIP as its remote address, with the local port of `connected`. | tab |
 | TC6, TC20, TC21 (pod worker) | A unit test: an IPv6 socket sends `bind` with `::` and the family `ipv6`. The wrong family and an IPv4-mapped address give `invalid-argument` without a message. As in wasmtime, multicast, broadcast, and in `connect` the unspecified address and port 0, also give `invalid-argument`. A backlog of 0 gives `invalid-argument`. | tab |
 | TC21, TC22 (pod worker) | A unit test: `listen` sends the backlog 128 (the default of wasmtime), or the value of `set-listen-backlog-size` within 1 to 4096. Each socket option has the default of runwasi, keeps its value and sends no message. As on runwasi, the keep-alive idle time goes up to whole seconds. A buffer size of 1 gives 1152 (receive) or 2304 (send). | tab |
@@ -1923,7 +1928,8 @@ The column "Nodes" gives the nodes for the test:
 | IC6 | `ping` to a ClusterIP gets no echo reply. | tab |
 | IC7, IC8 | `README.md` contains the two texts. | none |
 | MS1 to MS6 | A unit test sends messages with a foreign socket ID, a size above the limit, `data` above the credit or a URL outside the cluster. The Go side drops each message and closes the socket or the request. A `bind` with a foreign IP gets `bound` with `address-not-bindable`, and the socket stays open (section 8.3.2). | tab |
-| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. | tab |
+| MS2 to MS4 (TCP) | The unit tests are `TestWasiTCPForeignID` (MS2), `TestWasiTCPNotBindable` (MS3) and `TestWasiTCPDataAboveCredit` (MS4). A `data` or a `shutdown` for a socket without a connection, and a `data` after `shutdown` of the send direction, also fail the examination (MS6). | tab |
+| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. The TCP part is `TestWasiTCPChargesCPU`. | tab |
 | AC2 | If the pod worker sends `cpu`, a component in a loop of CPU work shows CPU in `kubectl top pod`. | tab |
 
 ## 11 Differences from a Docker node

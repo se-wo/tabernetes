@@ -595,26 +595,8 @@ func (p *wasiPeer) dispatch(v js.Value) {
 	}
 	typ, t, err := p.examine(v, 'w')
 	if err != nil {
-		owned := t.ok && p.ids[t.kind][t.id]
-		if owned {
-			delete(p.ids[t.kind], t.id)
-		}
-		p.drops++
-		drops := p.drops
 		p.mu.Unlock()
-		if drops <= 10 {
-			log.Printf("tabnode: pod worker %s: dropped a message: %v", p.name, err)
-		}
-		if t.ok {
-			if owned {
-				for _, fn := range wasiClosers[t.kind] {
-					fn(p, t.id)
-				}
-			}
-			if mk := wasiCloseMsg[t.kind]; mk != nil {
-				p.post(js.ValueOf(mk(t.id)), js.Undefined())
-			}
-		}
+		p.drop(t, err)
 		return
 	}
 	end := p.apply(typ, v)
@@ -624,6 +606,44 @@ func (p *wasiPeer) dispatch(v js.Value) {
 	}
 	for _, e := range end {
 		p.Release(e.kind, e.id)
+	}
+}
+
+// Fail does the steps of MS6 for a message that a handler finds wrong: the
+// examination of the dispatcher passed, but the message does not agree with
+// the state of its ID. An example is a "data" with more bytes than the credit
+// (MS4). It counts the drop, writes a log line, releases the ID with the
+// functions of wasiOnClose and sends the message that ends the ID
+// (wasiCloseMsg). Call it from a handler, on the event loop.
+func (p *wasiPeer) Fail(kind string, id uint32, reason string) {
+	p.drop(wasiTarget{kind: kind, id: id, ok: wasiIDKinds[kind]}, errors.New(reason))
+}
+
+// drop counts a dropped message and closes its ID (MS6). The caller does not
+// hold p.mu.
+func (p *wasiPeer) drop(t wasiTarget, err error) {
+	p.mu.Lock()
+	owned := t.ok && p.ids[t.kind][t.id]
+	if owned {
+		delete(p.ids[t.kind], t.id)
+	}
+	p.drops++
+	drops := p.drops
+	closed := p.closed
+	p.mu.Unlock()
+	if drops <= 10 {
+		log.Printf("tabnode: pod worker %s: dropped a message: %v", p.name, err)
+	}
+	if !t.ok || closed {
+		return
+	}
+	if owned {
+		for _, fn := range wasiClosers[t.kind] {
+			fn(p, t.id)
+		}
+	}
+	if mk := wasiCloseMsg[t.kind]; mk != nil {
+		p.post(js.ValueOf(mk(t.id)), js.Undefined())
 	}
 }
 
