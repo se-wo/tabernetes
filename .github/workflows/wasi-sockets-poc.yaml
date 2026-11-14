@@ -74,6 +74,9 @@ jobs:
           command -v ctr jq
           ip -6 addr show lo
           rustup target add wasm32-wasip2
+          # Ubuntu 23.10 and later: AppArmor denies the user namespace of
+          # the node agent ("fork/exec /proc/self/exe: permission denied").
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # The processes stay for the next steps of the job.
       - name: Start the page
