@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { generate } from "@bytecodealliance/jco/component";
 import { JCO_VERSION, ASYNC_EXPORTS, asyncExports } from "../src/async_lists.js";
-import { witName, isLabel, bareImports, transpile, check } from "../src/transpile.js";
+import { witName, isLabel, bareImports, transpile, check, jcoAlias } from "../src/transpile.js";
 import { component, withName } from "./component_fixtures.mjs";
 
 const pkg = (p) => JSON.parse(readFileSync(new URL(p, import.meta.url), "utf8"));
@@ -81,4 +81,26 @@ test("check examines the names in the result of generate (CO15)", () => {
   assert.match(check({ ...ok, files: [...ok.files, ["../x.js", js]] }).error, /unexpected file/);
   assert.match(check({ ...ok, files: [["component.js", new TextEncoder().encode('import "x";')]] }).error, /bare module names x/);
   assert.match(check(null).error, /not correct/);
+});
+
+test("check accepts the aliases of jco and rejects other names (CO16)", () => {
+  const js = new TextEncoder().encode("export async function instantiate() {}");
+  const ok = { files: [["component.js", js]], imports: [], exports: [] };
+  const ex = (...names) => names.map((n) => [n, "instance"]);
+  // jco adds run and incomingHandler for the interfaces that it exports.
+  assert.equal(check({ ...ok, exports: ex("incomingHandler", "run", "wasi:cli/run@0.2.12", "wasi:http/incoming-handler@0.2.12") }).error, undefined);
+  assert.equal(check({ ...ok, exports: ex("myIface", "a:b/my-iface") }).error, undefined);
+  // An alias without its interface, or a name that jco does not make.
+  assert.match(check({ ...ok, exports: ex("incomingHandler", "wasi:cli/run@0.2.12") }).error, /export with a name that does not obey the WIT syntax: "incomingHandler"/);
+  assert.match(check({ ...ok, exports: ex("evilName", "wasi:cli/run@0.2.12") }).error, /"evilName"/);
+  assert.match(check({ ...ok, imports: ["incomingHandler"], exports: ex("wasi:http/incoming-handler@0.2.12") }).error, /import with a name/);
+  assert.equal(jcoAlias("wasi:http/incoming-handler@0.2.12"), "incomingHandler");
+  assert.equal(jcoAlias("go"), "");
+  assert.equal(jcoAlias('wasi:cli/run"'), "");
+});
+
+test("transpile gives the names of the component and the world (CO2)", async () => {
+  const r = await transpile(generate, await component(["go"]), "go");
+  assert.deepEqual(r.names, { imports: ["wasi:cli/environment@0.2.3"], exports: [["go", "function"]] });
+  assert.equal(r.world, "");
 });

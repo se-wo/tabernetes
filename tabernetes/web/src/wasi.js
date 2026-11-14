@@ -47,7 +47,14 @@ export function createRuntime({ workerURL, mirror, transpileURL, componentWorker
     // components: true gets a {component}:
     //
     //   {js: string, modules: {file: WebAssembly.Module}, imports: [string],
-    //    exports: [[name, "function" | "instance"]], entrypoint: string}
+    //    exports: [[name, "function" | "instance"]], entrypoint: string,
+    //    names: {imports: [string], exports: [[name, kind]]},
+    //    world: "command" | "proxy" | ""}
+    //
+    // imports and exports are the lists of jco (names without versions, and
+    // aliases); names has the names of the component with their versions, in
+    // the sequence of the component (component_world.js). world is the world
+    // that runwasi finds (CO2).
     //
     // The pod worker gives js and modules to jco: js exports instantiate(
     // getCoreModule, imports), getCoreModule(file) gives modules[file].
@@ -108,7 +115,7 @@ export function createRuntime({ workerURL, mirror, transpileURL, componentWorker
         } catch (e) {
           return { unsupported: `the transpiled component does not compile: ${e.message}` };
         }
-        return { component: { js: r.js, modules: compiled, imports: r.imports, exports: r.exports } };
+        return { component: { js: r.js, modules: compiled, imports: r.imports, exports: r.exports, names: r.names, world: r.world } };
       });
       components.set(key, p);
       p.then((r) => r.unsupported && components.delete(key), () => components.delete(key));

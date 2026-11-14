@@ -335,29 +335,42 @@ func TestWasiCLIMessages(t *testing.T) {
 	}
 }
 
-// The world and the imports of a component (the part of W1.4a: other
-// components get a clear "unsupported" text).
-func TestComponentUnsupported(t *testing.T) {
-	cmdImports := []string{"wasi:cli/environment", "wasi:io/streams", "wasi:cli/environment@0.2.3", "wasi:cli/exit@0.2.3", "wasi:io/streams@0.2.3", "wasi:cli/stdout@0.2.3",
+// The statuses of runwasi for a command component and for the function of
+// an entrypoint (CO3, CO4, CO11, CO12, CR6): the imports first, then the
+// function. The world comes from component_world.js.
+func TestComponentStatus(t *testing.T) {
+	cmdImports := []string{"wasi:cli/environment@0.2.3", "wasi:cli/exit@0.2.3", "wasi:io/streams@0.2.3", "wasi:cli/stdout@0.2.9",
 		"wasi:filesystem/preopens@0.2.3", "wasi:sockets/tcp@0.2.3", "wasi:clocks/wall-clock@0.2.9", "wasi:random/insecure-seed@0.2.12"}
+	run := [][2]string{{"wasi:cli/run@0.2.3", "instance"}}
+	goFn := [][2]string{{"go", "function"}}
 	for _, c := range []struct {
-		imports, exports []string
-		want             string
+		world   string
+		imports []string
+		exports [][2]string
+		fn      string
+		want    string
 	}{
-		{cmdImports, []string{"wasi:cli/run@0.2.3"}, ""},
-		{cmdImports, []string{"wasi:cli/run@0.2.3", "wasi:http/incoming-handler@0.2.3"}, ""},
-		{cmdImports, []string{"wasi:http/incoming-handler@0.2.3", "wasi:cli/run@0.2.3"}, "proxy component"},
-		{cmdImports, []string{"go"}, "without the export wasi:cli/run"},
-		{nil, nil, "without the export wasi:cli/run"},
-		{append(cmdImports, "wasi:http/types@0.2.12"), []string{"wasi:cli/run@0.2.3"}, "imports wasi:http/types@0.2.12"},
-		{append(cmdImports, "wasi:http/outgoing-handler"), []string{"run", "wasi:cli/run@0.2.3"}, "imports wasi:http/outgoing-handler"},
-		{append(cmdImports, "wasi:cli/environment@0.3.0"), []string{"wasi:cli/run@0.2.3"}, "imports wasi:cli/environment@0.3.0"},
-		{append(cmdImports, "wasi:keyvalue/store@0.2.0"), []string{"wasi:cli/run@0.2.3"}, "imports wasi:keyvalue/store@0.2.0"},
-		{append(cmdImports, "log"), []string{"wasi:cli/run@0.2.3"}, "imports log,"},
+		{"command", cmdImports, run, "", ""},
+		{"command", cmdImports, run, "go", ""},
+		{"", cmdImports, goFn, "go", ""},
+		{"", cmdImports, goFn, "", "component does not have exported function \"_start\""},
+		{"", cmdImports, goFn, "stop", "component does not have exported function \"stop\""},
+		{"", cmdImports, [][2]string{{"go", "instance"}}, "go", "exported function \"go\""},
+		{"", nil, nil, "", "exported function \"_start\""},
+		// CR6, CO2: a command component gets no wasi:http.
+		{"command", append(cmdImports, "wasi:http/types@0.2.12"), run, "", "component imports instance `wasi:http/types@0.2.12`, but a matching implementation was not found in the linker"},
+		// The imports come before the function, as in runwasi.
+		{"", append(cmdImports, "wasi:http/outgoing-handler@0.2.0"), goFn, "", "`wasi:http/outgoing-handler@0.2.0`"},
+		// CO11: WASI 0.3, an unknown interface, no version, a foreign name.
+		{"command", append(cmdImports, "wasi:clocks/monotonic-clock@0.3.0"), run, "", "`wasi:clocks/monotonic-clock@0.3.0`"},
+		{"command", append(cmdImports, "wasi:keyvalue/store@0.2.0"), run, "", "`wasi:keyvalue/store@0.2.0`"},
+		{"command", append(cmdImports, "wasi:cli/exit"), run, "", "`wasi:cli/exit`"},
+		{"command", append(cmdImports, "wasi:cli/exit@0.2.0-rc-2023-11-10"), run, "", "`wasi:cli/exit@0.2.0-rc-2023-11-10`"},
+		{"command", append(cmdImports, "log"), run, "", "`log`"},
 	} {
-		got := componentUnsupported(c.imports, c.exports)
+		got := componentStatus(c.world, c.imports, c.exports, c.fn)
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
-			t.Errorf("imports %v, exports %v: %q, want %q", c.imports, c.exports, got, c.want)
+			t.Errorf("world %q, imports %v, exports %v, fn %q: %q, want %q", c.world, c.imports, c.exports, c.fn, got, c.want)
 		}
 	}
 }

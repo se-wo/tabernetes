@@ -9,6 +9,7 @@
 // The generated JavaScript is only text here: nothing on this side runs it
 // (CO14). The pod worker runs it.
 import { ASYNC_IMPORTS, asyncExports } from "./async_lists.js";
+import { componentNames, selectWorld } from "./component_world.js";
 
 // A label of WIT: words of lower-case or of upper-case letters and digits,
 // joined with "-". Each word starts with a letter.
@@ -52,9 +53,12 @@ export function bareImports(js) {
 const NAME_OF_RESULT = "component";
 
 // transpile runs generate of jco for the bytes of a component. It resolves
-// to {js, modules: {file: Uint8Array}, imports, exports}, or to {error}.
-// The entrypoint is the function that the entrypoint of the image names, or
-// "".
+// to {js, modules: {file: Uint8Array}, imports, exports, names, world}, or
+// to {error}. imports and exports are the lists of jco: the keys of the
+// import object and of the instance. names are the lists of the component
+// itself, with versions and in the sequence of the component
+// (component_world.js); world is the world that runwasi finds. The
+// entrypoint is the function that the entrypoint of the image names, or "".
 export async function transpile(generate, bytes, entrypoint = "") {
   if (!isLabel(entrypoint)) entrypoint = "";
   let out;
@@ -68,7 +72,28 @@ export async function transpile(generate, bytes, entrypoint = "") {
   } catch (e) {
     return { error: `jco cannot transpile the component: ${String(e?.payload ?? e?.message ?? e)}` };
   }
-  return check(out);
+  const r = check(out);
+  if (r.error) return r;
+  let names;
+  try {
+    names = componentNames(bytes);
+  } catch (e) {
+    return { error: `the component cannot be read: ${e?.message ?? e}` };
+  }
+  for (const [kind, n] of [...names.imports.map((i) => ["import", i]), ...names.exports.map(([e]) => ["export", e])]) {
+    if (!witName(n)) return { error: `the component has an ${kind} with a name that does not obey the WIT syntax: ${JSON.stringify(String(n)).slice(0, 200)}` };
+  }
+  return { ...r, names, world: selectWorld(names.exports) };
+}
+
+// jcoAlias gives the alias that jco adds to the exports for an export of an
+// interface: the name of the interface in camelCase, for example run for
+// wasi:cli/run@0.2.3 and incomingHandler for wasi:http/incoming-handler.
+export function jcoAlias(name) {
+  if (!witName(name) || !name.includes(":")) return "";
+  const m = /^[^/]+\/([a-z0-9-]+)(?:@.*)?$/.exec(name);
+  if (!m) return "";
+  return m[1].replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
 }
 
 // check makes sure that the result of generate is correct and that all its
@@ -82,8 +107,12 @@ export function check(out) {
     if (!Array.isArray(e) || (e[1] !== "function" && e[1] !== "instance")) return bad(`export ${JSON.stringify(e)} has no kind`);
     names.push(["export", e[0]]);
   }
+  // The aliases of jco are not WIT names, but jco makes them only from the
+  // names of interfaces that it exports. Each other name must obey the WIT
+  // syntax.
+  const aliases = new Set(out.exports.map((e) => jcoAlias(e[0])).filter(Boolean));
   for (const [kind, n] of names) {
-    if (!witName(n)) {
+    if (!witName(n) && !(kind === "export" && aliases.has(n))) {
       return { error: `the component has an ${kind} with a name that does not obey the WIT syntax: ${JSON.stringify(String(n)).slice(0, 200)}` };
     }
   }

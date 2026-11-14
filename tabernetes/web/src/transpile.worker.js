@@ -4,7 +4,7 @@
 // bundle (the task "web" of mise.toml copies them there).
 //
 // Request:  {id, bytes: ArrayBuffer, entrypoint}
-// Response: {id, js, modules: {file: ArrayBuffer}, imports, exports, ms}
+// Response: {id, js, modules: {file: ArrayBuffer}, imports, exports, names, world, ms}
 //           or {id, error}
 import { generate } from "@bytecodealliance/jco/component";
 import { transpile } from "./transpile.js";
@@ -27,5 +27,5 @@ self.onmessage = async ({ data: { id, bytes, entrypoint } }) => {
     modules[file] = b;
     transfer.push(b);
   }
-  self.postMessage({ id, js: r.js, modules, imports: r.imports, exports: r.exports, ms: performance.now() - t0 }, transfer);
+  self.postMessage({ id, js: r.js, modules, imports: r.imports, exports: r.exports, names: r.names, world: r.world, ms: performance.now() - t0 }, transfer);
 };
