@@ -32,10 +32,32 @@ This is a modified version of Tabernetes. The changes to the original work:
 - The apiserver dials pods in the in-process network, so its service and pod
   proxy work; a wall clock with sub-millisecond resolution so that events no
   longer overwrite each other.
+- More of a real node on the tab node: the control plane as mirror pods,
+  CoreDNS, volumes (configMap, secret, projected, persistentVolumeClaim with
+  a default local-path StorageClass), securityContext, memory limits
+  (OOMKilled), gRPC probes, per-container CPU and memory accounting and the
+  kubelet stats endpoints.
+- Nodes in Web Workers (`addnode`, `rmnode`), and a pod channel between the
+  tab nodes and the Docker nodes.
+- NetworkPolicy and ClusterNetworkPolicy on the tab nodes and the Docker
+  nodes (kube-network-policies), with a strict mode for open connections.
+- Add-ons: metrics-server (`kubectl top`, HorizontalPodAutoscaler) and
+  ingress-nginx, with built-in images on the tab node.
+- `helm` in the terminal, with small Bitnami-style charts served next to the
+  page.
+- More shell tools: `cp`, `mv`, `ln`, `chmod`, `chown`, `stat`, `find`,
+  `diff`, `sed`, `awk`, `jq`, `yq`, `openssl`, `tar`, `gzip`, `date`,
+  `watch`, `less`, `df`, `du`, `mount`, `nc`, `ping`, `telnet`, `dd` and
+  more; `kubectl convert` compiled in.
 - WebAssembly pods: a WASI runtime in Web Workers runs WebAssembly container
-  images on the tab node, and runwasi runs them on the Docker node.
+  images and components on the tab node, and runwasi runs them on the Docker
+  node.
+- WebGPU of the browser as a Dynamic Resource Allocation device.
 - `doom` and `vnc`, taken over from a later version of the original, with
   KubeDoom kept off the tab node and the nodes in Web Workers.
+- Licensing: a list of the third-party software and its license texts next
+  to the page, license notices and the passt source in the node image, and
+  own wording for help texts that were copied from GPL-licensed tools.
 - Publishing of only Tabernetes with GitHub Pages: a standalone page
   (`tabernetes/site/`) instead of the Hugo blog, the workflow
   `.github/workflows/pages.yaml`, the node image under the owner of this
@@ -78,9 +100,17 @@ metrics-server, adapted, Apache License 2.0); the Rust standard library and
 crates in the test components of `tabernetes/wasm-images/rust/`; and the Helm
 charts of `tabernetes/charts/bitnami/` (nginx, apache and redis, reduced and
 modified from [Bitnami's charts](https://github.com/bitnami/charts), Apache
-License 2.0, copyright Broadcom, Inc.). The site build collects the list and
-the license texts into `THIRD_PARTY_LICENSES.txt` next to the page
+License 2.0, copyright Broadcom, Inc.); and files of upstream images in the
+built-in images of the tab node (nginx and its official image, BSD-2-Clause;
+nginxdemos/hello, Apache HTTP Server and ingress-nginx, Apache License 2.0;
+see `tabernetes/site/licenses/`). The site build collects the list and the
+license texts into `THIRD_PARTY_LICENSES.txt` next to the page
 (`tabernetes/site/third-party.mjs`); the footer of the page links it.
+
+The node image (`tabernetes/node/`) lists its contents and their licenses in
+`/usr/share/doc/tabernetes/NOTICE.txt`, with the license texts next to it.
+It contains passt and pasta (GPL-2.0-or-later), built unchanged from
+upstream; their complete source is in the image, in `/usr/src/`.
 
 ## Build
 

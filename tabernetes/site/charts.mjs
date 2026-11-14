@@ -7,6 +7,10 @@
 // headers from here (k8s/tabernetes/helm.go), e.g. charts.bitnami.com/bitnami
 // from charts/bitnami/.
 //
+// A LICENSE next to the charts of a repository (charts/bitnami/LICENSE) goes
+// into every chart archive of it that has none, so that the license travels
+// with a chart that "helm pull" saves.
+//
 // The archives are reproducible: files sorted, owner root, the time of the
 // last commit of the chart (of HEAD outside git) as mtime and created date.
 import { createHash } from "node:crypto";
@@ -29,6 +33,7 @@ if (!src || !out) {
 }
 
 for (const repo of dirs(src)) {
+  const repoLicense = path.join(src, repo, "LICENSE");
   const entries = {};
   let newest = 0;
   for (const chart of dirs(path.join(src, repo))) {
@@ -39,6 +44,7 @@ for (const repo of dirs(src)) {
     const releases = [{}, ...(OLDER[`${repo}/${chart}`] || [])];
     for (const rel of releases) {
       const content = new Map(files.map((f) => [f, fs.readFileSync(path.join(dir, f))]));
+      if (!content.has("LICENSE") && fs.existsSync(repoLicense)) content.set("LICENSE", fs.readFileSync(repoLicense));
       const meta = chartYAML(content.get("Chart.yaml").toString());
       if (rel.version) {
         const set = (f, re, v) => {
@@ -51,7 +57,7 @@ for (const repo of dirs(src)) {
         set("values.yaml", new RegExp(`^(  tag:\\s*)${meta.appVersion.replace(/\./g, "\\.")}$`, "m"), rel.appVersion);
         Object.assign(meta, rel);
       }
-      const tgz = zlib.gzipSync(tar([...content].map(([f, b]) => [`${meta.name}/${f}`, b]), mtime), { level: 9 });
+      const tgz = zlib.gzipSync(tar([...content].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, b]) => [`${meta.name}/${f}`, b]), mtime), { level: 9 });
       const file = `${meta.name}-${meta.version}.tgz`;
       fs.mkdirSync(path.join(out, repo), { recursive: true });
       fs.writeFileSync(path.join(out, repo, file), tgz);

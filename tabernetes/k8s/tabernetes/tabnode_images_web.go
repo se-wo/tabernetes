@@ -38,6 +38,18 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+// The files of the nginx image below (nginxIndexHTML to nginxMimeTypes) are
+// those of nginx 1.29.3 and its official image:
+//
+//	Copyright (C) 2002-2021 Igor Sysoev
+//	Copyright (C) 2011-2025 Nginx, Inc.
+//	Copyright (C) 2011-2023 F5, Inc.
+//
+// under the BSD-2-Clause license of ../../site/licenses/nginx-LICENSE and
+// docker-nginx-LICENSE. The httpd files (httpdConf, httpd-foreground) are
+// shortened from the Apache HTTP Server and its official image, Apache
+// License 2.0 (../../site/licenses/httpd-NOTICE).
+
 const nginxIndexHTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -2420,7 +2432,9 @@ func httpdIndex(w http.ResponseWriter, r *http.Request, uri, real string) {
 
 // nginxdemos/hello is nginx with a page that names the server that answered:
 // with several replicas behind a Service, every request can show another
-// pod. The plain-text tag answers in plain text.
+// pod. The plain-text tag answers in plain text. The configurations are those
+// of the image, github.com/nginxinc/NGINX-Demos (nginx-hello), Apache License
+// 2.0.
 const nginxHelloPlain = `server {
     listen 80;
     listen [::]:80;

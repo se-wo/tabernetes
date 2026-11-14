@@ -438,6 +438,8 @@ func renderIngressConf(in *ingInput) *ingOutput {
 	return out
 }
 
+// ingConfHead follows the nginx.tmpl of github.com/kubernetes/ingress-nginx,
+// Apache License 2.0.
 const ingConfHead = `
 # setup custom paths that do not require root access
 pid /tmp/nginx/nginx.pid;

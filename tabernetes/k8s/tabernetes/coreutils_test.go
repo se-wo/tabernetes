@@ -377,8 +377,7 @@ func TestLsTotal(t *testing.T) {
 func TestLsErrors(t *testing.T) {
 	dir := lsFixture(t)
 	out, code := sh(t, "cd "+dir+" && ls -Z")
-	if code != 1 || !strings.HasPrefix(out, "ls: invalid option -- 'Z'\nBusyBox v1.38.0 (") ||
-		!strings.Contains(out, " multi-call binary.\n\nUsage: ls [-1AaCxdLHRFplinshrSXvctu] [-w WIDTH] [FILE]...\n\nList directory contents\n") {
+	if code != 1 || !strings.HasPrefix(out, "ls: invalid option -- 'Z'\nUsage: ls [-1aAdhilLnrRSt] [--color[=WHEN]] [FILE]...\n") {
 		t.Errorf("ls -Z: %q (exit %d)", out, code)
 	}
 	out, code = sh(t, "cd "+dir+" && ls -lZ a")
@@ -389,7 +388,7 @@ func TestLsErrors(t *testing.T) {
 	if out, code = sh(t, "ls -x"); code != 1 || !strings.HasPrefix(out, "ls: invalid option -- 'x'\n") {
 		t.Errorf("ls -x: %q (exit %d)", out, code)
 	}
-	if out, code = sh(t, "ls --nope"); code != 1 || !strings.HasPrefix(out, "ls: unrecognized option '--nope'\nBusyBox v1.38.0") {
+	if out, code = sh(t, "ls --nope"); code != 1 || !strings.HasPrefix(out, "ls: unrecognized option '--nope'\nUsage: ls ") {
 		t.Errorf("ls --nope: %q (exit %d)", out, code)
 	}
 	if out, code = sh(t, "cd "+dir+" && ls nope a"); code != 1 || out != "ls: nope: No such file or directory\na\n" {

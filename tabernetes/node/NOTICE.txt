@@ -1,0 +1,41 @@
+Tabernetes node image
+=====================
+
+/usr/local/bin/tabernetes, the node agent, is part of Tabernetes, created by
+Jan-Otto Kröpke (https://github.com/jkroepke), original work:
+https://jkroepke.de/tabernetes/, modified in https://github.com/se-wo/tabernetes.
+Tabernetes is licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA
+4.0): https://creativecommons.org/licenses/by-nc-sa/4.0/
+It is provided as is, without warranties of any kind (section 5 of the
+license).
+
+Everything else in this image is third-party software. It is not covered by
+the Creative Commons license and keeps its own license; the license texts are
+in /usr/share/doc/tabernetes/licenses/<name>/:
+
+  agent/                    the Go modules compiled into the node agent, and
+                            Go (BSD-3-Clause)
+  kubelet                   Kubernetes, Apache License 2.0
+  containerd                containerd and containerd-shim-runc-v2,
+                            Apache License 2.0 (see its NOTICE)
+  runc                      runc, Apache License 2.0 (see its NOTICE)
+  cni-plugins               the CNI plugins bridge, host-local, loopback and
+                            portmap, Apache License 2.0
+  crictl                    cri-tools, Apache License 2.0
+  containerd-shim-wasmtime  containerd-shim-wasmtime-v1 of runwasi,
+                            Apache License 2.0 (see its NOTICE)
+  passt                     passt and pasta, GNU General Public License
+                            version 2 or later
+
+passt and pasta are built from https://passt.top/passt without changes. The
+complete source of the commit they are built from, including the Makefile,
+is in /usr/src/passt-<commit>.tar.gz.
+
+The container images in /usr/share/tabernetes/images (pause, kube-proxy,
+flannel and CoreDNS) are copied unchanged from their registries and keep
+their own licenses.
+
+The Debian packages of the base image have their copyright and license
+information in /usr/share/doc/<package>/copyright. Their source code is
+available from Debian, https://snapshot.debian.org/.
