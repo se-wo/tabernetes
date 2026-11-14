@@ -46,8 +46,11 @@ browser tab (single wasm binary)                     docker run tabernetes
   command, so resource types and names come from the cluster.
   `wget` downloads through the `fetch()` of the browser, so it only works for
   servers that allow CORS, for example `raw.githubusercontent.com`.
-  `localhost` and `127.0.0.1` stay in the in-process network of the Wasm, so
-  `k port-forward deploy/web 8080:80 &` and `wget -qO- localhost:8080` work.
+  `localhost` and `127.0.0.1` of the terminal stay in the in-process network
+  of the Wasm, so `k port-forward deploy/web 8080:80 &` and
+  `wget -qO- localhost:8080` work. A socket that a pod opens on `127.0.0.1`
+  is not one of them: only the pod itself and `kubectl port-forward` reach
+  it, as on Linux.
 - `helm` (Helm v4, `HELM_VERSION`) runs in-process like kubectl
   (`k8s/tabernetes/helm.go`). Releases are Secrets in the cluster, repositories
   and the cache are files of the terminal. Helm downloads chart repositories with
@@ -218,7 +221,12 @@ A container is not a process:
   component (`wasi:http/outgoing-handler`) reach Services, pods and ClusterIPs
   of the cluster with the same NetworkPolicy as other pods. They do not follow
   redirects, add no headers other than `Host` and do not decompress the body,
-  as wasmtime. Sockets (`wasi:sockets`) come in later phases. The browser
+  as wasmtime. Command components and the function of an entrypoint have
+  TCP sockets and name lookup (`wasi:sockets`, `k8s/tabernetes/tabnode_wasi_tcp.go`,
+  `web/src/sockets.js`): they listen on the pod IP, connect to Services, pods
+  and ClusterIPs with the NetworkPolicy of the pod, and look up names with
+  the search path of the pod. A socket on `127.0.0.1` accepts only its own
+  pod. UDP sockets come in phase 4. The browser
   cannot pull from ghcr.io or Docker Hub (no CORS headers), so the page ships
   an OCI mirror (`wasm-images/`, `images.txt`) next to it; other registries
   are tried over HTTPS. On a Docker node the same manifest runs with runwasi.
@@ -348,7 +356,13 @@ directory. On the tab node and in Web Workers the image is built-in
 cluster; use a `nodeSelector`.
 
 Pods listen on their pod IP in the in-process network of the Wasm. There is
-no loopback per pod: localhost of a pod is its pod IP. `tabnode_net.go` is
+no loopback interface per pod: localhost of a pod is its pod IP. A program
+that listens on `127.0.0.1` or `localhost` (for example `listen 127.0.0.1:80`
+in the nginx emulation, or a proxy component with
+`WASMTIME_HTTP_PROXY_SOCKET_ADDR=127.0.0.1:9000`) gets a row in the loopback
+table (`tabnode_loopback.go`): only the pod itself and `kubectl port-forward`
+reach it. Other pods, probes, the Service proxy and the terminal get
+"connection refused", as on Linux. `tabnode_net.go` is
 kube-proxy and DNS of the tab: it listens on every cluster IP and node port
 and forwards to ready endpoints (endpoints on a Docker node through the
 port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service names
@@ -878,16 +892,40 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container
   has canonical mode only: full screen programs in a container (vi, top)
-  see lines, not keys. UDP services and sockets in WebAssembly pods are not
-  supported. A shell loop
+  see lines, not keys. UDP services and UDP sockets in WebAssembly pods are
+  not supported (UDP comes in phase 4). A shell loop
   without any command (`for ((;;)); do x=1; done`) still freezes the tab.
 - WASI preview 2 components need JavaScript Promise Integration (Chrome and
   Edge 137, Firefox 153, Safari 27 or newer); without it the pod gets
   `CreateContainerError`. Differences from runwasi on a Docker node
   (`docs/wasi-sockets.md`, section 11):
-  - A component has no sockets (`wasi:sockets`) yet. Client requests and
-    name lookups to the internet fail: a name outside the cluster gives
-    `DNS-error`, an IP outside it gives `connection-refused`.
+  - A component has TCP sockets and name lookup, but no UDP sockets until
+    phase 4 (`not-supported`). Client requests, connections and name
+    lookups to the internet fail: a name outside the cluster gives
+    `DNS-error` (client requests) or `name-unresolvable` (lookups), an IP
+    outside it gives `connection-refused`. A name with characters outside
+    ASCII gives `invalid-argument`; wasmtime changes it with IDNA.
+  - An IPv6 socket can bind to `::` and listen, but the tab node has no IPv6:
+    nothing reaches it, and an IPv4 client gets `connection-refused`, as on
+    runwasi (IPv6 only).
+  - A socket on `127.0.0.1` accepts only its own pod, as on runwasi. Unlike
+    runwasi, the pod also reaches it through its pod IP or a Service of the
+    pod: runwasi gives `connection-refused` there. A client of the same pod
+    that dials `127.0.0.1` sees `127.0.0.1` at the two ends. A socket on
+    `0.0.0.0` that accepts this client shows the pod IP at the two ends;
+    runwasi shows `127.0.0.1`. A `hostNetwork` pod gets no row in the
+    loopback table: its socket on `127.0.0.1` listens on the node IP, and
+    other pods reach it.
+  - The socket options (keep-alive, hop limit, buffer sizes) keep the values
+    that a component sets, with the defaults of runwasi, and have no other
+    effect. runwasi passes them to the kernel, which can change the buffer
+    sizes.
+  - A listener that does not accept keeps its backlog and up to 128 more
+    connections (the queue of the in-process network) before a client
+    waits; Linux keeps the backlog plus one.
+  - A NetworkPolicy that denies a connection gives `timeout` after 127
+    seconds. NetworkPolicy for TCP of components is not tested on a Docker
+    node yet.
   - A proxy component runs a maximum of 16 instances at the same time for
     each container (runwasi has no maximum), all on one thread: an instance
     in a loop of CPU work stops the other instances. Request and response
@@ -899,9 +937,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
     node; runwasi closes the connection with no response (as both do for
     HTTP/1.0 without `Host`).
   - `127.0.0.1` in `WASMTIME_HTTP_PROXY_SOCKET_ADDR` listens on the pod IP
-    and accepts all clients until phase 3 (on runwasi, only the pod reaches
-    it). A NetworkPolicy for client requests is not tested on a Docker node
-    yet.
+    and accepts only the pod itself, as on runwasi: other pods and the
+    `httpGet` probe get "connection refused". A NetworkPolicy for client
+    requests is not tested on a Docker node yet.
   - The writes of a WebAssembly container to a volume stay in its worker
     and end with it, so a restart does not see them. The files of a
     container are a copy of at most 64 MiB.

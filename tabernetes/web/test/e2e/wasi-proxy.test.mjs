@@ -16,7 +16,7 @@
 //         request part is in wasi-proxy-cr.test.mjs.
 //   PX25  web/test/proxy.test.mjs (PX25, CO7).
 //   PX34  web/test/proxy.test.mjs ("Out of memory").
-//   PX5   package W3.3 (the loopback table of phase 3).
+//   PX5   wasi-sockets.test.mjs (the loopback table of phase 3).
 import { before, test } from "node:test";
 import assert from "node:assert/strict";
 import { apply, forEachNode, kubectl, logs, namespace, nodeName, pod, podReady, TAB_NODE, waitFor, waitForPod } from "./harness.mjs";
