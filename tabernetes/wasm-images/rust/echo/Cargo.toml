@@ -3,3 +3,6 @@ name = "echo"
 version = "0.1.0"
 edition = "2021"
 publish = false
+
+[dependencies]
+wasi = "=0.14.7"

@@ -1,8 +1,11 @@
 # Objects of the step wasi-sockets (wasi-sockets.sh): TCP and name lookup of
-# phase 3 of ../wasi-sockets.md on runwasi. All pods run on node-1 with the
-# test images of the step wasi-images.
+# phase 3 of ../wasi-sockets.md on runwasi, and PX5. All pods run on node-1
+# with the test images of the step wasi-images. The modes of wasi-test-echo
+# are in wasm-images/rust/echo/src/main.rs. The client containers wait with
+# DELAY_MS until their servers listen.
 ---
-# TC1, TC8: the TCP echo server.
+# TC1, TC8: the TCP echo server on 0.0.0.0:7. Its tcpSocket probe is the
+# control for TC15: it must become ready.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-echo-tcp, labels: {wasi-check: sockets, app: wasi-echo-tcp}}
@@ -10,7 +13,10 @@ spec:
   runtimeClassName: wasmtime
   nodeSelector: {kubernetes.io/hostname: node-1}
   containers:
-    - {name: c, image: "ghcr.io/se-wo/tabernetes/wasi-test-echo:latest", imagePullPolicy: Never}
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      readinessProbe: {tcpSocket: {port: 7}, periodSeconds: 2}
 ---
 apiVersion: v1
 kind: Service
@@ -19,7 +25,121 @@ spec:
   selector: {app: wasi-echo-tcp}
   ports: [{port: 7, protocol: TCP}]
 ---
+# TC2 to TC5, TC9, TC15 to TC17: the echo server on 127.0.0.1:7, with a
+# tcpSocket probe that must fail (TC15). The container "client" connects to
+# 127.0.0.1:7 from the same pod (TC3, TC9, TC17). On runwasi, each container
+# of the pod is a component in the network namespace of the pod.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-lo, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: ADDR, value: "127.0.0.1:7"}]
+      readinessProbe: {tcpSocket: {port: 7}, periodSeconds: 2}
+    - name: client
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: client}
+        - {name: CONNECT, value: "127.0.0.1:7"}
+        - {name: LINE, value: lo}
+        - {name: DELAY_MS, value: "5000"}
+---
+# TC13: a server that answers after the end of the stream.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-eof, labels: {wasi-check: sockets, app: wasi-echo-eof}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: eof}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-echo-eof}
+spec:
+  selector: {app: wasi-echo-eof}
+  ports: [{port: 7, protocol: TCP}]
+---
+# TC9, TC13, NL1: a client in another pod connects to the Service by its
+# short name, closes its send direction and reads the answer. TC11: a client
+# to a port without a listener.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-client, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: client}
+        - {name: CONNECT, value: "wasi-echo-eof:7"}
+        - {name: LINE, value: tc13}
+        - {name: DELAY_MS, value: "8000"}
+    - name: refused
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: client}
+        - {name: CONNECT, value: "127.0.0.1:9"}
+---
+# TC18 to TC21, rule 5 of section 8.3.2, then TC6: a listener on [::]:7006
+# that stays up for TC7.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-sockets-errors, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: errors}]
+---
+# TC22: the socket options.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-sockets-options, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: options}]
+---
+# CO17, CO19 (a test of the tab node): the poll mode on runwasi, recorded only.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-poll, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: poll}]
+---
 # NL1, NL2: name lookup of a Service by its short name and its full name.
+# Rule 11 of section 8.3.2: the addresses of localhost and their sequence.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-lookup, labels: {wasi-check: sockets}}
@@ -45,6 +165,38 @@ spec:
       image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
       imagePullPolicy: Never
       env: [{name: LOOKUP, value: kubernetes.default.svc.cluster.local}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-lookup-localhost, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: LOOKUP, value: localhost}]
+---
+# PX5: a proxy component on 127.0.0.1:9000 with an httpGet probe that must
+# fail, and a second proxy component on 0.0.0.0:8080 in the same pod. Its
+# client request to 127.0.0.1:9000 gets the response.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-lo, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
+      env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "127.0.0.1:9000"}]
+      readinessProbe: {httpGet: {path: /status/200, port: 9000}, periodSeconds: 2}
+    - name: front
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
 ---
 apiVersion: v1
 kind: Pod

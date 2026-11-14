@@ -20,7 +20,7 @@
 //
 // This pod worker does not use Atomics.wait (section 8.5): a component
 // waits only with JSPI, so the worker continues to receive messages.
-import { createIdle, createSockets, nextTask } from "./sockets.js";
+import { createIdle, createSocketTable, createSockets, nextTask } from "./sockets.js";
 
 import { browserFilesystem } from "./files.js";
 import { tickImports } from "./cpu.js";
@@ -327,7 +327,8 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
     stdout: sink(peer, "stdout", undefined, () => idle.call(true)),
     stderr: sink(peer, "stderr", undefined, () => idle.call(true)),
     io: { ...io, poll: { ...io.poll, poll: pollWithTask(() => idle.call(true)), pollList: pollWithTask(() => idle.call(true)) } },
-    sockets: createSockets({ idle, pollableCreate: io.pollableCreate }),
+    // TCP and name lookup through the socket table (section 8.3.2).
+    sockets: createSockets({ idle, io, table: createSocketTable({ peer, io, idle }) }),
     // The files of the container (wasmPreopens, section 8.10).
     ...(Memory ? { browserFilesystem: browserFilesystem(preopens, Memory) } : {}),
   });
