@@ -469,9 +469,9 @@ The author and three reviewers examined these facts in the sources on
 12. For a failure, the tab node gives the same pod status as runwasi.
     Phase 0 records the status on runwasi for each failure of section 7.1.
 13. The pod worker of a component runs in a worker with an opaque origin,
-    from a `data:` URL (fact 22). Phase 0 (item 16) examines it in Firefox
-    and Safari. If it fails there, the pod worker runs from a `Blob` URL on
-    the origin of the page.
+    from a `data:` URL (fact 22). Phase 0 examined it in Chrome only
+    (item 16). If it fails in Firefox or Safari, the pod worker runs from a
+    `Blob` URL on the origin of the page.
 14. The Go side examines each message from a pod worker before it does the
     step of the message. The generated JavaScript runs next to the message
     port, so it can send each message (section 7.12).
@@ -1051,7 +1051,7 @@ gives the tests.
 
 | Phase | Contents |
 | --- | --- |
-| 0 | Proof of concept in `docs/wasi-sockets-poc/`. Section 9.1 gives its items. |
+| 0 | Proof of concept in `docs/wasi-sockets-poc/`. Section 9.1 gives its items. Complete. |
 | 1 | Components without network: CO1 to CO19, FS1 to FS4, MS1, MS6, AC2. |
 | 2 | Proxy components and client requests: PX1 to PX34, CR1 to CR11, MS5, AC1. |
 | 3 | TCP and name lookup: TC1 to TC22, NL1 to NL3, MS2 to MS4. |
@@ -1064,6 +1064,10 @@ gives the tests.
 The proof of concept must give a result for each item. Phase 0 writes each
 result into this document. If a result changes a decision, phase 0 changes
 the decision and its requirements.
+
+Phase 0 is complete. It ends without three results: Firefox and Safari in
+items 1 and 16, and item 6. These results do not block phase 1. A later
+phase can examine them.
 
 1. Transpile a command component and a proxy component in a transpile
    worker. Do this in Chrome, Firefox and Safari.
@@ -1160,7 +1164,7 @@ namespace. Without the module, flannel does not start on the node.
 | 7, CO11, CR6, 13 | On the Docker node, the pods with `exit-with-code` and with `wasi:http` in a command component end with status 137 and the reason `Error`. `exit(3)` gives the exit code 1. | CO11, CR6 and CO18. |
 | 13 | `std::process::exit` of Rust gives 0 for 0, 1 for 1 and 1 for 3. Rust 1.97 imports only `exit`. A component with an import of `exit-with-code` does not link (status 137). | CO18: exit codes 0 and 1 only. |
 | 14 | If `handle` sets no response, the client gets no response. The task then exits with status 139. The published binary does not continue after the panic. On the Docker node, the container ends with 139 and the reason `Error`. kubelet starts it again, with the restart count 1. `REQUEST_ID` then starts at 0 again. A trap and an error code cause no restart. | PX26. |
-| 1 | In Chrome 153, a module worker transpiles the command component and the proxy component. Firefox and Safari: not examined. The test host has only Chromium. | |
+| 1 | In Chrome 153, a module worker transpiles the command component and the proxy component. Firefox and Safari: not examined. | Phase 0 ends without Firefox and Safari. |
 | 2 | The first transpiler run takes 393 to 427 ms, with the load of the transpiler from a local server. A component of 3.4 MB takes 79 to 83 ms. A component of 4.4 MB takes 135 to 165 ms. A component of 12.0 MB from componentize-js takes 593 to 614 ms. | Open question 1: the time in Chrome is far below 10 seconds. |
 | 2 | The generated JavaScript of the proxy component has 785,828 bytes. It contains the runtime of jco for JSPI. | The cache of decision 2 keeps it one time for each key. |
 | 3 | The pod worker loads the generated JavaScript from a `Blob` URL. It runs the command component with `WASIShim`. The JavaScript has no bare module names. | Section 8.2 stays. |
@@ -1173,7 +1177,7 @@ namespace. Without the module, flannel does not start on the node.
 | 12 | 1,000 requests in a sequence take 1.77 ms (own) and 1.79 ms (shim) each. After garbage collection, the browser freed all 1,014 instances of each prototype. | CO7. |
 | 12 | Minified size: 5,114 bytes (own) and 12,733 bytes (shim with the wrappers). | |
 | 5 | 16 requests that wait from 800 ms down to 50 ms end in the opposite sequence. 20 requests that wait 1 second end after 1,040 ms. | PX8. |
-| 6 | Not examined with 10,000 requests. In item 12, the browser freed 1,000 instances. | |
+| 6 | Not examined with 10,000 requests. In item 12, the browser freed 1,000 instances. | Phase 0 ends without this item. |
 | 15 | One renderer process of Chrome 153 has approximately 125 Wasm memories. The next instantiation fails with "Out of memory: Cannot allocate Wasm memory for new instance". Two pod workers share this limit: 100 and 25. | PX34, a new risk in section 12, open question 2. |
 | 15 | A cancel that only clears the timers frees none of 125 suspended instances. After it, each new instantiation fails. | Section 8.6. |
 | 15 | A cancel that continues the suspended call with an exception frees all 100 instances, in each of three rounds. | Section 8.6, step 2. |
@@ -1182,7 +1186,7 @@ namespace. Without the module, flannel does not start on the node.
 | 8 | On the Docker node, the echo component answers through the Services `echo-tcp` (TCP) and `echo-udp` (UDP). The Rust standard library on `wasm32-wasip2` has no `TcpStream::try_clone`. | Section 10.1. |
 | 17 | On the GitHub runner, an egress policy that allows only DNS gives `connection-refused` after 134 seconds. Without it: status code 200. The kernel stops the connect after its SYN retries. wasmtime then gives `connection-refused` (fact 20). | CR8: `connection-refused` after `synTimeout` (127 seconds). On the tab node, a deferred test (decision 16). |
 | 18 | The Docker check imports the images from the Docker of the host with `ctr images import`, as `IMPORT=1` does. The pods use `imagePullPolicy: Never`. | Section 10.2: the import step. |
-| 16 | In Chrome 153, a module worker from a `data:` URL has the origin `null`. A `WebAssembly.Module` from the page arrives through `postMessage` and runs. IndexedDB and `caches` throw `SecurityError`. A `fetch` to the origin of the page fails. Firefox and Safari: not examined. | Decision 13 stays. |
+| 16 | In Chrome 153, a module worker from a `data:` URL has the origin `null`. A `WebAssembly.Module` from the page arrives through `postMessage` and runs. IndexedDB and `caches` throw `SecurityError`. A `fetch` to the origin of the page fails. Firefox and Safari: not examined. | Decision 13 stays. Phase 0 ends without Firefox and Safari. |
 
 ## 10 Tests
 
