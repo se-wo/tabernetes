@@ -133,7 +133,7 @@ export const KINDS = Object.freeze({
   family: oneOf("ipv4", "ipv6"),
   how: oneOf("receive", "send", "both"),
   credit: oneOf("bytes", "datagram-bytes", "connections"),
-  errcode: (v) => typeof v === "string" && v.length <= 64 && /^[a-z][a-z0-9-]*$/.test(v),
+  errcode: (v) => typeof v === "string" && v.length <= 64 && /^[A-Za-z][A-Za-z0-9-]*$/.test(v),
   text: str(LIMITS.text),
   path: (v) => str(LIMITS.path)(v) && v.startsWith("/"),
   hostname: (v) => str(LIMITS.hostname)(v) && v.length > 0,

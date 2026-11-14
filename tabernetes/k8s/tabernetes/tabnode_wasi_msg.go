@@ -220,7 +220,7 @@ func oneOf(a ...string) func(js.Value) bool {
 }
 
 var (
-	errcodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	errcodeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)
 	methodRE  = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 )
 
