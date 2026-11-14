@@ -10,6 +10,17 @@ COPY agent/go.mod agent/go.sum ./
 RUN go mod download
 COPY agent/ ./
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /tabernetes .
+# The license files of the Go modules compiled into the agent, and of Go.
+RUN set -eu; \
+    d=/out/usr/share/doc/tabernetes/licenses/agent; \
+    mkdir -p "$d/go"; cp "$(go env GOROOT)/LICENSE" "$(go env GOROOT)/PATENTS" "$d/go/"; \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go list -deps -f '{{if not .Standard}}{{with .Module}}{{if not .Main}}{{.Path}} {{.Dir}}{{end}}{{end}}{{end}}' . | sort -u > /tmp/modules; \
+    while read -r mod dir; do \
+      mkdir -p "$d/$mod"; \
+      for f in "$dir"/LICEN[CS]E* "$dir"/COPYING* "$dir"/NOTICE* "$dir"/PATENTS*; do if [ -f "$f" ]; then cp "$f" "$d/$mod/"; fi; done; \
+      if [ -z "$(ls -A "$d/$mod")" ]; then echo "no license file in $mod ($dir)" >&2; exit 1; fi; \
+    done < /tmp/modules
 
 FROM ${BASE_IMAGE} AS download
 ARG DEBIAN_FRONTEND=noninteractive
@@ -61,9 +72,34 @@ RUN set -eux; \
     # the pause image of this containerd, for the images stage
     usr/local/bin/containerd config default | sed -n "s/^ *sandbox = [\"']\(.*\)[\"']\$/\1/p" > /pause-image; \
     grep . /pause-image
+# The license (and NOTICE) files of the binaries above, from the tags they were
+# built from. A NOTICE is optional; anything but 200 or 404 fails the build.
+RUN set -eu; \
+    fetch() { \
+      code="$(curl -sSL -o "$2" -w '%{http_code}' "$1")"; \
+      case "${code}" in \
+        200) ;; \
+        404) rm -f "$2"; if [ "$3" != optional ]; then echo "$1: not found" >&2; return 1; fi ;; \
+        *) echo "$1: HTTP ${code}" >&2; return 1 ;; \
+      esac; \
+    }; \
+    lic() { \
+      d="/out/usr/share/doc/tabernetes/licenses/$1"; mkdir -p "${d}"; \
+      fetch "https://raw.githubusercontent.com/$2/LICENSE" "${d}/LICENSE" required; \
+      fetch "https://raw.githubusercontent.com/$2/NOTICE" "${d}/NOTICE" optional; \
+    }; \
+    lic kubelet "kubernetes/kubernetes/${KUBERNETES_VERSION}"; \
+    lic containerd "containerd/containerd/v${CONTAINERD_VERSION}"; \
+    lic runc "opencontainers/runc/${RUNC_VERSION}"; \
+    lic cni-plugins "containernetworking/plugins/${CNI_PLUGINS_VERSION}"; \
+    lic crictl "kubernetes-sigs/cri-tools/${CRICTL_VERSION}"; \
+    lic containerd-shim-wasmtime "containerd/runwasi/${WASMTIME_SHIM_VERSION}"; \
+    ls -R /out/usr/share/doc/tabernetes/licenses
 
 # pasta from upstream: Debian trixie stays on a snapshot from May 2025. A fixed
-# commit, so the hash checks what git fetches.
+# commit, so the hash checks what git fetches. passt is GPL-2.0-or-later: the
+# image carries the complete source of this commit (/usr/src), which is all
+# that "make" builds from, and its license files.
 FROM ${BASE_IMAGE} AS passt
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PASST_COMMIT=6aa4f88bd9846411edff3ed70460475b538addca
@@ -76,7 +112,11 @@ RUN set -eux; \
     mkdir -p /out/usr/local/bin; \
     # passt.avx2 and pasta.avx2 exist on x86_64 only; pasta is a link to passt
     for f in passt passt.avx2 pasta pasta.avx2; do if [ -e "$f" ]; then cp -d "$f" /out/usr/local/bin/; fi; done; \
-    /out/usr/local/bin/pasta --version
+    /out/usr/local/bin/pasta --version; \
+    mkdir -p /out/usr/src /out/usr/share/doc/tabernetes/licenses/passt; \
+    git archive --format=tar.gz --prefix="passt-${PASST_COMMIT}/" -o "/out/usr/src/passt-${PASST_COMMIT}.tar.gz" "${PASST_COMMIT}"; \
+    for f in COPYING* LICEN[CS]E*; do if [ -e "$f" ]; then cp -r "$f" /out/usr/share/doc/tabernetes/licenses/passt/; fi; done; \
+    if [ -z "$(ls -A /out/usr/share/doc/tabernetes/licenses/passt)" ]; then echo "no license files in passt" >&2; exit 1; fi
 
 # pause, kube-proxy, flannel and CoreDNS: every join needs them, and their
 # downloads sometimes stall on Docker Desktop. The agent serves them to
@@ -110,6 +150,9 @@ COPY --from=download /out/ /
 COPY --from=passt /out/ /
 COPY --from=images /out/ /
 COPY --from=agent /tabernetes /usr/local/bin/tabernetes
+COPY --from=agent /out/ /
+# What is in this image and under which license: /usr/share/doc/tabernetes/
+COPY NOTICE.txt /usr/share/doc/tabernetes/NOTICE.txt
 # containerd calls runc through the agent when the node is not privileged
 # and the wasmtime shim, see agent/wasm.go
 RUN ln -s tabernetes /usr/local/bin/tabernetes-runc \

@@ -30,6 +30,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -45,7 +46,6 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -129,46 +129,37 @@ func setupPodLinkNet() error {
 			return err
 		}
 	}
-	rule := netlink.NewRule()
-	rule.Mark = tproxyMark
-	rule.Table = tproxyTable
-	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return fmt.Errorf("ip rule: %w", err)
-	}
-	lo, err := netlink.LinkByName("lo")
+	// The kernel takes a second copy of the rule under another priority, so
+	// add it only if an earlier start did not.
+	rule := []string{"fwmark", fmt.Sprintf("%#x", tproxyMark), "lookup", fmt.Sprint(tproxyTable)}
+	out, err := exec.Command("ip", append([]string{"rule", "show"}, rule...)...).Output()
 	if err != nil {
-		return err
+		return fmt.Errorf("ip rule show: %w", err)
 	}
-	_, all, _ := net.ParseCIDR("0.0.0.0/0")
-	route := &netlink.Route{LinkIndex: lo.Attrs().Index, Dst: all, Table: tproxyTable, Type: syscall.RTN_LOCAL, Scope: netlink.SCOPE_HOST}
-	if err := netlink.RouteReplace(route); err != nil {
-		return fmt.Errorf("ip route: %w", err)
+	if len(bytes.TrimSpace(out)) == 0 {
+		if err := ipCmd(append([]string{"rule", "add"}, rule...)...); err != nil {
+			return err
+		}
 	}
-	return nil
+	return ipCmd("route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", fmt.Sprint(tproxyTable))
 }
 
 // setupPodLinkRoute creates the veth pair and routes the pod network into
 // it. The routes of flannel are more specific (a /24 per node with flannel,
 // cni0 for this node), so the route takes what is left: the tab nodes.
 func setupPodLinkRoute() error {
-	out, err := netlink.LinkByName(podLinkOut)
-	if err != nil {
-		veth := &netlink.Veth{LinkAttrs: netlink.NewLinkAttrs(), PeerName: podLinkIn}
-		veth.Name = podLinkOut
-		if err := netlink.LinkAdd(veth); err != nil {
-			return fmt.Errorf("veth %s: %w", podLinkOut, err)
-		}
-		if out, err = netlink.LinkByName(podLinkOut); err != nil {
+	if _, err := net.InterfaceByName(podLinkOut); err != nil {
+		if err := ipCmd("link", "add", podLinkOut, "type", "veth", "peer", "name", podLinkIn); err != nil {
 			return err
 		}
 	}
-	in, err := netlink.LinkByName(podLinkIn)
+	in, err := net.InterfaceByName(podLinkIn)
 	if err != nil {
 		return err
 	}
-	for _, l := range []netlink.Link{out, in} {
-		if err := netlink.LinkSetUp(l); err != nil {
-			return fmt.Errorf("%s up: %w", l.Attrs().Name, err)
+	for _, l := range []string{podLinkOut, podLinkIn} {
+		if err := ipCmd("link", "set", l, "up"); err != nil {
+			return err
 		}
 	}
 	// The packets arrive at podLinkIn from a pod, whose route back is cni0:
@@ -183,17 +174,10 @@ func setupPodLinkRoute() error {
 			return fmt.Errorf("rp_filter: %w", err)
 		}
 	}
-	gw := net.ParseIP(podLinkGateway)
-	neigh := &netlink.Neigh{LinkIndex: out.Attrs().Index, IP: gw, HardwareAddr: in.Attrs().HardwareAddr, State: netlink.NUD_PERMANENT}
-	if err := netlink.NeighSet(neigh); err != nil {
-		return fmt.Errorf("neighbour on %s: %w", podLinkOut, err)
+	if err := ipCmd("neigh", "replace", podLinkGateway, "lladdr", in.HardwareAddr.String(), "dev", podLinkOut, "nud", "permanent"); err != nil {
+		return err
 	}
-	_, pods, _ := net.ParseCIDR(podNetwork)
-	route := &netlink.Route{LinkIndex: out.Attrs().Index, Dst: pods, Gw: gw, Flags: int(netlink.FLAG_ONLINK)}
-	if err := netlink.RouteReplace(route); err != nil {
-		return fmt.Errorf("route %s: %w", podNetwork, err)
-	}
-	return nil
+	return ipCmd("route", "replace", podNetwork, "via", podLinkGateway, "dev", podLinkOut, "onlink")
 }
 
 // nft loads a ruleset.

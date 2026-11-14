@@ -2,7 +2,7 @@
 // The shell (mvdan.cc/sh) and kubectl live in the wasm binary. This file
 // only does the line editing and the builtins that need the browser.
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import { fitTerminal } from "./fit.js";
 import { installFS } from "./fs.js";
 import { countBusy, patchWalltime } from "./clock.js";
 
@@ -16,10 +16,8 @@ export async function startTerminal(el, opts) {
     fontSize: 14,
     theme: { background: "#0d1117", foreground: "#c9d1d9" },
   });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
   term.open(el);
-  fit.fit();
+  fitTerminal(term);
   // Windows and Linux copy and paste with Ctrl, which xterm.js sends to the
   // shell as ^C and ^V. Like Windows Terminal: Ctrl-C copies while text is
   // selected and cancels otherwise, Ctrl-V (and Ctrl-Shift-C/V) leave the
@@ -38,7 +36,7 @@ export async function startTerminal(el, opts) {
       return key !== "v";
     });
   }
-  new ResizeObserver(() => fit.fit()).observe(el);
+  new ResizeObserver(() => fitTerminal(term)).observe(el);
 
   const logs = [];
   globalThis.tabernetesLogs = logs;
