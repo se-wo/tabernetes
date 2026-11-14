@@ -259,6 +259,13 @@ func (n *tabNode) servePodLinkHeader(conn io.ReadWriteCloser, from, line string)
 		}()
 		return
 	}
+	if loopbackRefused("tcp", src.IP, dst) {
+		// A socket on a loopback IP of a pod: only the pod itself
+		// connects (section 8.11, TC15).
+		fmt.Fprintf(conn, "refused\n")
+		conn.Close()
+		return
+	}
 	n.policy.admit(src.IP, dst)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

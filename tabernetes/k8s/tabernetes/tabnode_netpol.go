@@ -195,19 +195,23 @@ func (p *netPolicy) consume(src net.IP, dst *net.TCPAddr) bool {
 	return true
 }
 
-// dialFromPod dials addr (an ip:port) for the pod with IP srcIP. A cluster IP
-// or node port goes to one endpoint, like the DNAT of kube-proxy, so the
-// policy sees the pod behind it. A denied connection is dropped: the dial
-// fails with a timeout, as NetworkPolicy drops the SYN on a real node.
-func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn, error) {
-	src := &net.TCPAddr{IP: net.ParseIP(srcIP)}
+// dialFromPod dials addr (an ip:port) for the pod with the source src: the
+// pod IP and a local port, or port 0 for a port of the in-process network. A
+// cluster IP or node port goes to one endpoint, like the DNAT of kube-proxy,
+// so the policy sees the pod behind it. A denied connection is dropped: the
+// dial fails with a timeout, as NetworkPolicy drops the SYN on a real node.
+// An allowed connection to a row of the loopback table of another pod is
+// refused (section 8.11, TC4).
+func (n *tabNode) dialFromPod(ctx context.Context, src *net.TCPAddr, addr string) (net.Conn, error) {
+	srcIP := src.IP.String()
 	dst, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil || src.IP == nil || dst.IP == nil {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", addr) // fails like before
 	}
 	if dst.IP.Equal(src.IP) {
 		// The pod itself, also its localhost: loopback on a real node,
-		// which NetworkPolicy never sees.
+		// which NetworkPolicy never sees. A row of the loopback table
+		// connects (TC3).
 		return (&net.Dialer{LocalAddr: src}).DialContext(ctx, "tcp", addr)
 	}
 	ep := endpoint{ip: dst.IP.String(), port: int32(dst.Port)}
@@ -230,6 +234,10 @@ func (n *tabNode) dialFromPod(ctx context.Context, srcIP, addr string) (net.Conn
 	}
 	if !n.policy.allowed(ctx, src, dst) {
 		return nil, dropped(ctx, dst)
+	}
+	if !ep.remote && loopbackRefused("tcp", src.IP, dst) {
+		// Only after the policy: a denied connection waits (TC10).
+		return nil, refusedError(dst)
 	}
 	if !ep.remote {
 		// The listener of a pod on this node does not decide again.

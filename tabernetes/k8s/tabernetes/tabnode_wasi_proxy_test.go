@@ -14,6 +14,9 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // proxyTest is a proxy server with a fake pod worker: the messages that the
@@ -286,6 +289,47 @@ func TestProxyListenHost(t *testing.T) {
 	ctx := withProc(context.Background(), &procEnv{ip: nextProxyIP()})
 	if _, _, why := startProxy(ctx, []string{"WASMTIME_HTTP_PROXY_SOCKET_ADDR=192.0.2.7:8080"}, procOf(ctx).ip); why != "Address not available (os error 99)" {
 		t.Errorf("192.0.2.7: %q", why)
+	}
+}
+
+// PX5: with 127.0.0.1:9000, the proxy server listens on the pod IP with a
+// row of the loopback table. Another pod gets connection-refused, the pod
+// itself connects, and a kubelet probe fails (section 8.11).
+func TestProxyLoopback(t *testing.T) {
+	withTabNode(t, &tabNode{})
+	pt := newProxyTest(t, "WASMTIME_HTTP_PROXY_SOCKET_ADDR=127.0.0.1:9000")
+	ip := procOf(pt.ctx).ip
+	if pt.addr != ip+":9000" {
+		t.Fatalf("listens on %s", pt.addr)
+	}
+	if _, err := dialCluster(podCtx(t, nextProxyIP()), "tcp", pt.addr); !isRefused(err) {
+		t.Errorf("another pod: %v", err)
+	}
+	if _, err := dialCluster(context.Background(), "tcp", pt.addr); !isRefused(err) {
+		t.Errorf("the terminal: %v", err)
+	}
+	c, err := dialCluster(pt.ctx, "tcp", "127.0.0.1:9000")
+	if err != nil {
+		t.Fatalf("the pod itself: %v", err)
+	}
+	c.Close()
+	w := testWorker(t, v1.PodSpec{Containers: []v1.Container{{Name: "app"}}})
+	w.mu.Lock()
+	w.ip = ip
+	w.mu.Unlock()
+	pctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = w.ctrs[0].probeOnce(pctx, &v1.Probe{ProbeHandler: v1.ProbeHandler{HTTPGet: &v1.HTTPGetAction{Port: intstr.FromInt32(9000)}}})
+	if !isRefused(err) {
+		t.Errorf("httpGet probe: %v", err)
+	}
+	// The row ends with the container.
+	pt.stop()
+	for i := 0; loopbackRefused("tcp", nil, tcpAddr(pt.addr)); i++ {
+		if i == 100 {
+			t.Fatal("the row stays after the end of the container")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
