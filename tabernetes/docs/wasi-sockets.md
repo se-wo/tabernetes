@@ -1860,16 +1860,16 @@ The column "Nodes" gives the nodes for the test:
 | TC1, TC8 | The TCP echo pod gives answers through a Service. | tab, worker, Docker |
 | TC2, TC3, TC4, TC5, TC17 | A server on `127.0.0.1` gives `127.0.0.1` as `local-address`. A client in the same pod connects and sees `127.0.0.1` at the two ends. A client in another pod gets `connection-refused` from `connect`. | tab, Docker |
 | TC15, TC16 | A kubelet `tcpSocket` probe of a server on `127.0.0.1` fails. `kubectl port-forward` to this server connects. | tab, Docker |
-| TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. | tab, Docker |
-| TC9 | A client that connects before it binds has a local port from 32768 to 60999. | tab, Docker |
+| TC6, TC7 | A bind to `::` gives no error. A connection from another pod to the pod IP gets `connection-refused`: wasmtime makes IPv6 sockets IPv6 only. On a Docker node, only a host with IPv6 gives a result (section 9.2, PX4). On a host without IPv6, the Docker check writes SKIP. | tab, Docker |
+| TC9 | A client that connects before it binds has a local port from 32768 to 60999. On runwasi, a client to a Service shows the ClusterIP as its remote address (section 8.3.2, rule 2). | tab, Docker |
 | TC10 | A unit test with a clock that the test controls: a denied client gets `timeout` after `synTimeout`. A real wait of 127 seconds is not permitted (`wasi-sockets-plan.md`, rule 5). | tab, Docker (deferred) |
 | TC11 | A client to a closed port gets `connection-refused`. | tab, Docker |
 | TC12 | A unit test sends 10 MB to a server that does not read. The buffer of the Go side for this connection stays at 256 KiB or less. | tab |
 | TC13 | The client closes its send direction. The server reads the end of the stream and sends its answer. | tab, Docker |
 | TC14 | After `kubectl delete pod --grace-period=0` of the server, the client gets the end of its connection. | tab |
-| TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. Each call gives the error code of fact 12. The second bind occurs with a listener on the first socket and without one (section 8.3.2, rule 3). | tab, Docker |
-| TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, the test records the values. The kernel can change the buffer sizes, so only the other options must agree there (section 11). | tab, Docker |
-| NL1, NL2 | A component finds a Service by its short name. | tab, worker, Docker |
+| TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. On runwasi, a second bind without a listener gives no error. With a listener, it gives `address-in-use` (rule 3 of section 8.3.2). The other calls give the error codes of fact 12. | tab, Docker |
+| TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, all options other than the buffer sizes agree (section 11). The defaults of runwasi: keep-alive off, 7,200 s, 75 s, count 9, hop limit 64, buffers 65,536 and 8,192 bytes. An idle time of 1.5 s gives 2 s. The value 0 gives `invalid-argument`. | tab, Docker |
+| NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). | tab, worker, Docker |
 | NL3 | The name `example.com` fails with `name-unresolvable`. | tab |
 | UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
 | UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. | tab |
