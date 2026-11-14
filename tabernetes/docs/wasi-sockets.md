@@ -1020,6 +1020,7 @@ connection and then its end.
 | `web/src/wasi.js` | Start components. Keep the results of the transpile worker in the cache. |
 | `web/src/wasi.worker.js` | Run components in JSPI mode with `WASIShim`. Instantiate proxy components for each request. Send the messages of section 8.3. |
 | `web/src/sockets.js` (new) | The `sockets` object for `WASIShim`, with `ip-name-lookup`. The count of CO17. |
+| `web/src/wasi_messages.js` (new), `k8s/tabernetes/tabnode_wasi_msg.go` (new) | The names and the fields of the messages of section 8.3, and the dispatcher of each side. Phase 1 makes them. Later phases add a handler for each message in a file of their own, for example `tabnode_wasi_proxy.go`. |
 | `web/src/http.js` (new) | The `wasi:http` of Tabernetes (decision 4), with `fetch` and `fetch-cancel`. The base is `docs/wasi-sockets-poc/browser/src/http-own.js`. |
 | `web/src/files.js` (new) | The `browserFilesystem` adapter of section 8.10. |
 | `web/src/channel.js`, `web/src/nodes.js` | The `udp` channel to node workers, with credits. |
@@ -1048,6 +1049,21 @@ connection and then its end.
 Each phase starts only after all tests of the phase before it give correct
 results. Deferred tests are not part of this rule (decision 16). Section 10
 gives the tests.
+
+Some tests need a part of a later phase. Each of these tests moves to the
+phase that makes the part:
+
+- The test of CO17 and CO19 needs a socket. It moves to phase 3 and uses a
+  TCP socket.
+- The test of PX5 needs the loopback table. It moves to phase 3.
+- AC1 has a part in each phase. Phase 2 tests the proxy server, phase 3
+  TCP and phase 4 UDP.
+- The unit test of MS1 to MS6 grows in each phase. Each phase adds the
+  messages that it makes.
+
+Phase 5 cannot end before its deferred tests give correct results. Phase 6
+can start before phase 5 ends, because phase 5 has only deferred tests.
+`docs/wasi-sockets-plan.md` cuts the phases into work packages.
 
 | Phase | Contents |
 | --- | --- |
