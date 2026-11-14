@@ -116,7 +116,10 @@ spec:
 # redirect with a compressed body and Connection: close, and writes the
 # request that it receives to its log. The body is "compressed body\n",
 # compressed with gzip -n -9. web/test/e2e/wasi-proxy-cr.test.mjs has the
-# same server.
+# same server. stdin of nc stays open for 1 second after the response: nc
+# then reads and logs the request before it closes the connection. Without
+# the wait, an unread request can make the kernel send a reset
+# (HttpProtocolError in the client).
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-proxy-cr, labels: {wasi-check: proxy, app: wasi-proxy-cr}}
@@ -133,7 +136,7 @@ spec:
         - >-
           while true; do
           { printf 'HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Encoding: gzip\r\nContent-Length: 36\r\nConnection: close\r\n\r\n';
-          echo "$BODY" | base64 -d; } | nc -l -p 8000;
+          echo "$BODY" | base64 -d; sleep 1; } | nc -l -p 8000;
           echo '--- end';
           done
 ---
