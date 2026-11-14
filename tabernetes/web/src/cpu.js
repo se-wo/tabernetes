@@ -102,7 +102,10 @@ export function meterSuspending(meter, WA = globalThis.WebAssembly) {
 }
 
 // tickImports gives the import object with each function of an interface
-// wrapped by meter.ticking. Classes (resources) stay as they are.
+// wrapped by meter.ticking. Classes (resources) stay as they are. Each
+// interface is a Proxy over the original object, so that each read of a
+// name still goes to it: component.js records the names that the generated
+// JavaScript reads and does not find.
 export function tickImports(meter, imports) {
   const out = {};
   for (const [name, iface] of Object.entries(imports)) {
@@ -110,11 +113,16 @@ export function tickImports(meter, imports) {
       out[name] = iface;
       continue;
     }
-    const o = {};
-    for (const [k, v] of Object.entries(iface)) {
-      o[k] = typeof v === "function" && !isClass(v) ? meter.ticking(v) : v;
-    }
-    out[name] = o;
+    const wrapped = new Map();
+    out[name] = new Proxy(iface, {
+      get(t, key, receiver) {
+        const v = Reflect.get(t, key, receiver);
+        if (typeof v !== "function" || isClass(v)) return v;
+        let w = wrapped.get(v);
+        if (!w) wrapped.set(v, (w = meter.ticking(v)));
+        return w;
+      },
+    });
   }
   return out;
 }

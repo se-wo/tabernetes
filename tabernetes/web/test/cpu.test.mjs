@@ -91,6 +91,17 @@ test("tickImports keeps classes and other values", () => {
   assert.equal(out["wasi:io/poll"].n, 3);
   assert.notEqual(out["wasi:io/poll"].poll, fn);
   assert.equal(out["wasi:io/poll"].poll(), 1);
+  assert.equal(out["wasi:io/poll"].poll, out["wasi:io/poll"].poll);
+});
+
+test("tickImports reads each name from the original interface", () => {
+  const { meter } = setup();
+  const reads = [];
+  const iface = new Proxy({ now: () => 1n }, { get: (t, k) => (reads.push(k), t[k]) });
+  const out = tickImports(meter, { "wasi:clocks/monotonic-clock": iface });
+  assert.equal(out["wasi:clocks/monotonic-clock"].exitWithCode, undefined);
+  assert.equal(out["wasi:clocks/monotonic-clock"].now(), 1n);
+  assert.deepEqual(reads, ["exitWithCode", "now"]);
 });
 
 test("meterSuspending wraps the imports that jco makes with WebAssembly.Suspending", async () => {
