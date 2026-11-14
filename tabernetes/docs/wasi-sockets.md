@@ -927,6 +927,42 @@ rules apply to all messages:
   status code, headers and a body. `response` also gives the result of an
   instance that traps in the field `error`.
 
+The HTTP messages obey these rules:
+
+- A body is one `ArrayBuffer`. The sides do not stream bodies. The field
+  `body` of `request` and `fetch` is always present. It is empty for a
+  request without a body. A `response` or `fetched` with `status` also has
+  `headers` and `body`.
+- Headers are a list of name and value pairs in their sequence. A name is in
+  lowercase letters. A value is the bytes of the header line.
+- The `url` of `request` is `http://`, the value of the `host` header and
+  the request target with no change. The pod worker gets the authority and
+  the path from it. The `url` of `fetch` is an absolute URL. The pod worker
+  sends no `host` header in `fetch`.
+- An error code has the name that wasmtime gives, for example `DNS-error`
+  or `connection-refused`. The pod worker uses `trap` for an instance that
+  traps and `cancelled` for a request after `cancel`.
+- For each `request`, the pod worker sends one `response`. It also does this
+  after `cancel` and for a request in the queue of PX10. Then the error code
+  is `cancelled`.
+- If the write of a response body fails at the limit of 16 MiB, the pod
+  worker sends `response` with the status code 500, no headers and an empty
+  body (PX20).
+- For a `response` with an error code, the Go side closes the connection of
+  the client and sends no response. The container continues to run (PX21,
+  PX22, PX27).
+- For a `response` with no status code and no error code, the Go side closes
+  the connection, and the container exits with the exit code 139 (PX26).
+  The pod worker does not do this step.
+- The pod worker counts `REQUEST_ID` (PX11, PX12). It keeps the queue of
+  PX9, PX10 and PX34. The Go side has no queue.
+- A side ignores `cancel` and `fetched` for an ID that it does not know.
+  These messages can cross a `response` or a `fetch-cancel`. After
+  `fetch-cancel`, the Go side sends no `fetched`. The pod worker sends
+  `fetch-cancel` only before `fetched`.
+- For a response with no `content-length` header, the Go side sends the
+  body with `transfer-encoding: chunked` (PX31).
+
 The fields have these limits in addition to section 8.4:
 
 | Field | Limit |

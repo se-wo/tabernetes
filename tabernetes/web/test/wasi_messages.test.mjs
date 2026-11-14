@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { MESSAGES, LIMITS, SPECS, examine, createPeer, ip } from "../src/wasi_messages.js";
+import { MESSAGES, LIMITS, SPECS, KINDS, examine, createPeer, ip } from "../src/wasi_messages.js";
 
 const goSource = readFileSync(new URL("../../k8s/tabernetes/tabnode_wasi_msg.go", import.meta.url), "utf8");
 
@@ -114,4 +114,12 @@ test("the dispatcher of the pod worker gives correct messages to their handlers"
   assert.deepEqual(posted[0], [{ type: "stdout", bytes: b }, [b]]);
   assert.throws(() => peer.send("start", {}), /cannot send/);
   assert.throws(() => peer.send("exit", { code: -1 }), /cannot send/);
+});
+
+test("error codes of wasi:http with capital letters pass, the same pattern as in Go", () => {
+  for (const code of ["DNS-error", "HTTP-protocol-error", "TLS-alert-received", "connection-refused", "trap", "cancelled"]) {
+    assert.equal(KINDS.errcode(code), true, code);
+  }
+  for (const code of ["", "-x", "a b", "x".repeat(65)]) assert.equal(KINDS.errcode(code), false, JSON.stringify(code));
+  assert.ok(goSource.includes("regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)"));
 });
