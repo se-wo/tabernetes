@@ -12,6 +12,9 @@
 //	ocimirror image    -out DIR -ref REF -wasm FILE [-gzip]   runwasi style: the .wasm in a tar layer, named by the entrypoint
 //	ocimirror artifact -out DIR -ref REF -wasm FILE           a wasm OCI artifact: the module is the layer (application/wasm)
 //	ocimirror pull     -out DIR -ref REF                      copy an image from its registry (anonymous pull)
+//	ocimirror push     -out DIR -ref REF                      copy an image of the mirror to its registry
+//
+// push takes the credentials from REGISTRY_USER and REGISTRY_TOKEN.
 package main
 
 import (
@@ -35,7 +38,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ocimirror image|artifact|pull -out DIR -ref REF [-wasm FILE] [-gzip]")
+		fmt.Fprintln(os.Stderr, "usage: ocimirror image|artifact|pull|push -out DIR -ref REF [-wasm FILE] [-gzip]")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
@@ -58,6 +61,8 @@ func main() {
 			err = m.artifact(r, *wasm)
 		case "pull":
 			err = m.pull(r)
+		case "push":
+			err = m.push(r)
 		default:
 			err = fmt.Errorf("unknown command %q", os.Args[1])
 		}
@@ -283,14 +288,112 @@ func (m *mirror) pull(r ref) error {
 type client struct {
 	r     ref
 	token string
+	push  bool // login for push with REGISTRY_USER and REGISTRY_TOKEN
+}
+
+// push copies an image of the mirror to its registry: the blobs that the
+// registry does not have, then the manifest under the tag.
+func (m *mirror) push(r ref) error {
+	b, err := os.ReadFile(filepath.Join(m.dir, r.registry, filepath.FromSlash(r.repo), "manifests", r.tag))
+	if err != nil {
+		return err
+	}
+	var man manifest
+	if err := json.Unmarshal(b, &man); err != nil {
+		return err
+	}
+	if len(man.Manifests) > 0 {
+		return errors.New("push of an index is not supported")
+	}
+	c := &client{r: r, push: true}
+	for _, d := range append([]descriptor{man.Config}, man.Layers...) {
+		if code, _, err := c.do(http.MethodHead, "blobs/"+d.Digest, "", nil); err != nil {
+			return err
+		} else if code == http.StatusOK {
+			continue
+		}
+		blob, err := os.ReadFile(filepath.Join(m.dir, "blobs", "sha256", strings.TrimPrefix(d.Digest, "sha256:")))
+		if err != nil {
+			return err
+		}
+		code, loc, err := c.do(http.MethodPost, "blobs/uploads/", "", nil)
+		if err != nil {
+			return err
+		}
+		if code != http.StatusAccepted || loc == "" {
+			return fmt.Errorf("upload of %s: status %d", d.Digest, code)
+		}
+		u, err := url.Parse(loc)
+		if err != nil {
+			return err
+		}
+		if !u.IsAbs() {
+			u = (&url.URL{Scheme: "https", Host: c.host()}).ResolveReference(u)
+		}
+		q := u.Query()
+		q.Set("digest", d.Digest)
+		u.RawQuery = q.Encode()
+		if code, _, err = c.do(http.MethodPut, u.String(), "application/octet-stream", blob); err != nil {
+			return err
+		}
+		if code != http.StatusCreated {
+			return fmt.Errorf("upload of %s: status %d", d.Digest, code)
+		}
+	}
+	code, _, err := c.do(http.MethodPut, "manifests/"+r.tag, man.MediaType, b)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusCreated && code != http.StatusOK {
+		return fmt.Errorf("manifest: status %d", code)
+	}
+	fmt.Printf("pushed %s %s\n", r, digestOf(b))
+	return nil
+}
+
+func (c *client) host() string {
+	if c.r.registry == "docker.io" {
+		return "registry-1.docker.io"
+	}
+	return c.r.registry
+}
+
+// do sends a request for push to p, a path below /v2/<repository>/ or an
+// absolute URL. It gives the status code and the Location header.
+func (c *client) do(method, p, contentType string, body []byte) (int, string, error) {
+	u := p
+	if !strings.HasPrefix(p, "https://") {
+		u = "https://" + c.host() + "/v2/" + c.r.repo + "/" + p
+	}
+	for try := 0; ; try++ {
+		req, _ := http.NewRequest(method, u, bytes.NewReader(body))
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, "", err
+		}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized && try == 0 {
+			if err := c.login(resp.Header.Get("WWW-Authenticate")); err != nil {
+				return 0, "", err
+			}
+			continue
+		}
+		if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+			return 0, "", fmt.Errorf("%s %s: %s %s", method, u, resp.Status, strings.TrimSpace(string(msg)))
+		}
+		return resp.StatusCode, resp.Header.Get("Location"), nil
+	}
 }
 
 func (c *client) get(p, accept string) ([]byte, string, error) {
-	host := c.r.registry
-	if host == "docker.io" {
-		host = "registry-1.docker.io"
-	}
-	u := "https://" + host + "/v2/" + c.r.repo + "/" + p
+	u := "https://" + c.host() + "/v2/" + c.r.repo + "/" + p
 	for try := 0; ; try++ {
 		req, _ := http.NewRequest(http.MethodGet, u, nil)
 		req.Header.Set("Accept", accept)
@@ -330,10 +433,22 @@ func (c *client) login(challenge string) error {
 	if p["realm"] == "" {
 		return fmt.Errorf("no token realm in %q", challenge)
 	}
-	q := url.Values{"service": {p["service"]}, "scope": {"repository:" + c.r.repo + ":pull"}}
-	resp, err := http.Get(p["realm"] + "?" + q.Encode())
+	scope := "pull"
+	if c.push {
+		scope = "push,pull"
+	}
+	q := url.Values{"service": {p["service"]}, "scope": {"repository:" + c.r.repo + ":" + scope}}
+	req, _ := http.NewRequest(http.MethodGet, p["realm"]+"?"+q.Encode(), nil)
+	if c.push {
+		req.SetBasicAuth(os.Getenv("REGISTRY_USER"), os.Getenv("REGISTRY_TOKEN"))
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return fmt.Errorf("token for %s: %s", c.r.repo, resp.Status)
 	}
 	defer resp.Body.Close()
 	var t struct {

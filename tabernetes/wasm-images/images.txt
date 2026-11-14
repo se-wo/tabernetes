@@ -2,9 +2,19 @@
 #
 #   image     <reference> <dir>     a Go program in <dir>, built with GOOS=wasip1, packed like runwasi's demo images
 #   artifact  <reference> <dir>     the same as a wasm OCI artifact (the module is the layer)
+#   component <reference> <crate>   a Rust crate of rust/, built for wasm32-wasip2 and packed like "image": the
+#                                   test images of section 10.1 of ../docs/wasi-sockets.md
 #   mirror    <reference> [crate]   copied from its registry; if that fails and RUNWASI_SRC points to a runwasi
 #                                   checkout, the crate is built from it with cargo (target wasm32-wasip1) and packed instead
 image     ghcr.io/se-wo/tabernetes/wasi-hello:latest    hello
 artifact  ghcr.io/se-wo/tabernetes/wasi-hello:artifact  hello
 image     ghcr.io/se-wo/tabernetes/wasi-webgpu:latest   webgpu
 mirror    ghcr.io/containerd/runwasi/wasi-demo-app:latest  wasi-demo-app
+component ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest       cmd
+component ghcr.io/se-wo/tabernetes/wasi-test-exitcode:latest  exitcode
+component ghcr.io/se-wo/tabernetes/wasi-test-cmdhttp:latest   cmdhttp
+component ghcr.io/se-wo/tabernetes/wasi-test-core:latest      core
+component ghcr.io/se-wo/tabernetes/wasi-test-both:latest      both
+component ghcr.io/se-wo/tabernetes/wasi-test-wasi03:latest    wasi03
+component ghcr.io/se-wo/tabernetes/wasi-test-echo:latest      echo
+component ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest     proxy

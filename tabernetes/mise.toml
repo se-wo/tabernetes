@@ -11,6 +11,8 @@
 
 [tools]
 go = "1.27.3"
+# The Rust test components of wasm-images/rust/ (wasm-images/build.sh).
+rust = { version = "1.97.0", profile = "minimal", targets = "wasm32-wasip2" }
 
 [env]
 # renovate: datasource=github-tags depName=kubernetes/kubernetes

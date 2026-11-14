@@ -56,6 +56,16 @@ jobs:
         working-directory: tabernetes
         run: mise run test
 
+      # The Rust test components of wasm-images/rust/, which "Build page"
+      # builds for the OCI mirror (Rust and wasm32-wasip2 from mise.toml).
+      - name: Cache Rust
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            tabernetes/wasm-images/rust/target
+          key: rust-${{ runner.arch }}-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/wasm-images/rust/Cargo.lock') }}
+
       - name: Build page
         working-directory: tabernetes
         run: mise run site

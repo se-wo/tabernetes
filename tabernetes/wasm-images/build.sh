@@ -3,6 +3,9 @@
 # mirror <outdir> that the page reads same-origin (see ocimirror/main.go for
 # the layout). Publish <outdir> next to tabernetes.js as oci/, or point the
 # data-oci attribute of the terminal element at it.
+#
+# PUSH=1 also copies the images of the kind "component" to their registry
+# (ocimirror push, with REGISTRY_USER and REGISTRY_TOKEN).
 set -euo pipefail
 out=$(mkdir -p "$1" && cd "$1" && pwd)
 cd "$(dirname "$0")"
@@ -18,6 +21,15 @@ while read -r kind ref src; do
 		flags=()
 		[ "$kind" = image ] && flags=(-gzip)
 		"$tmp/ocimirror" "$kind" -out "$out" -ref "$ref" -wasm "$tmp/$src.wasm" "${flags[@]}"
+		;;
+	component)
+		# One cargo run builds all crates of rust/.
+		[ -e "$tmp/rust.done" ] || {
+			cargo build --quiet --locked --release --target wasm32-wasip2 --manifest-path rust/Cargo.toml
+			touch "$tmp/rust.done"
+		}
+		"$tmp/ocimirror" image -out "$out" -ref "$ref" -wasm "${CARGO_TARGET_DIR:-rust/target}/wasm32-wasip2/release/$src.wasm" -gzip
+		if [ "${PUSH:-}" = 1 ]; then "$tmp/ocimirror" push -out "$out" -ref "$ref"; fi
 		;;
 	mirror)
 		if "$tmp/ocimirror" pull -out "$out" -ref "$ref"; then continue; fi
