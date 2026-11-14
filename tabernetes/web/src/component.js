@@ -342,7 +342,7 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
   } catch (e) {
     if (e?.exitError) return e.code === 0 ? 0 : 1;
     const why = missingText(missing, e?.message ?? e, component.names?.imports);
-    return error(why || `the component cannot instantiate: ${e?.message ?? e}`);
+    return error(why || cannotInstantiate(e));
   } finally {
     meter?.end();
   }
@@ -399,6 +399,19 @@ export const MEMORY_RETRY_MS = 1000;
 export function isMemoryError(e) {
   return /out of memory|cannot allocate wasm memory|could not allocate memory/i.test(String(e?.message ?? e));
 }
+
+// NO_MEMORY is the text for an instantiation that failed with isMemoryError.
+// All workers of the tab share one limit of Wasm memories (docs/wasi-sockets.md,
+// section 14, open question 2).
+export const NO_MEMORY = "the browser tab has no Wasm memory left for a new instance";
+
+// cannotInstantiate gives the text of the log for an instantiation that
+// failed for a cause other than a missing import.
+export const cannotInstantiate = (e) => `the component cannot instantiate: ${isMemoryError(e) ? `${NO_MEMORY} (${e?.message ?? e})` : (e?.message ?? e)}`;
+
+// MEMORY_NOTE_MS is the minimum time between two lines of PX34 in the log of
+// a proxy container.
+export const MEMORY_NOTE_MS = 60_000;
 
 // createScope gives the waits of one instance (PX24). wait(promise) gives a
 // promise that also fails when cancel() runs. sleep(ms) is a timer of the
@@ -576,7 +589,7 @@ export function handlerExport(exports) {
 // The handlers of request, cancel and fetched go on peer, one for each type;
 // they find the request or the client request by its ID. stdin of the Go
 // side has a handler that discards the bytes (PX13).
-export function serveProxy({ component, env }, { peer, WASIShim, io, load = loadBlob, meter = null, limit = MAX_INSTANCES, retryMs = MEMORY_RETRY_MS, onInstance = () => {} }) {
+export function serveProxy({ component, env }, { peer, WASIShim, io, load = loadBlob, meter = null, limit = MAX_INSTANCES, retryMs = MEMORY_RETRY_MS, noteMs = MEMORY_NOTE_MS, onInstance = () => {} }) {
   const memory = createMemory(peer);
   const idle = createIdle({ onCall: () => memory.report() });
   const fetches = createFetches(peer);
@@ -586,13 +599,39 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
   let nextRequestID = 0;
   let running = 0;
   let instantiate = null;
-  let memoryWait = null; // the timer of PX34, or true while no timer runs
+  let linked = false; // the link check is complete: requests can start
+  let memoryWait = null; // the timer of PX34
+  let memorySince = 0; // the start of the current wait of PX34, or 0
+  let memoryNoted = -Infinity; // the time of the last line of PX34 in the log
   const key = handlerExport(component.exports);
 
-  const textExit = (text) => {
+  const textLine = (text) => {
     const b = new TextEncoder().encode(text + "\n");
     peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
+  };
+  const textExit = (text) => {
+    textLine(text);
     return ERROR_EXIT;
+  };
+
+  // noteMemory writes a line into the log of the container when an
+  // instantiation fails for lack of Wasm memory (PX34), at most one line in
+  // noteMs. The wait is then not silent. memoryBack writes one line when an
+  // instance gets its memory again.
+  const noteMemory = () => {
+    const now = Date.now();
+    if (!memorySince) memorySince = now;
+    if (now - memoryNoted < noteMs) return;
+    memoryNoted = now;
+    const waiting = queue.filter((e) => !e.done).length;
+    textLine(`tabernetes: ${NO_MEMORY}; ${waiting} request${waiting === 1 ? "" : "s"} of this container wait${waiting === 1 ? "s" : ""} (PX34)`);
+  };
+  const memoryBack = () => {
+    if (!memorySince) return;
+    const s = ((Date.now() - memorySince) / 1000).toFixed(1);
+    memorySince = 0;
+    memoryNoted = -Infinity;
+    textLine(`tabernetes: a new instance got its Wasm memory after ${s} s`);
   };
 
   // reply sends the one response message of a request.
@@ -675,6 +714,7 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
         // PX34: the request waits at the front of the queue.
         queue.unshift(entry);
         entry.scope = null;
+        noteMemory();
         waitForMemory();
         return;
       }
@@ -684,6 +724,7 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
       return;
     }
     memory.report();
+    memoryBack();
     onInstance(made.instance);
     const { instance, group, http } = made;
     made = null;
@@ -710,13 +751,12 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
     pump();
   };
 
+  // waitForMemory stops the queue until the end of another instance of this
+  // container or until retryMs pass. The timer is necessary also while other
+  // instances of the container run: they can wait for a long time, and other
+  // pods of the tab can free memory before (section 8.6).
   const waitForMemory = () => {
     if (memoryWait) return;
-    if (running > 0) {
-      // The end of another instance of this container starts the queue again.
-      memoryWait = true;
-      return;
-    }
     memoryWait = setTimeout(() => {
       memoryWait = null;
       pump();
@@ -724,12 +764,12 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
   };
 
   const memoryFree = () => {
-    if (memoryWait && memoryWait !== true) clearTimeout(memoryWait);
+    if (memoryWait) clearTimeout(memoryWait);
     memoryWait = null;
   };
 
   const pump = () => {
-    while (instantiate && !memoryWait && running < limit && queue.length) {
+    while (linked && !memoryWait && running < limit && queue.length) {
       const entry = queue.shift();
       if (entry.done) continue;
       running++;
@@ -763,19 +803,28 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
     }
     // runwasi links the component before it serves (instance_pre). The pod
     // worker makes one instance without a request for the same examination
-    // (CO11, CO12), and discards it.
-    try {
-      const { instance, group } = await newInstance(null, createScope());
-      memory.report();
-      group.release();
-      memory.report();
-      if (!handlerOf(instance)) return textExit("the component has no function handle in wasi:http/incoming-handler");
-    } catch (e) {
-      if (!isMemoryError(e)) {
-        const why = missingText(e.missing ?? [], e?.message ?? e, component.names?.imports);
-        return textExit(why || `the component cannot instantiate: ${e?.message ?? e}`);
+    // (CO11, CO12), and discards it. Without Wasm memory for this instance,
+    // the examination tries again after retryMs, with a line in the log;
+    // requests wait in the queue (PX34).
+    for (;;) {
+      try {
+        const { instance, group } = await newInstance(null, createScope());
+        memory.report();
+        group.release();
+        memory.report();
+        if (!handlerOf(instance)) return textExit("the component has no function handle in wasi:http/incoming-handler");
+        memoryBack();
+        break;
+      } catch (e) {
+        if (!isMemoryError(e)) {
+          const why = missingText(e.missing ?? [], e?.message ?? e, component.names?.imports);
+          return textExit(why || cannotInstantiate(e));
+        }
+        noteMemory();
+        await new Promise((resolve) => setTimeout(resolve, retryMs));
       }
     }
+    linked = true;
     pump();
     // The container runs until the Go side stops the pod worker.
     return new Promise(() => {});
