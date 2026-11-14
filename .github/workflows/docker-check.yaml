@@ -2,16 +2,20 @@ name: Docker check
 
 # The Docker check of tabernetes/docs/docker-node-check.md on a GitHub runner:
 # a Docker node with the node image of this commit joins the page in headless
-# Chromium, then the steps wasi-* run the tests of section 10.2 of
-# tabernetes/docs/wasi-sockets.md on runwasi. The job fails when a step prints
-# FAIL. On main, the job also pushes the test images of
-# tabernetes/wasm-images/images.txt (kind "component") to ghcr.io.
+# Chromium, a real kubectl reaches the page through "join --kubectl", then the
+# steps wasi-* run the tests of section 10.2 of
+# tabernetes/docs/wasi-sockets.md on runwasi, and the node leaves with a bye.
+# The job fails when a step prints FAIL. On main, the job also pushes the test
+# images of tabernetes/wasm-images/images.txt (kind "component") to ghcr.io.
 on:
   pull_request:
     paths:
       - tabernetes/node/**
       - tabernetes/k8s/tabernetes/addons/**
       - tabernetes/k8s/tabernetes/tabnode_wasi*.go
+      - tabernetes/k8s/tabernetes/kubectlaccess.go
+      - tabernetes/k8s/tabernetes/tunnel.go
+      - tabernetes/web/src/join.js
       - tabernetes/web/src/wasi*.js
       - tabernetes/web/src/sockets.js
       - tabernetes/web/src/files.js
@@ -127,13 +131,20 @@ jobs:
       - name: Join the Docker node
         working-directory: tabernetes
         run: |
-          docs/docker-node-check/check.sh images join
+          docs/docker-node-check/check.sh images join kubectl
           ! grep -q '^FAIL' "${OUT}/summary.txt"
 
       - name: WASI steps
         working-directory: tabernetes
         run: |
           docs/docker-node-check/check.sh wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp
+          ! grep -q '^FAIL' "${OUT}/summary.txt"
+
+      # Last: the node is gone afterwards.
+      - name: Leave
+        working-directory: tabernetes
+        run: |
+          docs/docker-node-check/check.sh leave
           ! grep -q '^FAIL' "${OUT}/summary.txt"
 
       - name: Summary
@@ -144,7 +155,7 @@ jobs:
             echo '```text'
             cat "${OUT}/summary.txt" 2>/dev/null || echo "no summary"
             echo '```'
-            for f in "${OUT}"/wasi-*.txt; do
+            for f in "${OUT}"/kubectl.txt "${OUT}"/wasi-*.txt "${OUT}"/leave.txt; do
               [ -e "${f}" ] || continue
               echo "<details><summary>$(basename "${f}")</summary>"
               echo

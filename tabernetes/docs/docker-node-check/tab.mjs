@@ -2,8 +2,8 @@
 //
 //   node tab.mjs run '<command line>'  run it in the tab's shell, print the
 //                                      output, exit with its status
-//   node tab.mjs join                  type "join" in the terminal, print
-//                                      {token, port, name} as JSON
+//   node tab.mjs join [--kubectl]      type "join" in the terminal, print
+//                                      {kind, token, port, name} as JSON
 //   node tab.mjs accept '<line>'       paste the "accept ..." line of the node
 //   node tab.mjs status                the status line below the terminal
 //   node tab.mjs screen [n]            the last n lines of the terminal
@@ -57,10 +57,11 @@ switch (cmd) {
   case "join": {
     // join only runs from the real terminal input (it needs a busy terminal
     // to ask for the accept line), so type it there.
-    await page.evaluate(() => {
+    const line = arg === "--kubectl" ? "join --kubectl" : "join";
+    await page.evaluate((line) => {
       globalThis.tabernetesLastJoin = null;
-      globalThis.tabernetesTerminal.term.input("join\r");
-    });
+      globalThis.tabernetesTerminal.term.input(line + "\r");
+    }, line);
     await page.waitForFunction(() => globalThis.tabernetesLastJoin, null, { timeout: 60000 });
     done(JSON.stringify(await page.evaluate(() => globalThis.tabernetesLastJoin)));
     break;
@@ -91,6 +92,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.error("usage: tab.mjs run '<cmd>' | join | accept '<line>' | status | screen [n] | logs [n]");
+    console.error("usage: tab.mjs run '<cmd>' | join [--kubectl] | accept '<line>' | status | screen [n] | logs [n]");
     process.exit(2);
 }

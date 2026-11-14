@@ -8,8 +8,8 @@ node container and pastes its `accept` line.
 
 It needs a Docker daemon that can run a privileged or nearly privileged
 container, a built site and about 15 minutes. The workflow
-`.github/workflows/docker-check.yaml` runs the steps `images`, `join` and
-`wasi-*` on a GitHub runner.
+`.github/workflows/docker-check.yaml` runs the steps `images`, `join`,
+`kubectl`, `wasi-*` and `leave` on a GitHub runner.
 
 ## What is in it
 
@@ -19,9 +19,17 @@ container, a built site and about 15 minutes. The workflow
   `run '<command line>'` runs a command in the tab's shell, `join` and
   `accept '<line>'` drive the join, `status`, `screen` and `logs` show the
   status line, the terminal and the control plane log.
-- `check.sh` runs the steps `images join apply coredns storage metrics
-  ingress sanity wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp
-  leave` and prints PASS, FAIL or SKIP for each.
+- `check.sh` runs the steps `images join kubectl apply coredns storage
+  metrics ingress sanity wasi-images wasi-command wasi-proxy wasi-sockets
+  wasi-udp leave` and prints PASS, FAIL or SKIP for each.
+- The step `kubectl` runs `join --kubectl`, starts the agent in kubectl mode
+  and takes the kubeconfig from its stdout. A real kubectl on the host
+  (`KUBECTL_VERSION`, default the Kubernetes version of the page) then reads
+  and writes through it. Last, `rmnode kubectl-<n>` must stop the agent and
+  delete its ServiceAccount. It also checks that the node mode refuses the
+  kubectl token.
+- The step `leave` stops the node with `docker stop`. The agent says bye, and
+  the node must be gone within 30 seconds.
 - `manifests.yaml` has the test objects. All pods run on `node-1` and use
   busybox.
 - `wasi-*.sh` and `wasi-*.yaml` are the steps for WebAssembly components and
@@ -59,6 +67,10 @@ Settings of `check.sh`, as environment variables:
   local-path-provisioner from the host's Docker.
 - `OOM_WORKAROUND=1`: let containerd in the node keep the `oom_score_adj` of
   its parent, see below.
+- `KUBECTL`: the kubectl of the step `kubectl`. Without it, the step downloads
+  kubectl `KUBECTL_VERSION` from `dl.k8s.io` into `$OUT/bin`.
+- `KUBECTL_PORT`: the host port of the step `kubectl` (default 6443). Another
+  port also tests the flag `--server` of the agent.
 
 ## Known limits
 
@@ -78,10 +90,13 @@ Settings of `check.sh`, as environment variables:
 - **The real ingress-nginx controller** comes from `registry.k8s.io` and is not
   in the node image. Without that registry the controller stays on `tab`, and
   the `ingress` step checks only the tab controller with a backend on node-1.
-- **`leave` takes about 6 minutes.** A lost Docker node stays `NotReady`, like
-  in a real cluster without a cloud controller. Its pods move only after the
-  default 300 second toleration for `not-ready`, and the old pods stay
-  `Terminating` until `kubectl delete node node-1`.
+- **A node lost without a bye is slow.** `leave` stops the node with
+  `docker stop`, so the agent tells the tab, and the node and its pods are
+  gone at once. A node that ends with `docker kill`, a crash or a lost
+  network stays `NotReady`, like in a real cluster without a cloud
+  controller. Its pods move only after the default 300 second toleration for
+  `not-ready`, and the old pods stay `Terminating` until
+  `kubectl delete node node-1`.
 - **The host of a Docker node does not reach tab pods (#61).** Pods of the
   Docker node reach them, by pod IP and by service IP. A connection from the
   node's own network namespace times out: the kernel drops it on the pod link
