@@ -7,7 +7,7 @@
 // wasi-hello.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apply, forEachNode, logs, namespace, nodeName, onNode, pod, podPhase, waitForPod, waitFor } from "./harness.mjs";
+import { apply, forEachNode, logs, namespace, nodeName, onNode, pod, podPhase, waitFor, waitForPod } from "./harness.mjs";
 
 const IMAGE = "ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest";
 
@@ -60,24 +60,33 @@ forEachNode(["tab", "worker"], (kind) => {
   });
 });
 
-// Until W1.4b, a component that is not a command component gets a clear
-// text. W1.4b changes this to the statuses of runwasi (CO2 to CO4, CO11).
-test("a proxy component gets a text that the tab node cannot serve it yet", async (t) => {
+// Until W1.4b, a component that is not a command component, or that imports
+// an interface that the tab node does not give, gets a clear text. W1.4b
+// changes this to the statuses of runwasi (CO3, CO4, CO11, CR6).
+test("other components get a text that the tab node cannot run them yet", async (t) => {
   const ns = await namespace(t);
   const node = await nodeName("tab");
-  await apply({
+  const cases = {
+    // An entrypoint function (core.wasm#go), no wasi:cli/run.
+    core: [/without the export wasi:cli\/run: the tab node cannot call the function of an entrypoint yet/],
+    // A command component with wasi:http (CR6).
+    cmdhttp: [/imports wasi:http\/\S+, which the tab node does not give to a command component/],
+  };
+  await apply(Object.keys(cases).map((name) => ({
     apiVersion: "v1",
     kind: "Pod",
-    metadata: { name: "proxy" },
+    metadata: { name },
     spec: {
       runtimeClassName: "wasmtime",
+      restartPolicy: "Never",
       nodeSelector: onNode(node),
-      containers: [{ name: "c", image: "ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest" }],
+      containers: [{ name: "c", image: `ghcr.io/se-wo/tabernetes/wasi-test-${name}:latest` }],
     },
-  }, ns);
-  const msg = await waitFor(async () => {
-    const w = (await pod(ns, "proxy")).status?.containerStatuses?.[0]?.state?.waiting;
-    return w?.reason === "CreateContainerError" && w.message;
-  }, { what: "CreateContainerError of the proxy component" });
-  assert.match(msg, /proxy component.*cannot serve proxy components yet/);
+  })), ns);
+  for (const [name, [re]] of Object.entries(cases)) {
+    // The tab node gives an "unsupported" text as a StartError (tabnode_ctr.go).
+    const st = await waitFor(async () => (await pod(ns, name)).status?.containerStatuses?.[0]?.state?.terminated, { what: `the end of ${name}` });
+    assert.equal(st.reason, "StartError", name);
+    assert.match(st.message, re);
+  }
 });
