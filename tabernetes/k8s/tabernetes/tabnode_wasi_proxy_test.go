@@ -477,6 +477,25 @@ func TestProxyStatusAndHeaderNames(t *testing.T) {
 	}
 }
 
+// PX31: as on runwasi, a request without a host header (HTTP/1.0) gets no
+// response, and the connection closes. It does not go to the pod worker.
+func TestProxyNoHost(t *testing.T) {
+	pt := newProxyTest(t)
+	if r := wait(t, pt.send("GET / HTTP/1.0\r\n\r\n")); r.err == nil || r.status != "" {
+		t.Errorf("the client got %q %v", r.status, r.err)
+	}
+	select {
+	case m := <-pt.posted:
+		t.Errorf("message %s to the pod worker", m.Get("type"))
+	default:
+	}
+	res := pt.send("GET / HTTP/1.0\r\nHost: h\r\n\r\n")
+	pt.respond(pt.next("request").Get("request"), map[string]any{"status": 200, "headers": headerList(), "body": bufOf("ok")})
+	if r := wait(t, res); r.status != "HTTP/1.0 200 OK" || r.body != "ok" {
+		t.Errorf("with a host header: %q %q %v", r.status, r.body, r.err)
+	}
+}
+
 // PX21, PX22, PX27: a response with an error code closes the connection
 // with no response. The container continues, and the next request gets its
 // response.
