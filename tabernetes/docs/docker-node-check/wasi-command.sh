@@ -10,7 +10,7 @@
 #   CO1, CO5, FS1  arguments, environment, a file of a volume, stdin
 #   CO18           exit codes 0, 1 and 1 for exit(0), exit(1) and exit(3);
 #                  exit-with-code gets the status of CO11
-#   CO2            two exports: the world of the first export (wasi:cli/run)
+#   CO2            two exports: the world of the first export
 #   CO3, CO4       the function of the entrypoint; without it, the status of
 #                  phase 0
 #   CO11, CO12     an import of WASI 0.3: the status of phase 0 and where the
@@ -33,8 +33,8 @@ step_wasi_command() {
 	node_ns
 	apply_file "$here/wasi-command.yaml"
 
-	# CO1, CO5, FS1. The component waits for stdin; crictl attach gives it a
-	# line, and stdinOnce closes stdin after it.
+	# CO1, CO5, FS1. The component waits for a line on stdin; crictl attach
+	# gives it the line. Then the component ends, and the attach with it.
 	if ! wait_for 'kubectl get pod wasi-cmd' 'Running|Completed' 240; then
 		k describe pod wasi-cmd
 	fi
@@ -73,14 +73,22 @@ step_wasi_command() {
 		result FAIL "CO18: exit(0), exit(1), exit(3) give '$out' (want 0 1 1); exit-with-code gives '$s' (want Failed 0 137 Error)"
 	fi
 
-	# CO2
-	logs="$(tab run 'kubectl logs wasi-both' 2>&1)"
-	printf '$ kubectl logs wasi-both\n%s\n' "$logs" >>"$OUT/$step.txt"
+	# CO2. With wasi:cli/run first, runwasi selects the command world. Its
+	# linker has no wasi:http, so the import of wasi:http/types for the second
+	# export fails as for CR6. With wasi:http/incoming-handler first, runwasi
+	# selects the proxy world and serves the requests.
 	s="$(pod_state wasi-both)"
-	if [ "$s" = "Succeeded 0 0 Completed" ] && grep -qx run <<<"$logs"; then
-		result PASS "CO2: a component with wasi:cli/run and then wasi:http/incoming-handler runs as a command"
+	k logs wasi-both
+	if wait_for 'kubectl get pod wasi-bothrev' 'wasi-bothrev +1/1 +Running' 60; then
+		out="ready"
 	else
-		result FAIL "CO2: the component with two exports gives '$s', log '$(head -c 200 <<<"$logs")' (want a command: Succeeded, run)"
+		out="not ready"
+		k describe pod wasi-bothrev
+	fi
+	if [ "$s" = "Failed 0 137 Error" ] && [ "$out" = ready ]; then
+		result PASS "CO2: wasi:cli/run first gives the command world (137 Error, no wasi:http); wasi:http/incoming-handler first gives the proxy world (ready)"
+	else
+		result FAIL "CO2: wasi:cli/run first gives '$s' (want Failed 0 137 Error); wasi:http/incoming-handler first is $out (want ready)"
 	fi
 
 	# CO3, CO4

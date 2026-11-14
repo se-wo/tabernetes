@@ -15,6 +15,7 @@ component ghcr.io/se-wo/tabernetes/wasi-test-exitcode:latest  exitcode
 component ghcr.io/se-wo/tabernetes/wasi-test-cmdhttp:latest   cmdhttp
 component ghcr.io/se-wo/tabernetes/wasi-test-core:latest      core
 component ghcr.io/se-wo/tabernetes/wasi-test-both:latest      both
+component ghcr.io/se-wo/tabernetes/wasi-test-bothrev:latest   bothrev
 component ghcr.io/se-wo/tabernetes/wasi-test-wasi03:latest    wasi03
 component ghcr.io/se-wo/tabernetes/wasi-test-echo:latest      echo
 component ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest     proxy

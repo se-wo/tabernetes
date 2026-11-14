@@ -3,7 +3,7 @@
 # ../build.sh builds them for wasm32-wasip2: the kind "component" of
 # ../images.txt.
 [workspace]
-members = ["both", "cmd", "cmdhttp", "core", "echo", "exitcode", "proxy", "wasi03"]
+members = ["both", "bothrev", "cmd", "cmdhttp", "core", "echo", "exitcode", "proxy", "wasi03"]
 resolver = "2"
 
 [profile.release]

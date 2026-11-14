@@ -100,6 +100,22 @@ spec:
       image: ghcr.io/se-wo/tabernetes/wasi-test-both:latest
       imagePullPolicy: Never
 ---
+# CO2: the exports wasi:http/incoming-handler and then wasi:cli/run. The
+# readiness probe shows the proxy world.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-bothrev, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-bothrev:latest
+      imagePullPolicy: Never
+      readinessProbe:
+        httpGet: {path: /, port: 8080}
+        periodSeconds: 2
+---
 # CO3: the function that the entrypoint names. CO4: no such function.
 apiVersion: v1
 kind: Pod

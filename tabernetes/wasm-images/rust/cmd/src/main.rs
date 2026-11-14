@@ -1,9 +1,7 @@
 //! A command component (CO1, CO5, CO18, FS1 to FS3). It writes its
-//! arguments, its environment, the file in $FILE and stdin (if $STDIN is
-//! set). It writes the file in $WRITE and first shows its old text. It looks
+//! arguments, its environment, the file in $FILE and its first line of stdin (if
+//! $STDIN is set). It writes the file in $WRITE and first shows its old text. It looks
 //! up the name in $LOOKUP, then exits with the code in $EXIT_CODE.
-use std::io::Read;
-
 fn main() {
     for a in std::env::args() {
         println!("arg {a}");
@@ -35,8 +33,9 @@ fn main() {
         }
     }
     if std::env::var("STDIN").is_ok() {
+        // One line, not up to the end: an attach does not close stdin.
         let mut s = String::new();
-        let _ = std::io::stdin().read_to_string(&mut s);
+        let _ = std::io::stdin().read_line(&mut s);
         println!("stdin {}", s.trim_end());
     }
     let code: i32 = std::env::var("EXIT_CODE")

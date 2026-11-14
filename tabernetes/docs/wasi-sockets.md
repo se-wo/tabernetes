@@ -1220,6 +1220,7 @@ image name starts with `ghcr.io/se-wo/tabernetes/`.
 | `wasi-test-cmdhttp` | A command component with an import of `wasi:http` (CR6). |
 | `wasi-test-core` | A component without the two exports. It exports the function `go` (CO3, CO4). |
 | `wasi-test-both` | A component with the export `wasi:cli/run` and then the export `wasi:http/incoming-handler` (CO2). |
+| `wasi-test-bothrev` | The same component with the two exports in the opposite sequence (CO2). |
 | `wasi-test-wasi03` | A command component with an import of `wasi:clocks/monotonic-clock@0.3.0` (CO11, CO12). |
 | `wasi-test-echo` | An echo server for TCP, or for UDP with `PROTO=udp`. |
 | `wasi-test-proxy` | A proxy component. The path of the request selects the behavior. The path `/context` shows its context. The path `/fetch/<URL>` sends a client request. |
@@ -1272,7 +1273,7 @@ The column "Nodes" gives the nodes for the test:
 | --- | --- | --- |
 | CO1, CO5, FS1 | The command component writes its arguments, its environment and a file of a volume to stdout. It reads stdin. | tab, worker, Docker |
 | CO18 | The command component exits with 0, 1 and 3. The pod shows the exit codes 0, 1 and 1. A component with `exit-with-code` gets the status of CO11. | tab, Docker |
-| CO2 | A component with the two exports runs in the world of its first export. | tab, Docker |
+| CO2 | A component with the two exports runs in the world of its first export. With `wasi:cli/run` first, the component gets the command world. Its import of `wasi:http/types` then gives the status of CR6. With `wasi:http/incoming-handler` first, the component gets the proxy world and answers requests. | tab, Docker |
 | CO3, CO4 | A component without the two exports runs the function of the entrypoint. A second component without this function gets the status of phase 0. | tab, Docker |
 | CO6, CO7 | A component that uses more memory than `limits.memory` gets `OOMKilled`. During one request, the counted memory increases by the memory of the instance. After the response, it decreases by the same number. | tab |
 | CO8 | Two pods of the same image cause one transpiler run. A second entrypoint causes a second run. | tab, worker |
