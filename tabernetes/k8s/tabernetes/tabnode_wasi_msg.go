@@ -78,11 +78,12 @@ var wasiMessages = map[string]string{
 }
 
 // wasiLimits are the limits of the fields (section 8.4), the same numbers as
-// LIMITS in wasi_messages.js.
+// LIMITS in wasi_messages.js. "datagram" is the IPv4 limit of a UDP datagram
+// (UD14, section 8.3.3).
 var wasiLimits = map[string]int{
 	"chunk":       1 << 20,
 	"data":        256 << 10,
-	"datagram":    65535,
+	"datagram":    65507,
 	"body":        16 << 20,
 	"credits":     256 << 10,
 	"backlog":     4096,

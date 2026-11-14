@@ -52,6 +52,7 @@ test("examine accepts correct messages", () => {
     [{ type: "start", component: { js: "", modules: {} }, args: ["a"], env: ["A=1"], cwd: "/" }, "g"],
     [{ type: "data", socket: 1, bytes: new ArrayBuffer(256 << 10) }, "w"],
     [{ type: "data", socket: 0x80000001, bytes: new ArrayBuffer(1) }, "g"],
+    [{ type: "datagram", socket: 1, address: "10.0.0.1", port: 53, bytes: new ArrayBuffer(65507) }, "w"],
     [{ type: "addresses", lookup: 3, addresses: ["10.96.0.1", "fd00::1"] }, "g"],
     [{ type: "fetch", fetch: 2, method: "PURGE", url: "http://web/", headers: [["cookie", new ArrayBuffer(3)]], body: new ArrayBuffer(0) }, "w"],
   ];
@@ -72,7 +73,7 @@ test("examine rejects the type, the direction, the fields and the sizes", () => 
     [{ type: "stdout", bytes: new ArrayBuffer((1 << 20) + 1) }, "not a correct chunk"],
     [{ type: "data", socket: 1, bytes: new ArrayBuffer((256 << 10) + 1) }, "not a correct data"],
     [{ type: "data", socket: 0, bytes: new ArrayBuffer(1) }, "not a correct socket"],
-    [{ type: "datagram", socket: 1, address: "10.0.0.1", port: 53, bytes: new ArrayBuffer(65536) }, "not a correct datagram"],
+    [{ type: "datagram", socket: 1, address: "10.0.0.1", port: 53, bytes: new ArrayBuffer(65508) }, "not a correct datagram"],
     [{ type: "credit", socket: 1, kind: "bytes", n: (256 << 10) + 1 }, "not a correct credits"],
     [{ type: "listen", socket: 1, backlog: 0 }, "not a correct backlog"],
     [{ type: "bind", socket: 1, protocol: "tcp", family: "ipv4", address: "1.2.3.4", port: -1 }, "not a correct port"],
