@@ -113,16 +113,20 @@ const fail = (code) => () => {
 const FAMILIES = new Set(["ipv4", "ipv6"]);
 
 // The defaults of the socket options. The component can read and change
-// them; they have no effect (section 11).
+// them; they have no effect (section 11). The values are those of runwasi
+// (wasmtime 36 on Linux, package W3.3a): wasmtime gives the buffer sizes of
+// the kernel divided by 2.
 const TCP_DEFAULTS = Object.freeze({
   keepAliveEnabled: false,
   keepAliveIdleTime: 7_200_000_000_000n,
   keepAliveInterval: 75_000_000_000n,
   keepAliveCount: 9,
   hopLimit: 64,
-  receiveBufferSize: 131_072n,
-  sendBufferSize: 16_384n,
+  receiveBufferSize: 65_536n,
+  sendBufferSize: 8_192n,
 });
+
+const SECOND = 1_000_000_000n;
 
 const UDP_DEFAULTS = Object.freeze({
   unicastHopLimit: 64,
@@ -869,9 +873,10 @@ class TcpOptions {
   keepAliveIdleTime() {
     return this.#options.keepAliveIdleTime;
   }
+  // As on runwasi, the idle time goes up to whole seconds.
   setKeepAliveIdleTime(v) {
     if (v <= 0n) throw "invalid-argument";
-    this.#options.keepAliveIdleTime = v;
+    this.#options.keepAliveIdleTime = ((v + SECOND - 1n) / SECOND) * SECOND;
   }
   keepAliveInterval() {
     return this.#options.keepAliveInterval;

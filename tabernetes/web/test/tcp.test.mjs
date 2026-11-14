@@ -229,6 +229,14 @@ test("TC22: the socket options keep their values", () => {
   const sock = g.s.tcpCreateSocket.createTcpSocket("ipv4");
   assert.equal(sock.keepAliveEnabled(), false);
   assert.equal(sock.hopLimit(), 64);
+  // The defaults of runwasi (W3.3a).
+  assert.equal(sock.keepAliveIdleTime(), 7_200_000_000_000n);
+  assert.equal(sock.keepAliveInterval(), 75_000_000_000n);
+  assert.equal(sock.keepAliveCount(), 9);
+  assert.equal(sock.receiveBufferSize(), 65_536n);
+  assert.equal(sock.sendBufferSize(), 8_192n);
+  sock.setKeepAliveIdleTime(1_500_000_000n);
+  assert.equal(sock.keepAliveIdleTime(), 2_000_000_000n);
   sock.setKeepAliveEnabled(true);
   sock.setKeepAliveIdleTime(5_000_000_000n);
   sock.setKeepAliveInterval(1_000_000_000n);
