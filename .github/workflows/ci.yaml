@@ -98,3 +98,83 @@ jobs:
           # Templates of the page (tabernetes/site/build.mjs), not standalone HTML documents.
           FILTER_REGEX_EXCLUDE: ^tabernetes/site/.*[.]html$
           STRIP_DEFAULT_WORKSPACE_FOR_REGEX: true
+
+  test-web:
+    name: Test web
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          working_directory: tabernetes
+
+      - name: Unit tests of the terminal
+        working-directory: tabernetes
+        run: mise run test-web
+
+  # The page in headless Chromium, on the tab node and on a node worker
+  # (tabernetes/web/test/README.md).
+  e2e:
+    name: End-to-end
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          working_directory: tabernetes
+
+      # The binary that the job Build put into the cache.
+      - name: Restore tabernetes
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tabernetes/.build/assets/tabernetes.wasm.zst
+            tabernetes/.build/assets/THIRD_PARTY_LICENSES.go.json
+            tabernetes/.build/wasm_exec.js
+          key: tabernetes-${{ hashFiles('tabernetes/mise.toml', 'tabernetes/k8s/**', 'tabernetes/site/third-party.mjs') }}
+          fail-on-cache-miss: true
+
+      - name: Build page
+        working-directory: tabernetes
+        run: mise run site
+
+      - name: Install Playwright
+        working-directory: tabernetes/web/test/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          # browser.mjs and tab.mjs load Playwright with require().
+          echo "NODE_PATH=${PWD}/node_modules" >>"${GITHUB_ENV}"
+
+      - name: End-to-end tests
+        working-directory: tabernetes
+        env:
+          E2E_OUT: ${{ runner.temp }}/e2e
+        run: node web/test/e2e/run.mjs
+
+      - name: Logs
+        if: failure()
+        env:
+          E2E_OUT: ${{ runner.temp }}/e2e
+        run: |
+          for f in browser-console.log control-plane.log terminal.txt; do
+            echo "::group::${f}"
+            tail -n 300 "${E2E_OUT}/${f}" 2>/dev/null || echo "no ${f}"
+            echo "::endgroup::"
+          done
