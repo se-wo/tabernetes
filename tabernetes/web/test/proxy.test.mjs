@@ -12,7 +12,7 @@ import { parse } from "@bytecodealliance/jco";
 import { generate } from "@bytecodealliance/jco/component";
 import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { transpile } from "../src/transpile.js";
-import { runComponent, createScope, clocksFor, isMemoryError, MAX_INSTANCES, ERROR_EXIT } from "../src/component.js";
+import { runComponent, createScope, clocksFor, isMemoryError, cannotInstantiate, MAX_INSTANCES, ERROR_EXIT } from "../src/component.js";
 import { createPeer } from "../src/wasi_messages.js";
 import { proxyComponent } from "./proxy_fixtures.mjs";
 // The io.js of the browser shim, which the bundle of the pod worker uses.
@@ -456,6 +456,62 @@ test("PX34: without another instance, the request tries again after a time", asy
   await go.until(() => go.response(a), "response");
   assert.equal(go.response(a).status, 201);
   assert.ok(Date.now() - start >= 50, "two retries");
+});
+
+// stderr gives the text that the pod worker wrote to the log of the container.
+const stderr = (go) => go.sent.filter((m) => m.type === "stderr").map((m) => dec.decode(m.bytes)).join("");
+
+test("PX34: a request that waits for memory also waits for the timer while a long instance of the container runs", async () => {
+  // Other pods of the tab can free memory before the long instance ends
+  // (docs/wasi-sockets.md, section 14, open question 2).
+  let failures = 0;
+  const go = serve(await compiled("wait", { ms: 2000 }), { load: failing(() => failures > 0 && failures-- > 0), retryMs: 30 });
+  await go.until(() => go.mem().length >= 2, "the link check");
+  const a = go.request();
+  await sleep(10);
+  failures = 2;
+  const b = go.request();
+  // The instance of b starts before the end of a.
+  await go.until(() => /got its Wasm memory/.test(stderr(go)), "the instance of b", 1500);
+  assert.equal(go.response(a), undefined);
+  go.peer.dispatch({ type: "cancel", request: a });
+  go.peer.dispatch({ type: "cancel", request: b });
+});
+
+test("PX34: a wait for memory writes one line into the log, and one line when it ends", async () => {
+  let failures = 0;
+  const go = serve(await compiled("ok"), { load: failing(() => failures > 0 && failures-- > 0), retryMs: 20, noteMs: 60_000 });
+  await go.until(() => go.mem().length >= 2, "the link check");
+  failures = 3;
+  const a = go.request();
+  await go.until(() => go.response(a), "response");
+  const lines = stderr(go).split("\n").filter(Boolean);
+  assert.equal(lines.length, 2, lines.join("\n"));
+  assert.match(lines[0], /^tabernetes: the browser tab has no Wasm memory left for a new instance; 1 request of this container waits \(PX34\)$/);
+  assert.match(lines[1], /^tabernetes: a new instance got its Wasm memory after \d+\.\d s$/);
+  // A second wait gives a line again.
+  failures = 1;
+  const b = go.request();
+  await go.until(() => go.response(b), "response b");
+  assert.equal(stderr(go).split("\n").filter(Boolean).length, 4);
+});
+
+test("PX34: a link check without memory tries again, and the container then serves", async () => {
+  let failures = 2;
+  const go = serve(await compiled("ok"), { load: failing(() => failures > 0 && failures-- > 0), retryMs: 20 });
+  const a = go.request();
+  await go.until(() => go.response(a), "response");
+  assert.equal(go.response(a).status, 201);
+  assert.equal(go.exited, null);
+  assert.match(stderr(go), /^tabernetes: the browser tab has no Wasm memory left for a new instance; 1 request of this container waits \(PX34\)\n/);
+});
+
+test("cannotInstantiate names the full tab for an error of memory", () => {
+  assert.equal(cannotInstantiate(new Error("unreachable")), "the component cannot instantiate: unreachable");
+  assert.equal(
+    cannotInstantiate(new RangeError("WebAssembly.Instance(): Out of memory: Cannot allocate Wasm memory for new instance")),
+    "the component cannot instantiate: the browser tab has no Wasm memory left for a new instance (WebAssembly.Instance(): Out of memory: Cannot allocate Wasm memory for new instance)",
+  );
 });
 
 test("a proxy component that cannot link exits with 137 and the name of the function", async () => {
