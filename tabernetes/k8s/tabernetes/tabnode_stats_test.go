@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/transport"
+	"k8s.io/streaming/pkg/httpstream/spdy"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"sigs.k8s.io/yaml"
 )
@@ -627,6 +628,26 @@ func TestRESTBytes(t *testing.T) {
 	up, _ := transport.WrapRoundTripper(fakeRT{http.StatusSwitchingProtocols}).RoundTrip(req)
 	if _, ok := up.Body.(countingBody); ok {
 		t.Error("the body of an upgrade is wrapped")
+	}
+}
+
+// The apiserver translates the WebSocket of kubectl exec and attach into SPDY
+// to the node: the SPDY round tripper takes the TLS config of the transport of
+// the kubelet client, through restBytes.
+func TestRESTBytesUpgradeTLS(t *testing.T) {
+	rt, err := transport.New(&transport.Config{TLS: transport.TLSConfig{ServerName: "node"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rt.(restBytes); !ok {
+		t.Fatalf("transport %T is not restBytes", rt)
+	}
+	spdyRT, err := spdy.NewRoundTripperWithConfig(spdy.RoundTripperConfig{UpgradeTransport: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tc := spdyRT.TLSClientConfig(); tc == nil || tc.ServerName != "node" {
+		t.Errorf("TLS config %+v", tc)
 	}
 }
 

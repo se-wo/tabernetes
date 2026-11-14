@@ -8,8 +8,7 @@
 // CO11, CO12, CR6, exit-with-code) are in wasi-worlds.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apply, forEachNode, logs, namespace, nodeName, onNode, pod, podPhase, waitFor, waitForPod } from "./harness.mjs";
-import { evalOn, closeDevtools } from "./devtools.mjs";
+import { apply, forEachNode, logs, namespace, nodeName, onNode, pod, podPhase, run, waitForPod } from "./harness.mjs";
 
 const IMAGE = "ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest";
 
@@ -63,35 +62,15 @@ forEachNode(["tab", "worker"], (kind) => {
 });
 
 // CO5: stdin of a command component. The component reads one line of
-// stdin when STDIN is set (wasm-images/rust/cmd). The step wasi-command of
-// the Docker check gives the line with crictl attach. The shell of the tab
-// cannot attach to a container without a TTY yet ("SpdyRoundTripper: unable
-// to retrieve TLS config"; also kubectl exec). So the test gives the line
-// as the Go side does: a message stdin on the transport of wasi.js, on the
-// Go thread of the node. With stdin in the container spec, the Go side keeps
-// stdin open and the component waits. Without it, the Go side ends stdin at
-// once, as /dev/null does.
+// stdin when STDIN is set (wasm-images/rust/cmd). As the step wasi-command
+// of the Docker check gives the line with crictl attach, the test gives it
+// with kubectl attach -i in the shell of the tab. With stdin in the container
+// spec, the Go side keeps stdin open and the component waits. Without it, the
+// Go side ends stdin at once, as /dev/null does.
 forEachNode(["tab", "worker"], (kind) => {
   test(`CO5: a command component reads stdin on ${kind}`, async (t) => {
-    t.after(closeDevtools);
     const ns = await namespace(t);
     const node = await nodeName(kind);
-    // Keep the transport of the pod worker of ns/stdin/c.
-    await evalOn(node, (name) => {
-      const w = globalThis.tabernetesWasi;
-      const start = (w.e2eStart ??= w.start);
-      w.start = (opts) => {
-        const h = start(opts);
-        if (opts.component && opts.name === name) {
-          globalThis.e2eStdin = (text, end) => {
-            const b = new TextEncoder().encode(text).buffer;
-            h.post({ type: "stdin", bytes: b, end }, [b]);
-          };
-          w.start = start;
-        }
-        return h;
-      };
-    }, `${ns}/stdin/c`);
     const withStdin = cmdPod("stdin", node, { env: [{ name: "STDIN", value: "1" }] });
     Object.assign(withStdin.spec.containers[0], { stdin: true, stdinOnce: true });
     await apply([withStdin, cmdPod("nostdin", node, { env: [{ name: "STDIN", value: "1" }] })], ns);
@@ -102,15 +81,12 @@ forEachNode(["tab", "worker"], (kind) => {
     assert.match(noneLog, /^stdin $/m);
 
     await waitForPod(ns, "stdin", (p) => !!p.status?.containerStatuses?.[0]?.state?.running);
-    await waitFor(() => evalOn(node, () => typeof globalThis.e2eStdin === "function"), { what: "the transport of the pod worker" });
     // The component waits for its line: it does not end without stdin.
     await new Promise((r) => setTimeout(r, 2000));
     assert.equal((await pod(ns, "stdin")).status.phase, "Running");
-    await evalOn(node, () => {
-      globalThis.e2eStdin("line from ", false);
-      globalThis.e2eStdin("stdin\nmore", true);
-      delete globalThis.e2eStdin;
-    });
+    // The component ends after its line, and the attach with it.
+    const attach = await run(`printf 'line from stdin\\n' | kubectl attach -i -n ${ns} stdin -c c`, { timeout: 60 });
+    assert.equal(attach.rc, 0, attach.out);
     const p = await waitForPod(ns, "stdin", podPhase("Succeeded", "Failed"));
     const out = await logs(ns, "stdin");
     assert.equal(p.status.containerStatuses[0].state.terminated.exitCode, 0, out);
