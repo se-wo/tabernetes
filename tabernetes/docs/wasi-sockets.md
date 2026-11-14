@@ -1210,8 +1210,10 @@ rules. They close gaps of the requirements:
 - `net/http` of Go does not keep the sequence of headers with different
   names. The headers of `request` have the names in alphabetical sequence.
   The values of one name keep their sequence.
-- A request without a `host` header (HTTP/1.0) gets the local address of
-  the connection in its `url`.
+- A request without a `host` header (HTTP/1.0) does not go to the pod
+  worker. The proxy server closes the connection and sends no response.
+  runwasi does the same (step `wasi-proxy` of the Docker check). For such a
+  request of HTTP/1.1, `net/http` of Go sends 400.
 - A request that is more than a limit of section 8.3.1 does not go to the
   pod worker. A URL of more than 8,192 characters gets the status code
   414. Headers over their limits get 431. A method of more than 64

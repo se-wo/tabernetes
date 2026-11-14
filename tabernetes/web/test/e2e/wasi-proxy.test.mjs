@@ -35,7 +35,8 @@ const RUNWASI = {
     'udp start-bind: Err(ErrorCode { code: 1, name: "access-denied", message: "Access denied.\\n\\n            POSIX equivalent: EACCES, EPERM" })',
     'resolve: ErrorCode { code: 20, name: "permanent-resolver-failure", message: "A permanent failure in name resolution occurred." }',
   ],
-  // PX31: the header names, HTTP/1.1 with Connection: close and HTTP/1.0.
+  // PX31: the header names, HTTP/1.1 with Connection: close and HTTP/1.0,
+  // each with a host header.
   cookie11: ["connection", "date", "set-cookie", "set-cookie", "transfer-encoding"],
   cookie10: ["date", "set-cookie", "set-cookie"],
   noContent11: ["connection", "date"],
@@ -177,17 +178,17 @@ test("PX18, PX19, PX20: bodies of 17 MiB fail, a body of 1 MiB arrives without a
   const big = 17 << 20;
   // PX19: a request body of 17 MiB gets 413.
   const r413 = await inPod(ns, client,
-    `{ printf 'POST /echo HTTP/1.0\\r\\nContent-Length: ${big}\\r\\n\\r\\n'; seq 3000000 | head -c ${big}; sleep 3; } | nc px 8080 | head -1`,
+    `{ printf 'POST /echo HTTP/1.0\\r\\nHost: px\\r\\nContent-Length: ${big}\\r\\n\\r\\n'; seq 3000000 | head -c ${big}; sleep 3; } | nc px 8080 | head -1`,
     { timeout: 300 });
   assert.match(r413.out, /^HTTP\/1\.[01] 413 /m, r413.out);
   // PX20: a response body of 17 MiB gets 500.
-  const r500 = await raw(ns, client, "px:8080", `GET /big/${big} HTTP/1.0\\r\\n\\r\\n`, 5);
+  const r500 = await raw(ns, client, "px:8080", `GET /big/${big} HTTP/1.0\\r\\nHost: px\\r\\n\\r\\n`, 5);
   assert.equal(status(r500), "500", r500.slice(0, 300));
   // PX18: 1 MiB through /echo.
   const mib = 1 << 20;
   const r = await inPod(ns, client, [
     `seq 300000 | head -c ${mib} >/tmp/b`,
-    `{ printf 'POST /echo HTTP/1.0\\r\\nContent-Length: ${mib}\\r\\n\\r\\n'; cat /tmp/b; sleep 2; } | nc px 8080 >/tmp/r`,
+    `{ printf 'POST /echo HTTP/1.0\\r\\nHost: px\\r\\nContent-Length: ${mib}\\r\\n\\r\\n'; cat /tmp/b; sleep 2; } | nc px 8080 >/tmp/r`,
     "head -c 300 /tmp/r",
     "echo",
     "echo sent $(sha256sum </tmp/b | cut -c1-64)",
@@ -249,11 +250,11 @@ test("PX26: no response gives the state and the restart of runwasi on tab", asyn
 });
 
 test("PX29: PURGE, TRACE and a GET with a body arrive without a change on tab", async () => {
-  const purge = await raw(ns, client, "px:8080", "PURGE /echo HTTP/1.0\\r\\n\\r\\n");
+  const purge = await raw(ns, client, "px:8080", "PURGE /echo HTTP/1.0\\r\\nHost: px\\r\\n\\r\\n");
   assert.deepEqual(header(purge, "x-method"), ["other:PURGE"], purge);
-  const trace = await raw(ns, client, "px:8080", "TRACE /echo HTTP/1.0\\r\\n\\r\\n");
+  const trace = await raw(ns, client, "px:8080", "TRACE /echo HTTP/1.0\\r\\nHost: px\\r\\n\\r\\n");
   assert.deepEqual(header(trace, "x-method"), ["TRACE"], trace);
-  const g = await raw(ns, client, "px:8080", "GET /echo HTTP/1.0\\r\\nContent-Length: 9\\r\\n\\r\\nget body\\n");
+  const g = await raw(ns, client, "px:8080", "GET /echo HTTP/1.0\\r\\nHost: px\\r\\nContent-Length: 9\\r\\n\\r\\nget body\\n");
   assert.deepEqual(header(g, "x-method"), ["GET"], g);
   assert.deepEqual(header(g, "x-body-length"), ["9"], g);
   assert.equal(body(g), "get body\n");
@@ -267,6 +268,8 @@ test("PX30: the status codes 204, 304 and 599 on tab", async () => {
 
 test("PX31: the header names of runwasi for HTTP/1.1 and HTTP/1.0 on tab", async () => {
   assert.deepEqual(headerNames(await raw(ns, client, "px:8080", req11("GET /cookie"))), RUNWASI.cookie11);
-  assert.deepEqual(headerNames(await raw(ns, client, "px:8080", "GET /cookie HTTP/1.0\\r\\n\\r\\n")), RUNWASI.cookie10);
+  assert.deepEqual(headerNames(await raw(ns, client, "px:8080", "GET /cookie HTTP/1.0\\r\\nHost: px\\r\\n\\r\\n")), RUNWASI.cookie10);
+  // runwasi gives no response to a request without a host header.
+  assert.equal(await raw(ns, client, "px:8080", "GET /cookie HTTP/1.0\\r\\n\\r\\n"), "");
   assert.deepEqual(headerNames(await raw(ns, client, "px:8080", req11("GET /status/204"))), RUNWASI.noContent11);
 });

@@ -201,13 +201,15 @@ step_wasi_proxy() {
 	check PX17 "$(grep -qw content-type <<<"$s" && echo 1 || echo 0)" "the header names are '$s' (want no content-type)"
 
 	# PX21, PX22
-	a="$(px_raw wasi-proxy:8080 'GET /trap HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n' | wc -c)"
+	a="$(px_raw wasi-proxy:8080 'GET /trap HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n')"
+	a=${#a}
 	b="$(px_get 'wget -qO- -T 10 wasi-proxy:8080/status/200; echo rc=$?' | tail -1)"
 	s="$(pod_restarts wasi-proxy)"
 	check "PX21, PX22" "$([ "$a $b ${s%% *}" = "0 rc=0 0" ] && echo 0 || echo 1)" "a trap gives $a bytes of response, then $b, restarts ${s%% *} (want 0 bytes, rc=0, restarts 0)"
 
 	# PX27
-	a="$(px_raw wasi-proxy:8080 'GET /error HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n' | wc -c)"
+	a="$(px_raw wasi-proxy:8080 'GET /error HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n')"
+	a=${#a}
 	b="$(px_get 'wget -qO- -T 10 wasi-proxy:8080/status/200; echo rc=$?' | tail -1)"
 	s="$(pod_restarts wasi-proxy)"
 	check PX27 "$([ "$a $b ${s%% *}" = "0 rc=0 0" ] && echo 0 || echo 1)" "an error code gives $a bytes of response, then $b, restarts ${s%% *} (want 0 bytes, rc=0, restarts 0)"
@@ -215,16 +217,17 @@ step_wasi_proxy() {
 	# PX26: the container exits with 139, kubelet starts it again, and
 	# REQUEST_ID starts at 0 again.
 	px_get "wget -qO- -T 10 $(pod_ip wasi-proxy-nores):8080/context >/dev/null 2>&1" >/dev/null
-	a="$(px_raw "$(pod_ip wasi-proxy-nores):8080" 'GET /noresponse HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | wc -c)"
+	a="$(px_raw "$(pod_ip wasi-proxy-nores):8080" 'GET /noresponse HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')"
+	a=${#a}
 	wait_for 'kubectl get pod wasi-proxy-nores' 'wasi-proxy-nores +1/1 +Running +1' 90
 	s="$(pod_restarts wasi-proxy-nores)"
 	b="$(px_get "wget -qO- -T 10 $(pod_ip wasi-proxy-nores):8080/context" | grep '^env REQUEST_ID=')"
 	check PX26 "$([ "$a|$s|$b" = "0|1 139 Error|env REQUEST_ID=0" ] && echo 0 || echo 1)" "no response gives $a bytes; restarts, exit code, reason '$s'; then $b (want 0 bytes, 1 139 Error, REQUEST_ID=0)"
 
 	# PX29
-	a="$(px_raw wasi-proxy:8080 'PURGE /echo HTTP/1.0\r\n\r\n' | grep -i '^x-method:')"
-	b="$(px_raw wasi-proxy:8080 'TRACE /echo HTTP/1.0\r\n\r\n' | grep -i '^x-method:')"
-	out="$(px_raw wasi-proxy:8080 'GET /echo HTTP/1.0\r\nContent-Length: 9\r\n\r\nget body\n')"
+	a="$(px_raw wasi-proxy:8080 'PURGE /echo HTTP/1.0\r\nHost: wasi-proxy\r\n\r\n' | grep -i '^x-method:')"
+	b="$(px_raw wasi-proxy:8080 'TRACE /echo HTTP/1.0\r\nHost: wasi-proxy\r\n\r\n' | grep -i '^x-method:')"
+	out="$(px_raw wasi-proxy:8080 'GET /echo HTTP/1.0\r\nHost: wasi-proxy\r\nContent-Length: 9\r\n\r\nget body\n')"
 	s="$(grep -i '^x-method:' <<<"$out") $(grep -i '^x-body-length:' <<<"$out") $(tail -1 <<<"$out")"
 	check PX29 "$(grep -qix 'x-method: other:PURGE' <<<"$a" && grep -qix 'x-method: TRACE' <<<"$b" && [ "$(tr '[:upper:]' '[:lower:]' <<<"$s")" = "x-method: get x-body-length: 9 get body" ] && echo 0 || echo 1)" "PURGE: '$a'; TRACE: '$b'; GET with a body: '$s'"
 
@@ -238,11 +241,16 @@ step_wasi_proxy() {
 	# PX31: the header names, the reference of the tab node. /cookie has no
 	# content-length, /status/204 has no body.
 	a="$(px_raw wasi-proxy:8080 'GET /cookie HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n')"
-	b="$(px_raw wasi-proxy:8080 'GET /cookie HTTP/1.0\r\n\r\n')"
+	b="$(px_raw wasi-proxy:8080 'GET /cookie HTTP/1.0\r\nHost: wasi-proxy\r\n\r\n')"
 	out="$(px_raw wasi-proxy:8080 'GET /status/204 HTTP/1.1\r\nHost: wasi-proxy\r\nConnection: close\r\n\r\n')"
 	s="HTTP/1.1 /cookie: $(header_names <<<"$a"); HTTP/1.0 /cookie: $(header_names <<<"$b"); HTTP/1.1 /status/204: $(header_names <<<"$out")"
 	echo "status lines: $(head -1 <<<"$a"), $(head -1 <<<"$b"), $(head -1 <<<"$out")" >>"$OUT/$step.txt"
-	check PX31 "$([ "$s" = "HTTP/1.1 /cookie: connection date set-cookie set-cookie transfer-encoding; HTTP/1.0 /cookie: date set-cookie set-cookie; HTTP/1.1 /status/204: connection date" ] && echo 0 || echo 1)" "$s"
+	# Requests without a host header: runwasi gives no response. The bytes of
+	# the response, for HTTP/1.0 and HTTP/1.1.
+	a="$(px_raw wasi-proxy:8080 'GET /cookie HTTP/1.0\r\n\r\n')"
+	b="$(px_raw wasi-proxy:8080 'GET /cookie HTTP/1.1\r\nConnection: close\r\n\r\n')"
+	s="$s; no host header: HTTP/1.0 ${#a} bytes, HTTP/1.1 ${#b} bytes ($(head -1 <<<"$b"))"
+	check PX31 "$([ "$s" = "HTTP/1.1 /cookie: connection date set-cookie set-cookie transfer-encoding; HTTP/1.0 /cookie: date set-cookie set-cookie; HTTP/1.1 /status/204: connection date; no host header: HTTP/1.0 0 bytes, HTTP/1.1 0 bytes ()" ] && echo 0 || echo 1)" "$s"
 
 	# CR1: by the name of the Service.
 	out="$(px_get 'wget -qO- -T 30 wasi-proxy:8080/fetch/wasi-proxy-cr:8000/cr1')"
