@@ -1051,8 +1051,11 @@ The Go side examines a component before it starts a pod worker. It uses the
 names and the world of the transpile worker (section 8.2), in the sequence
 of runwasi:
 
-1. A proxy component gets an "unsupported" text until phase 2. This text
-   ends as `StartError`.
+1. A proxy component gets the interfaces of step 2 and also
+   `wasi:http/types` and `wasi:http/outgoing-handler`, each with a version
+   `0.2.x`. The linker of runwasi has them for the proxy world (fact 4). A
+   proxy component needs no function (step 3). The proxy server of section
+   8.6 serves it.
 2. Each import must be an interface of WASI 0.2 that the linker of runwasi
    has for the command world: `wasi:cli`, `wasi:clocks`, `wasi:filesystem`,
    `wasi:io`, `wasi:random` and `wasi:sockets`, each with a version `0.2.x`.
@@ -1189,6 +1192,38 @@ Step 2 is necessary. Chrome does not free a suspended instance that does not
 continue (section 9.2, item 15). So each pollable of an instance must be
 able to fail its wait. The pod worker gives `WASIShim` its own clocks for
 this reason.
+
+The proxy server of the Go side (`tabnode_wasi_proxy.go`) obeys these
+rules. They close gaps of the requirements:
+
+- The proxy server listens before the pod worker starts. If it cannot
+  listen, no pod worker starts. The Go side writes the text of runwasi to
+  stderr, and the container exits with 137. An IP that is not the pod IP,
+  not a wildcard IP and not a loopback IP gives "Address not available (os
+  error 99)" (PX33). A port in use gives "Address in use (os error 98)".
+- A loopback IP (`127.0.0.0/8` or `::1`) listens on the pod IP. Until W3.1
+  adds the loopback table, it accepts connections from all clients (PX5).
+- For port 0, the proxy server tries the ports 32768 to 60999 in sequence
+  and listens on the first free port (PX32).
+- The pod worker gets no arguments and no preopened directories for a proxy
+  component (PX13). The environment does not contain the variables of PX6.
+- `net/http` of Go does not keep the sequence of headers with different
+  names. The headers of `request` have the names in alphabetical sequence.
+  The values of one name keep their sequence.
+- A request without a `host` header (HTTP/1.0) gets the local address of
+  the connection in its `url`.
+- A request that is more than a limit of section 8.3.1 does not go to the
+  pod worker. A URL of more than 8,192 characters gets the status code
+  414. Headers over their limits get 431. A method of more than 64
+  characters gets 501.
+- For a request body of more than 16 MiB, the proxy server reads and
+  discards the rest of the body, to a maximum of 64 MiB, and then sends 413.
+  A client that sends the complete body before it reads the response then
+  also gets the 413. A client that sends `Expect: 100-continue` gets the
+  413 at once.
+- The proxy server charges the time of its steps to the container with
+  `ChargeCPU` (AC1). The time that it waits for the `response` message is
+  not part of this time.
 
 For client requests, the HTTP path sends a `fetch` message. The Go side
 does the client request with the cluster client and sends `fetched`. The
