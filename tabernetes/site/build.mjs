@@ -139,9 +139,22 @@ function imageList() {
       const m = /^(.*?)(?::([\w.-]+))?$/.exec(ref);
       return fs.existsSync(path.join(out, "oci", m[1], "manifests", m[2] || "latest"));
     });
-  return lines.map(([kind, ref, src]) => kind === "mirror"
-    ? `${ref}\n  copied unchanged from its registry; it keeps the license of its source.\n`
-    : `${ref}\n  built from tabernetes/wasm-images/${src} with Go (GOOS=wasip1): Tabernetes code\n  (CC BY-NC-SA 4.0) and the Go standard library (license [1] and [2] below).\n`).join("");
+  // The text is made after the license texts are numbered: apache is the
+  // number of the text of the Apache License 2.0.
+  return (apache) => lines.map(([kind, ref, src]) => {
+    if (kind === "mirror") return `${ref}\n  copied unchanged from its registry; it keeps the license of its source.\n`;
+    // The Rust test components of docs/wasi-sockets.md, section 10.1. Each
+    // crate in them that is not Tabernetes code (the Rust standard library,
+    // wasi, wasip2, wit-bindgen, bitflags) lets the user choose the Apache
+    // License 2.0.
+    if (kind === "component") {
+      return `${ref}\n  built from tabernetes/wasm-images/rust/${src} with Rust (wasm32-wasip2): Tabernetes code\n` +
+        `  (CC BY-NC-SA 4.0), the Rust standard library and the crates of\n` +
+        `  tabernetes/wasm-images/rust/Cargo.lock that it contains (wasi, wasip2, wit-bindgen,\n` +
+        `  bitflags), used under the Apache License 2.0 (license [${apache}] below).\n`;
+    }
+    return `${ref}\n  built from tabernetes/wasm-images/${src} with Go (GOOS=wasip1): Tabernetes code\n  (CC BY-NC-SA 4.0) and the Go standard library (license [1] and [2] below).\n`;
+  }).join("");
 }
 
 // thirdParty writes THIRD_PARTY_LICENSES.txt: the list of components, then
@@ -176,8 +189,10 @@ License 2.0.
     }
   }
   if (images) {
+    const apache = [...texts.values()].find((t) => /^\s*Apache License\s+Version 2\.0, January 2004/.test(t.text) && !/LLVM Exceptions/.test(t.text));
+    if (!apache) throw new Error("THIRD_PARTY_LICENSES.txt has no text of the Apache License 2.0 for the Rust images");
     const t = "WebAssembly images in oci/ (the OCI mirror of the page)";
-    s += `\n\n${t}\n${"-".repeat(t.length)}\n\n${images}`;
+    s += `\n\n${t}\n${"-".repeat(t.length)}\n\n${images(apache.n)}`;
   }
   s += `\n\nLicense texts\n${rule}\n`;
   for (const t of texts.values()) s += `\n[${t.n}] ${t.name}\n${"-".repeat(78)}\n${t.text}\n`;
