@@ -44,14 +44,31 @@ echo "== NL1 and CO3"
 tab 'kubectl logs lookup | grep ^lookup; kubectl logs lookup-fqdn | grep ^lookup; kubectl logs core-go'
 
 # kubectl exec needs the serving certificate of the kubelet; crictl exec
-# does not.
+# does not. Without CAP_SYS_ADMIN the agent runs containerd in namespaces of
+# its own (node/agent/userns.go), and the stream server of crictl exec
+# listens on 127.0.0.1 in there: crictl runs in the namespaces of containerd.
+# shellcheck disable=SC2016 # for the shell in the node
+ns="$(docker exec "$N" sh -c 'for p in /proc/[0-9]*; do
+	[ "$(cat "$p/comm")" = containerd ] || continue
+	f="-n -m"
+	[ "$(readlink "$p/ns/user")" = "$(readlink /proc/self/ns/user)" ] || f="-U --preserve-credentials $f"
+	echo "-t ${p#/proc/} $f"
+	break
+done')"
+# shellcheck disable=SC2086 # ns is a list of flags
+crictl() { docker exec "$N" nsenter $ns crictl "$@"; }
 client=""
 for _ in $(seq 60); do
-	client="$(docker exec "$N" crictl ps -q --label io.kubernetes.pod.name=client | head -1)"
+	client="$(crictl ps -q --label io.kubernetes.pod.name=client | head -1)"
 	[ -n "$client" ] && break
 	sleep 5
 done
-x() { docker exec "$N" crictl exec "$client" sh -c "$1" 2>&1; }
+x() { crictl exec "$client" sh -c "$1" 2>&1; }
+if ! x true >/dev/null; then
+	echo "crictl exec in the pod client fails: no checks"
+	x true
+	exit 1
+fi
 echo "== item 8: the echo images through their Services"
 x 'echo tcp | nc -w 2 echo-tcp 7'
 x 'echo udp | nc -u -w 2 echo-udp 7'
