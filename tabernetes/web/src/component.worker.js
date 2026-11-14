@@ -5,7 +5,7 @@
 // "start" and loads the JavaScript from a Blob URL that it makes.
 //
 // The task "web" of mise.toml bundles this file with WASIShim of
-// @bytecodealliance/preview2-shim, sockets.js and wasi_messages.js into one
+// @bytecodealliance/preview2-shim, sockets.js, http.js and wasi_messages.js into one
 // script, as each *.worker.js: a data: worker cannot load other files of the
 // page.
 import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
