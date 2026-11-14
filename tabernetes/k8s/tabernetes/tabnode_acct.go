@@ -395,9 +395,42 @@ func (u ctrUsage) sum(o ctrUsage) ctrUsage {
 // counter never goes back when a container goes.
 var nodeCPU cpuCounter
 
-// idleCPU is the part of nodeCPU that is the idle rate of images: a number
-// of the model only, no code of this node ran for it (tabnode_stats.go).
+// idleCPU is the part of nodeCPU that did not run on the Go thread: the idle
+// rate of images, a number of the model only, and the time of pod workers
+// (ChargeWorker), which run on threads of their own. countBusy does not see
+// it, so it takes nothing from the control plane (tabnode_stats.go).
 var idleCPU cpuCounter
+
+// ChargeWorker counts d of CPU time that a pod worker measured on its own
+// thread (the cpu message, AC2). It counts like ChargeCPU, but not as time of
+// the Go thread.
+func (a *ctrAcct) ChargeWorker(d time.Duration) {
+	if a == nil || d <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	idleCPU.add(a.chargeLocked(time.Now(), d))
+}
+
+// wasiCPUState is the key of the container (*ctr) in the state of the peer
+// of a pod worker (startComponent).
+const wasiCPUState = "cpu"
+
+// The cpu message of a pod worker: the busy time of its instances since the
+// last cpu message (docs/wasi-sockets.md, AC2). A WebAssembly container has
+// the profile wasmProfile with 0 CPU, so this is all of its CPU time.
+func init() {
+	wasiHandle("cpu", func(p *wasiPeer, m wasiMsg) {
+		c, _ := p.State(wasiCPUState, func() any { return (*ctr)(nil) }).(*ctr)
+		d := time.Duration(m.Float("ms") * float64(time.Millisecond))
+		if c == nil || d <= 0 {
+			return
+		}
+		// acctOf takes c.w.mu: not on the event loop.
+		go acctOf(c).ChargeWorker(d)
+	})
+}
 
 type cpuCounter struct {
 	mu  sync.Mutex

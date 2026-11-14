@@ -852,12 +852,24 @@ Other messages:
 | --- | --- | --- |
 | `cpu` | worker to Go | busy time of the instances since the last `cpu` message (AC2) |
 
+The pod worker measures the busy time of its instances (`web/src/cpu.js`).
+An instance is busy from the start of an export call to its end, but not
+while it is suspended. jco makes each import that can suspend with
+`new WebAssembly.Suspending`. The pod worker wraps this constructor, so it
+knows when the instance suspends and when it continues. A thread that runs
+an instance runs no timers. So the pod worker also sends `cpu` from the
+functions of the imports: a loop of CPU work that reads a clock sends a
+`cpu` message each second. A loop without imports sends its time only at its
+end. The Go side charges the time to the container with `ChargeWorker`
+(`tabnode_acct.go`). This time did not run on the Go thread, so
+`nodeSysModel.sample` does not take it off the time of the control plane.
+
 CLI messages of a component:
 
 | Type | Direction | Contents |
 | --- | --- | --- |
 | `ready` | worker to Go | none. The first message of the pod worker. `wasi.js` uses it and does not send it to the Go side. |
-| `start` | Go to worker | the transpile result (section 8.2), arguments, environment, working directory |
+| `start` | Go to worker | the transpile result (section 8.2), arguments, environment, working directory, the copy of the files (`preopens`, section 8.10) |
 | `stdout`, `stderr` | worker to Go | bytes |
 | `stdin` | Go to worker | bytes, and a flag for the end of stdin |
 | `mem` | worker to Go | the size of the memory of the instances (CO6) |
@@ -1105,6 +1117,16 @@ implements `BrowserFilesystemAdapter` (`dist/browser/filesystem.d.ts`, line
 have the same guest paths as for a module. The adapter obeys the flag
 `readOnly` of each preopen (FS2). Writes change only the copy in the pod
 worker (FS3).
+
+The Go side sends the copy in the field `preopens` of `start`. It makes the
+copy before the pod worker starts. So a copy of more than 64 MiB fails with
+the text of `wasmPreopens`, the same as for a module (FS4). The adapter
+(`web/src/files.js`) keeps the files in the in-memory file system of the
+shim. A write to a read-only preopen gives the error code `io`. runwasi gives
+the same error for a read-only volume: Rust shows "I/O error (os error 29)".
+On runwasi, the writes to a volume stay in the volume, and a restart shows
+them. On the tab node, the writes end with the pod worker, as for a module
+(FS3, section 11).
 
 ### 8.11 Loopback table
 
@@ -1508,6 +1530,9 @@ These differences stay after this design. `README.md` must show them.
 | `connection-refused` for UDP between nodes | Not available | Available |
 | Socket options | They keep their values and have no effect | The kernel uses them |
 | ICMP | Only on one tab node, each echo request examined | Between all nodes, only the first echo request examined |
+| Writes of a WebAssembly container to a volume | They change only the copy in the worker. A restart does not show them. | They change the volume. A restart shows them. |
+| Files of a WebAssembly container | A copy of a maximum of 64 MiB | The volumes, no maximum |
+| CPU time of a component in `kubectl top` | Only from calls of imports and from waits. A loop without imports shows its time at its end. | The cgroup counts all time |
 | NodePort and hostPort for UDP with an endpoint on `tab` | Out of scope | The host network namespace does not reach tab pods (issue #61) |
 
 ## 12 Risks

@@ -7,6 +7,9 @@
 // This pod worker does not use Atomics.wait (section 8.5): a component
 // waits only with JSPI, so the worker continues to receive messages.
 
+import { browserFilesystem } from "./files.js";
+import { tickImports } from "./cpu.js";
+
 // The exit code of a trap, of an error result of run and of a component that
 // cannot instantiate: runwasi gives 137 for each error that is not an exit of
 // the component (section 9.2).
@@ -91,10 +94,13 @@ export async function loadBlob(js) {
   }
 }
 
-// runCommand runs the start message {component, args, env, cwd} and gives the
-// exit code. WASIShim is the class of the shim; load(js) gives the module of
-// the generated JavaScript.
-export async function runCommand({ component, args, env, cwd }, { peer, WASIShim, load = loadBlob }) {
+// runCommand runs the start message {component, args, env, cwd, preopens}
+// and gives the exit code. WASIShim is the class of the shim; load(js) gives
+// the module of the generated JavaScript. Memory is the class
+// InMemoryFilesystemAdapter of the shim: with it, the component gets the
+// files of preopens (files.js, FS1 to FS3). meter is the CPU meter of cpu.js
+// (AC2), or null.
+export async function runCommand({ component, args, env, cwd, preopens }, { peer, WASIShim, load = loadBlob, Memory = null, meter = null }) {
   const error = (text) => {
     const b = new TextEncoder().encode(text + "\n");
     peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
@@ -108,17 +114,23 @@ export async function runCommand({ component, args, env, cwd }, { peer, WASIShim
     initialCwd: cwd,
     stdout: sink(peer, "stdout"),
     stderr: sink(peer, "stderr"),
+    ...(Memory ? { browserFilesystem: browserFilesystem(preopens, Memory) } : {}),
   });
   let instance;
+  meter?.begin();
   try {
     const { instantiate } = await load(component.js);
-    instance = await instantiate((file) => component.modules[file], importObject(shim, component.imports));
+    const imports = importObject(shim, component.imports);
+    instance = await instantiate((file) => component.modules[file], meter ? tickImports(meter, imports) : imports);
   } catch (e) {
     if (e?.exitError) return e.code;
     return error(`the component cannot instantiate: ${e?.message ?? e}`);
+  } finally {
+    meter?.end();
   }
   const iface = instance[run] ?? instance.run;
   if (typeof iface?.run !== "function") return error(`the component has no function run in ${run}`);
+  meter?.begin();
   try {
     // run is in asyncMode.val.exports: it gives a promise.
     await iface.run();
@@ -129,5 +141,7 @@ export async function runCommand({ component, args, env, cwd }, { peer, WASIShim
     // jco throws a ComponentError with a payload for the error result of run.
     if (e !== null && typeof e === "object" && "payload" in e) return error("the component returned an error from wasi:cli/run");
     return error(`wasm trap: ${e?.message ?? e}`);
+  } finally {
+    meter?.end();
   }
 }

@@ -47,7 +47,7 @@ import (
 // (an ID of the container or a new ID), "-" (the message ends the ID).
 var wasiMessages = map[string]string{
 	"ready":        "w",
-	"start":        "g component:component args:strings env:strings cwd:path",
+	"start":        "g component:component args:strings env:strings cwd:path preopens?:preopens",
 	"exit":         "w code:code error?:text",
 	"stdout":       "w bytes:chunk",
 	"stderr":       "w bytes:chunk",
@@ -97,6 +97,7 @@ var wasiLimits = map[string]int{
 	"ips":         256,
 	"strings":     65536,
 	"string":      1 << 20,
+	"preopens":    256,
 }
 
 // The IDs of the pod worker are 1 to wasiGoIDs-1, those of the Go side
@@ -279,6 +280,15 @@ func makeWasiKinds() map[string]func(js.Value) bool {
 		"data":     func(v js.Value) bool { return jsBuf(v, l["data"]) },
 		"datagram": func(v js.Value) bool { return jsBuf(v, l["datagram"]) },
 		"body":     func(v js.Value) bool { return jsBuf(v, l["body"]) },
+		// The copy of wasmPreopens (section 8.10). Its size limit is
+		// wasmSnapshotLimit.
+		"preopens": func(v js.Value) bool {
+			return jsList(v, l["preopens"], func(p js.Value) bool {
+				return p.Type() == js.TypeObject && jsStr(p.Get("guest"), l["path"], func(s string) bool { return strings.HasPrefix(s, "/") }) &&
+					p.Get("readOnly").Type() == js.TypeBoolean &&
+					jsArrayCtor.Call("isArray", p.Get("files")).Bool() && jsArrayCtor.Call("isArray", p.Get("dirs")).Bool()
+			})
+		},
 		"component": func(v js.Value) bool {
 			return v.Type() == js.TypeObject && v.Get("js").Type() == js.TypeString && v.Get("modules").Type() == js.TypeObject
 		},

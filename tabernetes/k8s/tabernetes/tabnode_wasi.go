@@ -166,13 +166,13 @@ func (c *ctr) startWasm(ctx context.Context, logs *logBuf) (*process, error) {
 		all = append(all, "PWD="+dir)
 	}
 
-	if comp := res.Get("component"); comp.Type() == js.TypeObject {
-		return c.startComponent(ctx, logs, rt, comp, argv, all, dir)
-	}
-
+	// A module and a component get the same copy of the files (FS1, FS4).
 	preopens, err := wasmPreopens(root)
 	if err != nil {
 		return nil, err
+	}
+	if comp := res.Get("component"); comp.Type() == js.TypeObject {
+		return c.startComponent(ctx, logs, rt, comp, argv, all, dir, preopens)
 	}
 	opts := js.Global().Get("Object").New()
 	opts.Set("module", res.Get("module"))
@@ -921,7 +921,10 @@ func init() {
 // startComponent runs a command component in a pod worker of its own. The
 // pod worker gets the component and its CLI in the message "start"; all
 // other traffic goes through the messages of tabnode_wasi_msg.go.
-func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Value, argv, env []string, dir string) (*process, error) {
+//
+// preopens is the copy of wasmPreopens: the pod worker gives it to the
+// component through its files adapter (files.js, section 8.10).
+func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Value, argv, env []string, dir string, preopens js.Value) (*process, error) {
 	name := c.w.namespace + "/" + c.w.name + "/" + c.spec.Name
 	opts := js.Global().Get("Object").New()
 	opts.Set("component", true)
@@ -960,7 +963,9 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 		return nil
 	})
 	h.Call("onMessage", onMsg)
-	if err := peer.send("start", map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir}); err != nil {
+	// The cpu messages go to the account of this container (AC2).
+	peer.State(wasiCPUState, func() any { return c })
+	if err := peer.send("start", map[string]any{"component": comp, "args": argv, "env": env, "cwd": dir, "preopens": preopens}); err != nil {
 		peer.cli.exit(128, "the pod worker cannot start: "+err.Error())
 		return p, nil
 	}

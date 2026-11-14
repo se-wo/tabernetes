@@ -184,7 +184,18 @@ A container is not a process:
   of runwasi's wasmtime shim) run a WASI preview 1 module in a Web Worker of
   their own (`tabnode_wasi.go`, `web/src/wasi*.js`, with
   [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim)). Workers
-  are real threads: such a pod does not take CPU from the control plane. The
+  are real threads: such a pod does not take CPU from the control plane.
+  A WASI preview 2 command component (an export of `wasi:cli/run`) runs on the
+  tab node and on node workers too, without network: a transpile worker
+  transpiles it with jco one time for each image, and a pod worker runs it with
+  JavaScript Promise Integration and the browser shim of jco
+  (`web/src/component*.js`, `docs/wasi-sockets.md`). It gets the arguments,
+  the environment, stdin, stdout and stderr, and the same copy of its files as
+  a module (`web/src/files.js`): read-only volumes stay read-only, writes end
+  with the pod worker, and a copy of more than 64 MiB fails. Its pod worker
+  sends the busy time of the instance to `kubectl top` and the size of its
+  memory to `limits.memory`. Proxy components (`wasi:http`) and sockets come
+  in later phases. The
   browser cannot pull from ghcr.io or Docker Hub (no CORS headers), so the
   page ships an OCI mirror (`wasm-images/`, `images.txt`) next to it; other
   registries are tried over HTTPS. On a Docker node the same manifest runs
@@ -391,7 +402,8 @@ with `OOMKilled` and exit code 137, and restarts by its restart policy. What
 counts: the base size of its image, the memory `stress` and `stress-ng` hold
 (`polinux/stress`, `progrium/stress`, `alexeiled/stress-ng`), files in
 `emptyDir` volumes with `medium: Memory`, and the linear memory of a
-WebAssembly container. A container without a limit is never killed.
+WebAssembly container (a module or the instance of a component). A
+container without a limit is never killed.
 
 ### WebGPU through DRA
 
@@ -805,10 +817,19 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container
   has canonical mode only: full screen programs in a container (vi, top)
-  see lines, not keys. UDP services,
-  WASI preview 2 components and sockets in WebAssembly pods are not
-  supported. A shell loop without any command (`for ((;;)); do x=1; done`)
-  still freezes the tab.
+  see lines, not keys. UDP services, sockets in WebAssembly pods and WASI
+  preview 2 proxy components (`wasi:http`) are not supported. A shell loop
+  without any command (`for ((;;)); do x=1; done`) still freezes the tab.
+- WASI preview 2 components need JavaScript Promise Integration (Chrome and
+  Edge 137, Firefox 153, Safari 27 or newer); without it the pod gets
+  `CreateContainerError`. Differences from runwasi on a Docker node
+  (`docs/wasi-sockets.md`, section 11): a component has no network yet; the
+  writes of a WebAssembly container to a volume stay in its worker and end
+  with it, so a restart does not see them; the files of a container are a
+  copy of at most 64 MiB; a component in a loop of CPU work receives no
+  messages, and only a stop of the container ends it; it shows CPU in
+  `kubectl top` only when it calls an import (a clock, for example) or
+  waits.
 - The printed `docker run` works when Docker runs on the same machine as the
   browser. For Docker on another machine in the LAN, publish the port on all
   interfaces (`-p 50001:50001/udp` for the first node) and pass
