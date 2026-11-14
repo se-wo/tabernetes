@@ -1,4 +1,4 @@
-//! A proxy component for phase 0 of ../../../wasi-sockets.md. The path of
+//! A proxy component (section 10.1 of ../../../docs/wasi-sockets.md). The path of
 //! the request selects the behavior:
 //!
 //!   /context     environment, arguments, preopens, REQUEST_ID, a counter

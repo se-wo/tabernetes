@@ -1,4 +1,4 @@
-//! An echo server for phase 0, item 8: TCP or UDP ($PROTO, default tcp) on
+//! An echo server (section 10.1 of ../../../docs/wasi-sockets.md): TCP or UDP ($PROTO, default tcp) on
 //! $ADDR (default 0.0.0.0:7). Each answer starts with "echo ". The server
 //! handles one TCP connection after the other: wasm32-wasip2 has no threads.
 use std::io::{BufRead, BufReader, Write};
