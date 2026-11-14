@@ -263,6 +263,14 @@ func (r restBytes) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
+// WrappedRoundTripper gives the wrapped transport, as every client-go wrapper
+// does. The SPDY round tripper looks through the wrappers for the TLS config
+// of its UpgradeTransport: the apiserver translates the WebSocket of kubectl
+// exec and attach into SPDY to the node with the transport of its kubelet
+// client, and fails without the TLS config ("does not expose TLS client
+// config").
+func (r restBytes) WrappedRoundTripper() http.RoundTripper { return r.next }
+
 type countingBody struct {
 	io.ReadCloser
 	comp string
