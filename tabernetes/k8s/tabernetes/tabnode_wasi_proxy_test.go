@@ -590,17 +590,6 @@ func TestProxyNoTimeout(t *testing.T) {
 	})
 }
 
-// W2.1b reads the context of the container from the peer.
-func TestWasiPeerContext(t *testing.T) {
-	pt := newProxyTest(t)
-	if ctx := wasiPeerContext(pt.peer); ctx != pt.ctx || procOf(ctx) == nil {
-		t.Errorf("wasiPeerContext = %v", ctx)
-	}
-	if wasiPeerContext(newWasiPeer("x", func(_, _ js.Value) {})) != nil {
-		t.Error("a peer without a proxy server has a context")
-	}
-}
-
 // The proxy world of componentStatus: wasi:http/types and
 // wasi:http/outgoing-handler in addition to the imports of the command
 // world, and no function. An unknown import keeps the status of runwasi.

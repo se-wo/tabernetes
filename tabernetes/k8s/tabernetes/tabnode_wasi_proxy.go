@@ -148,8 +148,8 @@ const wasiProxyState = "proxy"
 
 // wasiProxy is the proxy server of one container: one pod worker.
 type wasiProxy struct {
-	// ctx is the context of the container, with its procEnv. It ends when
-	// the container stops.
+	// ctx is the context of the container, with its procEnv (the same as
+	// wasiPeerCtx). It ends when the container stops.
 	ctx  context.Context
 	peer *wasiPeer
 	// exit ends the container with an exit code (PX26).
@@ -166,17 +166,6 @@ type wasiProxy struct {
 type proxyResult struct {
 	msg   js.Value // the response message, if not abort
 	abort bool     // close the connection with no response
-}
-
-// wasiPeerContext gives the context of the container of a proxy component:
-// it has the procEnv of the pod (procOf) and the account of the container
-// (acctFrom). It is nil for a peer without a proxy server. The handlers of
-// client requests (fetch, W2.1b) use it.
-func wasiPeerContext(p *wasiPeer) context.Context {
-	if px := proxyOf(p); px != nil {
-		return px.ctx
-	}
-	return nil
 }
 
 func proxyOf(p *wasiPeer) *wasiProxy {

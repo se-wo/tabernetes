@@ -993,8 +993,8 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 	var proxyLn net.Listener
 	var proxyCtx context.Context
 	if world == "proxy" {
-		_, ip := c.w.podInfo()
-		proxyCtx = withProc(ctx, &procEnv{w: c.w, c: c, ip: ip, cpu: newThrottle(c.spec.Resources), proc: p})
+		proxyCtx = c.wasiPodCtx(ctx)
+		ip := procOf(proxyCtx).ip
 		var why string
 		proxyLn, env, why = startProxy(proxyCtx, env, ip)
 		if why != "" {
@@ -1041,6 +1041,13 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 	h.Call("onMessage", onMsg)
 	// The cpu messages go to the account of this container (AC2).
 	peer.State(wasiCPUState, func() any { return c })
+	// The pod of the client requests (tabnode_wasi_fetch.go) and of the
+	// proxy server.
+	podCtx := proxyCtx
+	if podCtx == nil {
+		podCtx = c.wasiPodCtx(ctx)
+	}
+	peer.State(wasiCtxState, func() any { return podCtx })
 	var px *wasiProxy
 	if proxyLn != nil {
 		px = newWasiProxy(proxyCtx, peer, func(code int) { peer.cli.exit(code, "") })
