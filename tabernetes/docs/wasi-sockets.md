@@ -1194,6 +1194,43 @@ For client requests, the HTTP path sends a `fetch` message. The Go side
 does the client request with the cluster client and sends `fetched`. The
 error code in `fetched` goes to the component without a change (CR9).
 
+The pod worker (`web/src/component.js` and `web/src/http.js`) also obeys
+these rules:
+
+- Before the first request, the pod worker makes one instance without a
+  request and discards it. runwasi also links the component before it
+  serves. If a function of an import is not there, the container exits with
+  137 and the text of CO12.
+- If an instantiation fails for a different cause than memory, the
+  `response` has the error code `trap`.
+- If the browser cannot make the memory of an instance (PX34), the request
+  goes back to the front of the queue. It starts again when another instance
+  of the container ends. If no instance of the container runs, it starts
+  again after 1 second.
+- If the component sets a response and its body is complete, the pod worker
+  sends this response, also if the instance then traps. runwasi does the
+  same, because it sends the response when the component sets it.
+- If the component sets a response and does not finish its body, the
+  `response` has the error code `HTTP-response-incomplete`.
+- If a `response` or a `fetch` fails the examination of `wasi_messages.js`
+  (for example, more than 1,000 header lines), the pod worker sends
+  `response` with the error code `HTTP-response-header-section-size`. The
+  component gets `HTTP-request-header-section-size` for the client request.
+- The pod worker gets the authority from the `url` of `request` up to the
+  first `/` or `*` after `http://`. The rest is the request target.
+- The pod worker also removes the 9 headers of fact 20 from `request`. A
+  component cannot set these headers. The error code is `forbidden`, as on
+  wasmtime.
+- A client request without a scheme uses `https`, as wasmtime. A client
+  request without an authority fails with `HTTP-request-URI-invalid`.
+- The pod worker sends `fetch` when the request body is complete. If the
+  component discards the client request before this, the pod worker sends
+  no `fetch`.
+- The pod worker ignores the timeouts of `request-options`. The messages
+  have no field for them. The Go side uses its timeouts (CR8, CR11).
+- An error code in `fetched` that `wasi:http` does not have goes to the
+  component as `internal-error` with the name of the code as its text.
+
 ### 8.7 UDP table
 
 `tabnode_udp.go` (new) keeps the UDP sockets of all pods of one tab node.
