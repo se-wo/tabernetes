@@ -6,8 +6,10 @@ containerd and runc. `docker-node-check/` does that without a person at the
 keyboard: headless Chromium runs the page, a script types `join`, starts the
 node container and pastes its `accept` line.
 
-It is not a CI job. It needs a Docker daemon that can run a privileged or
-nearly privileged container, a built site and about 15 minutes.
+It needs a Docker daemon that can run a privileged or nearly privileged
+container, a built site and about 15 minutes. The workflow
+`.github/workflows/docker-check.yaml` runs the steps `images`, `join` and
+`wasi-*` on a GitHub runner.
 
 ## What is in it
 
@@ -18,9 +20,14 @@ nearly privileged container, a built site and about 15 minutes.
   `accept '<line>'` drive the join, `status`, `screen` and `logs` show the
   status line, the terminal and the control plane log.
 - `check.sh` runs the steps `images join apply coredns storage metrics
-  ingress sanity leave` and prints PASS, FAIL or SKIP for each.
+  ingress sanity wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp
+  leave` and prints PASS, FAIL or SKIP for each.
 - `manifests.yaml` has the test objects. All pods run on `node-1` and use
   busybox.
+- `wasi-*.sh` and `wasi-*.yaml` are the steps for WebAssembly components and
+  their objects, see section 10.2 of `wasi-sockets.md`. `wasi-images` imports
+  the test images from the OCI mirror of the built site (`OCI`, default
+  `.build/site/oci`).
 
 ## How to run it
 
