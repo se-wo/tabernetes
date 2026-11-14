@@ -186,19 +186,19 @@ func TestUDPQueueFull(t *testing.T) {
 	}
 }
 
-// UD8, UD9, fact 3 of W4.5a: a connected socket that sends to a port
-// without a socket gets ECONNREFUSED one time, from the next read or the
-// next write. A write that takes it sends nothing. An unconnected socket
-// gets no error. A datagram to an IP of another node is dropped.
+// UD8, UD9, fact 3 of W4.5a (runwasi): a connected socket that sends to a
+// port without a socket gets ECONNREFUSED one time, from the next write
+// only. A read never gets it. A write that takes it sends nothing. An
+// unconnected socket gets no error. A
+// datagram to an IP of another node is dropped.
 func TestUDPFact3Refused(t *testing.T) {
-	if !udpPendingOnRead || !udpPendingOnWrite || udpPendingWriteSends || udpRefuseUnconnected {
-		t.Fatal("the pending error differs from section 8.3.3, rule 7")
+	if udpPendingOnRead || !udpPendingOnWrite || udpPendingWriteSends || udpRefuseUnconnected {
+		t.Fatal("the pending error differs from fact 3 of runwasi (section 8.3.3, rule 7)")
 	}
 	udpTabNode(t)
 	ip, dead := nextLoopbackIP(), nextLoopbackIP()
 	ctx := podCtx(t, ip)
 
-	// The next read takes it.
 	c, err := dialClusterUDP(ctx, dead+":9")
 	if err != nil {
 		t.Fatal(err)
@@ -207,31 +207,11 @@ func TestUDPFact3Refused(t *testing.T) {
 	if n, err := c.Write([]byte("a")); err != nil || n != 1 {
 		t.Fatalf("first write: %d %v", n, err)
 	}
-	if _, err := c.Read(make([]byte, 8)); !errors.Is(err, syscall.ECONNREFUSED) {
-		t.Fatalf("read: %v, want ECONNREFUSED", err)
-	}
-	udpNothing(t, c) // one time only
-
-	// A read that waits wakes up with it.
-	got := make(chan error, 1)
-	go func() {
-		_, err := c.Read(make([]byte, 8))
-		got <- err
-	}()
-	time.Sleep(10 * time.Millisecond)
-	c.Write([]byte("b"))
-	select {
-	case err := <-got:
-		if !errors.Is(err, syscall.ECONNREFUSED) {
-			t.Errorf("waiting read: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the waiting read did not wake up")
-	}
+	// A read does not take it.
+	udpNothing(t, c)
 
 	// The next write takes it and sends nothing.
 	srv := udpListen(t, podCtx(t, nextLoopbackIP()), ":0")
-	c.Write([]byte("c"))
 	if n, err := c.WriteTo([]byte("lost"), srv.LocalAddr()); !errors.Is(err, syscall.ECONNREFUSED) || n != 0 {
 		t.Fatalf("write: %d %v, want ECONNREFUSED", n, err)
 	}
@@ -274,7 +254,7 @@ func TestUDPFact3Refused(t *testing.T) {
 	}
 	defer n.Close()
 	n.Write([]byte("x"))
-	if _, err := n.Read(make([]byte, 8)); !errors.Is(err, syscall.ECONNREFUSED) {
+	if _, err := n.Write([]byte("x")); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("node IP: %v", err)
 	}
 }
@@ -449,7 +429,7 @@ func TestUDPLoopback(t *testing.T) {
 	defer c.Close()
 	c.Write([]byte("other"))
 	udpNothing(t, lo)
-	if _, err := c.Read(make([]byte, 8)); !errors.Is(err, syscall.ECONNREFUSED) {
+	if _, err := c.Write([]byte("other")); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("connected sender: %v", err)
 	}
 	// The terminal (the node IP) is refused too.

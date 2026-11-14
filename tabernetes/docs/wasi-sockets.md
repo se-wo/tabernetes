@@ -1593,8 +1593,9 @@ The UDP table does these steps for each datagram:
 
 For "refuse", a connected sender gets one pending `ECONNREFUSED`, if the
 destination is its remote address (UD9, UD11). Exactly one call takes it:
-the next receive or the next send. A send that takes it does not send its
-datagram, as on Linux. A pending error also stops a receive that waits.
+the next send. A receive does not take it, as on runwasi (package W4.5a).
+The send that takes it does not send its datagram. Two refused datagrams
+before the next send give one error.
 
 The other programs of the tab node use the UDP table:
 

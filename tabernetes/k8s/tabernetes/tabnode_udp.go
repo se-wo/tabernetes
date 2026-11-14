@@ -45,9 +45,9 @@ const (
 	udpBindExclusive = true
 
 	// udpPendingOnRead and udpPendingOnWrite: the calls that can take the
-	// pending error of a refused datagram (fact 3, rule 7). Linux gives
-	// sk_err to the next receive or send.
-	udpPendingOnRead  = true
+	// pending error of a refused datagram (fact 3, rule 7). On runwasi,
+	// only the next send gets connection-refused; receive never gets it.
+	udpPendingOnRead  = false
 	udpPendingOnWrite = true
 
 	// udpPendingWriteSends: a send that takes the pending error also sends
@@ -264,12 +264,13 @@ func (c *udpConn) localIP(a netip.AddrPort) netip.AddrPort {
 
 // After a refused datagram of a connected socket (UD9, UD11, UD21), the
 // socket has one pending error. Exactly one call takes it: the next
-// ReadFrom, Read, WriteTo or Write gives an error that wraps
-// syscall.ECONNREFUSED, and the pending error is then gone. A WriteTo or
-// Write that takes it does not send its datagram (Linux; W4.5a records it).
+// WriteTo or Write gives an error that wraps syscall.ECONNREFUSED, and the
+// pending error is then gone. It does not send its datagram. ReadFrom and
+// Read never take it (fact 3 of runwasi, udpPendingOnRead). Two refused
+// datagrams before the next send give one error.
 
 // ReadFrom gives the next datagram and its source (a *net.UDPAddr), after
-// udpRoute, or the pending error.
+// udpRoute.
 func (c *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, from, err := c.read(b)
 	if err != nil {
@@ -439,7 +440,9 @@ func (c *udpConn) refused(dst netip.AddrPort) {
 	}
 	if udpRefuseUnconnected || (c.remote.IsValid() && dst == c.remote) {
 		c.pending = syscall.ECONNREFUSED
-		c.wakeLocked()
+		if udpPendingOnRead {
+			c.wakeLocked()
+		}
 	}
 }
 
