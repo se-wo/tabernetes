@@ -7,8 +7,13 @@
 //   node site/third-party.mjs js <web dir> <out.json> <entry>...
 //     The npm packages that esbuild bundles from the entries, and the Helm
 //     charts of charts/bitnami/ (adapted from Bitnami's, Apache-2.0).
+//   node site/third-party.mjs rust <Cargo.toml> <target> <out.json>
+//     The crates compiled into the components of wasm-images/rust/ (the
+//     dependencies of the workspace for <target>, without build scripts and
+//     proc macros, which do not end up in the module), and the Rust standard
+//     library.
 //
-// build.mjs merges both into THIRD_PARTY_LICENSES.txt. Tabernetes' own code
+// build.mjs merges them into THIRD_PARTY_LICENSES.txt. Tabernetes' own code
 // and text are CC BY-NC-SA 4.0 (LICENSE), the code listed here keeps its own
 // license.
 import { execFileSync } from "node:child_process";
@@ -97,7 +102,7 @@ function goModules(k8s, pkg, out) {
 function jsPackages(web, out, entryPoints) {
   web = path.resolve(web);
   const esbuild = createRequire(path.join(web, "package.json"))("esbuild");
-  const pkgs = new Map(); // dir -> package.json
+  const pkgs = new Map(); // dir -> Set of the bundled files of the package
   for (const entry of entryPoints) {
     const r = esbuild.buildSync({
       entryPoints: [path.resolve(web, entry)], bundle: true, write: false, metafile: true, outdir: "/nonexistent",
@@ -107,11 +112,15 @@ function jsPackages(web, out, entryPoints) {
     });
     for (const input of Object.keys(r.metafile.inputs)) {
       const m = /^(.*node_modules\/)((?:@[^/]+\/)?[^/]+)\//.exec(input);
-      if (m) pkgs.set(fs.realpathSync(path.join(web, m[1], m[2])), null);
+      if (!m) continue;
+      const dir = fs.realpathSync(path.join(web, m[1], m[2]));
+      if (!pkgs.has(dir)) pkgs.set(dir, new Set());
+      pkgs.get(dir).add(fs.realpathSync(path.join(web, input)));
     }
   }
   // xterm.css is copied from the xterm package.
-  pkgs.set(fs.realpathSync(path.join(web, "node_modules/@xterm/xterm")), null);
+  const xterm = fs.realpathSync(path.join(web, "node_modules/@xterm/xterm"));
+  if (!pkgs.has(xterm)) pkgs.set(xterm, new Set());
   const pjs = new Map([...pkgs.keys()].map((dir) => [dir, JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"))]));
   const repoOf = (pj) => (typeof pj.repository === "string" ? pj.repository : pj.repository?.url);
   const entries = [...pkgs.keys()].sort().map((dir) => {
@@ -126,10 +135,38 @@ function jsPackages(web, out, entryPoints) {
       if (sibling) files = licenseFiles(sibling[0]);
     }
     if (!files.length) throw new Error(`no license file in ${dir} (package.json says ${pj.license})`);
+    const rel = (f) => path.relative(dir, f).split(path.sep).join("/");
+    const extra = new Set();
+    // License texts that the license file of the package points to by path
+    // (@novnc/novnc: "The following license texts are included:
+    // docs/LICENSE.MPL-2.0 ...").
+    for (const f of files) {
+      for (const [ref] of read(f).matchAll(/[\w.-]+(?:\/[\w.-]+)+/g)) {
+        const p = path.join(dir, ref);
+        if (LICENSE_FILE.test(path.basename(p)) && fs.existsSync(p) && fs.statSync(p).isFile()) extra.add(p);
+      }
+    }
+    // Code vendored into the package with a license file of its own, between
+    // a bundled file and the package root (@novnc/novnc: vendor/pako/LICENSE).
+    for (const input of pkgs.get(dir)) {
+      for (let d = path.dirname(input); d.startsWith(dir + path.sep); d = path.dirname(d)) licenseFiles(d).forEach((f) => extra.add(f));
+    }
+    files.forEach((f) => extra.delete(f));
+    const licenses = files.map((f) => ({ name: path.basename(f), text: read(f) }));
+    for (const f of [...extra].sort()) licenses.push({ name: `${rel(f)} (${pj.name})`, text: read(f) });
+    // A bundled file whose own header carries a copyright notice under another
+    // license than the package's (@novnc/novnc: core/crypto/des.js). esbuild
+    // --minify drops the header, so the notice goes here.
+    const lic = String(pj.license || "").replace(/[()]/g, "").split(/\s+(?:OR|AND|WITH)\s+/)[0].split("-")[0];
+    for (const input of [...pkgs.get(dir)].sort()) {
+      const h = /^\s*\/\*([^]*?)\*\//.exec(fs.readFileSync(input, "utf8").replace(/^#!.*\n/, ""));
+      if (!h || !/copyright/i.test(h[1]) || /@license|@preserve/.test(h[1]) || (lic && new RegExp(`\\b${lic}\\b`).test(h[1]))) continue;
+      licenses.push({ name: `${rel(input)} (${pj.name}, notice in the file)`, text: h[1].split("\n").map((l) => l.replace(/^\s?\*\s?/, "")).join("\n").trim() });
+    }
     return {
       name: pj.name, version: pj.version, license: pj.license,
       url: pj.homepage || repo?.replace(/^git\+/, "") || `https://www.npmjs.com/package/${pj.name}`,
-      files: files.map((f) => ({ name: path.basename(f), text: read(f) })),
+      files: licenses,
     };
   });
   // The Helm charts that helm in the terminal installs (charts/bitnami/) are
@@ -147,10 +184,56 @@ function jsPackages(web, out, entryPoints) {
   fs.writeFileSync(out, JSON.stringify({ title: "npm packages bundled into the page (tabernetes.js, workers, xterm.css) and the Helm charts in charts/", entries }, null, 1));
 }
 
+function rustCrates(manifest, target, out) {
+  manifest = path.resolve(manifest);
+  const meta = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--filter-platform", target, "--manifest-path", manifest],
+    { cwd: path.dirname(manifest), encoding: "utf8", maxBuffer: 64 << 20 }));
+  const pkgs = new Map(meta.packages.map((p) => [p.id, p]));
+  const nodes = new Map(meta.resolve.nodes.map((n) => [n.id, n]));
+  const procMacro = (p) => p.targets.some((t) => t.kind.includes("proc-macro"));
+  // The normal dependencies of the workspace members, transitively; a proc
+  // macro runs in the compiler, so neither it nor its dependencies are in the
+  // module.
+  const seen = new Set();
+  const todo = [...meta.workspace_members];
+  while (todo.length) {
+    const id = todo.pop();
+    if (seen.has(id) || procMacro(pkgs.get(id))) continue;
+    seen.add(id);
+    for (const d of nodes.get(id).deps) if (d.dep_kinds.some((k) => k.kind === null)) todo.push(d.pkg);
+  }
+  const entries = [];
+  // The standard library is dual-licensed MIT OR Apache-2.0 (the
+  // COPYRIGHT-library.html of the toolchain), used here under Apache-2.0: the
+  // MIT.txt of the toolchain is only the SPDX template, without a copyright line.
+  const sysroot = execFileSync("rustc", ["--print", "sysroot"], { encoding: "utf8" }).trim();
+  const rustc = execFileSync("rustc", ["--version"], { encoding: "utf8" }).trim();
+  const apache = path.join(sysroot, "share", "doc", "rust", "licenses", "Apache-2.0.txt");
+  if (!fs.existsSync(apache)) throw new Error(`no license text of the Rust standard library: ${apache}`);
+  entries.push({
+    name: "Rust standard library", version: rustc, license: "MIT OR Apache-2.0, used under Apache-2.0",
+    url: "https://github.com/rust-lang/rust",
+    files: [{ name: "Rust Apache-2.0", text: read(apache) }],
+  });
+  const missing = [];
+  for (const id of [...seen].filter((id) => !meta.workspace_members.includes(id)).sort()) {
+    const p = pkgs.get(id);
+    const files = licenseFiles(path.dirname(p.manifest_path));
+    if (!files.length) { missing.push(p.name); continue; }
+    entries.push({
+      name: p.name, version: p.version, license: p.license, url: p.repository || `https://crates.io/crates/${p.name}`,
+      files: files.map((f) => ({ name: path.basename(f), text: read(f) })),
+    });
+  }
+  if (missing.length) throw new Error(`no license file found for: ${missing.join(", ")}`);
+  fs.writeFileSync(out, JSON.stringify({ title: `Rust crates compiled into the components of oci/ (${target})`, entries }, null, 1));
+}
+
 const [mode, ...args] = process.argv.slice(2);
 if (mode === "go" && args.length === 3) goModules(...args);
 else if (mode === "js" && args.length >= 3) jsPackages(args[0], args[1], args.slice(2));
+else if (mode === "rust" && args.length === 3) rustCrates(...args);
 else {
-  console.error("usage: third-party.mjs go <kubernetes checkout> <package> <out.json> | js <web dir> <out.json> <entry>...");
+  console.error("usage: third-party.mjs go <kubernetes checkout> <package> <out.json> | js <web dir> <out.json> <entry>... | rust <Cargo.toml> <target> <out.json>");
   process.exit(2);
 }

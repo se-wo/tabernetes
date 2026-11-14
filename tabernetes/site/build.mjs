@@ -81,7 +81,14 @@ const jsJSON = path.join(assets, "THIRD_PARTY_LICENSES.js.json");
 execFileSync(process.execPath, [path.join(here, "third-party.mjs"), "js", path.join(tab, "web"), jsJSON,
   "src/index.js", "src/unzstd.js", ...workers.map((w) => `src/${w}`), "src/transpile.worker.js"], { stdio: "inherit" });
 const jsLicenses = JSON.parse(fs.readFileSync(jsJSON, "utf8"));
-fs.writeFileSync(path.join(out, "THIRD_PARTY_LICENSES.txt"), thirdParty([goLicenses, jsLicenses], hasImages && imageList()));
+const groups = [goLicenses, jsLicenses, manifests(goLicenses)];
+// The Rust crates of the components in oci/, if build.sh built any.
+if (hasImages && imageLines().some(([kind]) => kind === "component")) {
+  const rustJSON = path.join(assets, "THIRD_PARTY_LICENSES.rust.json");
+  execFileSync(process.execPath, [path.join(here, "third-party.mjs"), "rust", path.join(images, "rust", "Cargo.toml"), "wasm32-wasip2", rustJSON], { stdio: "inherit" });
+  groups.push(JSON.parse(fs.readFileSync(rustJSON, "utf8")));
+}
+fs.writeFileSync(path.join(out, "THIRD_PARTY_LICENSES.txt"), thirdParty(groups, hasImages && imageList()));
 
 // ---- the page ----
 const md = fs.readFileSync(path.join(here, "index.md"), "utf8");
@@ -129,19 +136,48 @@ function markdown(src, shortcodes) {
   }).join("\n\n");
 }
 
-// imageList describes the images of wasm-images/images.txt for
-// THIRD_PARTY_LICENSES.txt.
-function imageList() {
-  const lines = fs.readFileSync(path.join(images, "images.txt"), "utf8").split("\n")
+// imageLines are the images of wasm-images/images.txt that made it into the
+// mirror (<mirror>/<repository>/manifests/<tag>), as [kind, ref, src].
+function imageLines() {
+  return fs.readFileSync(path.join(images, "images.txt"), "utf8").split("\n")
     .map((l) => l.trim().split(/\s+/)).filter(([kind]) => kind && !kind.startsWith("#"))
-    // Only what made it into the mirror: <mirror>/<repository>/manifests/<tag>.
     .filter(([, ref]) => {
       const m = /^(.*?)(?::([\w.-]+))?$/.exec(ref);
       return fs.existsSync(path.join(out, "oci", m[1], "manifests", m[2] || "latest"));
     });
-  return lines.map(([kind, ref, src]) => kind === "mirror"
-    ? `${ref}\n  copied unchanged from its registry; it keeps the license of its source.\n`
-    : `${ref}\n  built from tabernetes/wasm-images/${src} with Go (GOOS=wasip1): Tabernetes code\n  (CC BY-NC-SA 4.0) and the Go standard library (license [1] and [2] below).\n`).join("");
+}
+
+// imageList describes the images of the mirror for THIRD_PARTY_LICENSES.txt.
+function imageList() {
+  const describe = {
+    mirror: () => "copied unchanged from its registry; it keeps the license of its source.",
+    component: (src) => `built from tabernetes/wasm-images/rust/${src} with Rust (wasm32-wasip2): Tabernetes code\n  (CC BY-NC-SA 4.0), the Rust standard library and the crates listed under\n  "Rust crates compiled into the components of oci/" above.`,
+    // image and artifact
+    go: (src) => `built from tabernetes/wasm-images/${src} with Go (GOOS=wasip1): Tabernetes code\n  (CC BY-NC-SA 4.0) and the Go standard library (listed first above).`,
+  };
+  return imageLines().map(([kind, ref, src]) => `${ref}\n  ${(describe[kind] || describe.go)(src)}\n`).join("");
+}
+
+// manifests lists the upstream Kubernetes manifests that tabernetes.wasm
+// embeds (k8s/tabernetes/addons/): adapted copies, all under the Apache
+// License 2.0, whose text comes from the Kubernetes entry of the Go modules.
+function manifests(go) {
+  const apache = go.entries.find((e) => e.name === "k8s.io/kubernetes")?.files.find((f) => f.name === "LICENSE");
+  if (!apache || !/Apache License/.test(apache.text)) throw new Error("no Apache License in the k8s.io/kubernetes entry of the Go modules");
+  const file = { name: "LICENSE", text: apache.text };
+  const m = (name, url, what) => ({ name: `${name}: ${what}`, version: "", license: "Apache-2.0", url, files: [file] });
+  return {
+    title: "Kubernetes manifests embedded in tabernetes.wasm (adapted from their projects)",
+    entries: [
+      m("coredns.yaml, kube-proxy.yaml", "https://github.com/kubernetes/kubernetes", "CoreDNS and kube-proxy as kubeadm deploys them"),
+      m("flannel.yaml", "https://github.com/flannel-io/flannel", "kube-flannel.yml of flannel"),
+      m("ingress-nginx.yaml", "https://github.com/kubernetes/ingress-nginx", "the bare-metal deploy.yaml of ingress-nginx"),
+      m("kube-network-policies.yaml", "https://github.com/kubernetes-sigs/kube-network-policies", "install-cnp.yaml of kube-network-policies"),
+      m("clusternetworkpolicy-crd.yaml", "https://github.com/kubernetes-sigs/network-policy-api", "the ClusterNetworkPolicy CRD of network-policy-api"),
+      m("local-path-storage.yaml", "https://github.com/rancher/local-path-provisioner", "local-path-storage.yaml of local-path-provisioner"),
+      m("metrics-server.yaml", "https://github.com/kubernetes-sigs/metrics-server", "components.yaml of metrics-server"),
+    ],
+  };
 }
 
 // thirdParty writes THIRD_PARTY_LICENSES.txt: the list of components, then

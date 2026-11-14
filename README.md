@@ -67,13 +67,19 @@ What that means if you use or share this work:
 
 Third-party software keeps its own license and is not covered by the
 Creative Commons license: Kubernetes (Apache License 2.0), the Go standard
-library (BSD-3-Clause), mvdan.cc/sh (BSD-3-Clause), the other Go modules
-compiled into the binary, the JavaScript packages of the terminal
-(xterm.js and fzstd, MIT; noVNC, MPL-2.0) and the Helm charts of
-`tabernetes/charts/bitnami/` (nginx, apache and redis, reduced and modified
-from [Bitnami's charts](https://github.com/bitnami/charts), Apache License
-2.0, copyright Broadcom, Inc.). The site build collects the list
-and the license texts into `THIRD_PARTY_LICENSES.txt` next to the page
+library (BSD-3-Clause), mvdan.cc/sh (BSD-3-Clause), Helm (Apache License 2.0)
+and the other Go modules compiled into the binary; the JavaScript packages of
+the terminal (xterm.js and fzstd, MIT; browser_wasi_shim, MIT or
+Apache-2.0; jco and preview2-shim, Apache-2.0 WITH LLVM-exception; noVNC,
+MPL-2.0, with code under MIT and BSD licenses); the upstream manifests the
+binary embeds (`tabernetes/k8s/tabernetes/addons/`: CoreDNS, kube-proxy,
+flannel, ingress-nginx, kube-network-policies, local-path-provisioner and
+metrics-server, adapted, Apache License 2.0); the Rust standard library and
+crates in the test components of `tabernetes/wasm-images/rust/`; and the Helm
+charts of `tabernetes/charts/bitnami/` (nginx, apache and redis, reduced and
+modified from [Bitnami's charts](https://github.com/bitnami/charts), Apache
+License 2.0, copyright Broadcom, Inc.). The site build collects the list and
+the license texts into `THIRD_PARTY_LICENSES.txt` next to the page
 (`tabernetes/site/third-party.mjs`); the footer of the page links it.
 
 ## Build
