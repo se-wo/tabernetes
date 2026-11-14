@@ -77,6 +77,9 @@ jobs:
           # Ubuntu 23.10 and later: AppArmor denies the user namespace of
           # the node agent ("fork/exec /proc/self/exe: permission denied").
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # flannel and the NetworkPolicy between pods of the node need
+          # br_netfilter; the runner does not load it.
+          sudo modprobe br_netfilter
 
       # The processes stay for the next steps of the job.
       - name: Start the page

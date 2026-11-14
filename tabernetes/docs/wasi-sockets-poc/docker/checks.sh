@@ -31,7 +31,8 @@ for _ in $(seq 60); do
 done
 if ! tab 'kubectl get pod client' | grep -q Running; then
 	echo "the pod client does not run: no checks"
-	tab 'kubectl describe pod client | tail -20; kubectl describe pod proxy | tail -10'
+	tab 'kubectl describe pod client | tail -20; kubectl -n kube-flannel get pods -o wide'
+	tab "kubectl -n kube-flannel logs --tail 20 \$(kubectl -n kube-flannel get pods --field-selector spec.nodeName=$NODE -o name)"
 	docker exec "$N" crictl pods 2>&1 | head -20
 	docker exec "$N" sh -c 'tail -40 /var/log/kubelet.log' 2>&1
 	docker logs "$N" 2>&1 | tail -40
