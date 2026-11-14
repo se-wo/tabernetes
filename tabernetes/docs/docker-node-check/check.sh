@@ -157,7 +157,35 @@ step_join() {
 		run sh -c "docker save $IMPORT_IMAGES | docker exec -i $N ctr -n k8s.io images import -"
 	fi
 	run docker exec "$N" crictl images
-	result PASS "node-1 Ready"
+	if ! coredns_on_node; then
+		result FAIL "node-1 Ready, but CoreDNS does not run only on node-1 after 300 s: pods of node-1 lose DNS queries to the CoreDNS of the tab (DNS over TCP only)"
+		return 1
+	fi
+	result PASS "node-1 Ready, CoreDNS on node-1"
+}
+
+# coredns_on_node: waits until each endpoint of the Service kube-dns is ready
+# on node-1, so that the steps after join start after the CoreDNS handover. The CoreDNS of the tab answers only DNS over TCP. After the
+# join, the tab node evicts its CoreDNS pods (handover, tabnode_coredns.go),
+# and until then the endpoints are on tab and on node-1. A pod of node-1 then
+# sends some UDP queries to the tab, gets no answer and the lookup fails;
+# wasmtime gives name-unresolvable for each failure of getaddrinfo. A name
+# with fewer dots than ndots:5 goes through the search list, one query for
+# each search domain, so the full name of a Service fails more often than
+# its short name.
+coredns_on_node() {
+	local end=$((SECONDS + 300)) s=""
+	while ((SECONDS < end)); do
+		s="$(tab run "kubectl get endpointslices -n kube-system -l kubernetes.io/service-name=kube-dns -o jsonpath='{range .items[*].endpoints[*]}{.nodeName}={.conditions.ready} {end}'" 2>&1 | tail -1 | tr -d '\r')"
+		if [ -n "$s" ] && ! tr ' ' '\n' <<<"$s" | sed '/^$/d' | grep -qvx 'node-1=true'; then
+			echo "kube-dns endpoints: $s" >>"$OUT/$step.txt"
+			return 0
+		fi
+		sleep 5
+	done
+	echo "kube-dns endpoints after 300 s: $s" >>"$OUT/$step.txt"
+	k get pods -n kube-system -l k8s-app=kube-dns -o wide
+	return 1
 }
 
 # get_kubectl sets KUBECTL: the kubectl of KUBECTL_VERSION for this host.
