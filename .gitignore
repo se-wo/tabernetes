@@ -8,3 +8,6 @@
 # output of tabernetes/docs/docker-node-check/
 browser-console.log
 /tabernetes/out/
+/tabernetes/docs/wasi-sockets-poc/components/target/
+/tabernetes/docs/wasi-sockets-poc/browser/node_modules/
+/tabernetes/docs/wasi-sockets-poc/browser/site/
