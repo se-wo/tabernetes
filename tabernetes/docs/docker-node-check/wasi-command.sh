@@ -42,7 +42,10 @@ step_wasi_command() {
 	echo "\$ crictl attach -i $id <<<'line from stdin'" >>"$OUT/$step.txt"
 	# shellcheck disable=SC2086 # crictl_ns is a list of flags
 	printf 'line from stdin\n' | timeout 60 docker exec -i "$N" nsenter $crictl_ns crictl attach -i "$id" >>"$OUT/$step.txt" 2>&1
-	wait_for "kubectl get pod wasi-cmd" 'Completed|Error' 60
+	# The kubelet reports the phase Succeeded or Failed only once the pod is
+	# torn down: the container shows Completed before that, with the phase
+	# still Running.
+	wait_for "kubectl get pod wasi-cmd -o jsonpath='{.status.phase}'" 'Succeeded|Failed' 60
 	logs="$(tab run 'kubectl logs wasi-cmd' 2>&1)"
 	printf '$ kubectl logs wasi-cmd\n%s\n' "$logs" >>"$OUT/$step.txt"
 	s="$(pod_state wasi-cmd)"
