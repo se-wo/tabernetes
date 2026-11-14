@@ -67,7 +67,7 @@ export const MESSAGES = Object.freeze({
 export const LIMITS = Object.freeze({
   chunk: 1 << 20, // stdout, stderr and stdin: bytes in one message
   data: 256 << 10, // TCP bytes: one credit window
-  datagram: 65535,
+  datagram: 65507, // the IPv4 limit of a UDP datagram (UD14, section 8.3.3)
   body: 16 << 20, // HTTP bodies
   credits: 256 << 10,
   backlog: 4096,

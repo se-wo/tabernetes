@@ -53,11 +53,14 @@ order. Packages with the same predecessors can run at the same time.
 | W3.2 | 3 | TC5, TC6, TC13, TC17, TC20 to TC22, NL in the pod worker | the TCP and lookup part of `web/src/sockets.js` | `wasi_messages.js`, `component.js` (the calls of `createSockets`) | phase 2 | L |
 | W3.3a | 3 | The results of runwasi for phase 3, the Docker tests of TC, NL and PX5 | test modes in `wasm-images/rust/echo`, step `wasi-sockets` | the PX5 part of step `wasi-proxy` | phase 2 | M |
 | W3.3b | 3 | All TC and NL tests end-to-end, PX5, CO17, CO19 | the end-to-end tests of phase 3, `README.md` (phase 3) | `sockets.js` (`TCP_DEFAULTS`, with the values of W3.3a) | W3.1a, W3.1b, W3.2, W3.3a | M |
-| W4.1 | 4 | UD1 to UD6, UD8, UD9, UD14, UD15, UD20, UD21 | `k8s/tabernetes/tabnode_udp.go` (new), `listenPodUDP`, `dialClusterUDP` and the UDP part of the ephemeral ports in `tabnode_dial.go` (W3.1a makes the table of ports in use) | none | phase 3 | L |
-| W4.2 | 4 | UD7, UD10 to UD13, UD16, UD17, FL1 to FL13 | the flow table and UDP Services in `tabnode_net.go`, UDP in `tabnode_netpol.go` and `tabnode_netpol_strict.go` | none | W4.1 | XL |
-| W4.3 | 4 | UD18, UD19, UD22, AC3 | UDP in `tabnode_coredns.go`, `nslookup` over UDP and `nc -u` in `coreutils.go` | none | W4.1 | M |
-| W4.4 | 4 | UDP in the pod worker, AC1 (UDP) | the UDP part of `sockets.js`, `k8s/tabernetes/tabnode_wasi_udp.go` (new) | `wasi_messages.js`, `tabnode_wasi_msg.go` | W4.1 | L |
-| W4.5 | 4 | All UD and FL tests end-to-end | step `wasi-udp` (in one pod and on one node), `README.md` (phase 4) | none | W4.2, W4.3, W4.4 | M |
+| W4.1 | 4 | UD1 to UD6, UD8, UD9, UD14, UD15, UD20, UD21, AC1 (UDP table) | `k8s/tabernetes/tabnode_udp.go` (new): the UDP table, `listenPodUDP`, `dialClusterUDP`, the hook `udpRoute` (section 8.7), with the table of ports in use of W3.1a | `tabnode_dial.go` (a helper for an exclusive port), `tabnode_loopback.go` (UDP rows), `tabnode_wasi_proxy.go` (`listenProxy`, PX32) | phase 3 | M |
+| W4.2a | 4 | UD7, UD10 to UD13, UD16, UD17, FL1 to FL5, FL10, FL11, FL13 | `k8s/tabernetes/tabnode_flows.go` (new): the flow table and the hook `udpPolicy` (section 8.8); UDP Services and the events of EndpointSlices in `tabnode_net.go` | `tabnode.go` (`releaseIP`, FL13) | W4.1 | L |
+| W4.2b | 4 | FL6 to FL9, FL12 | UDP in `tabnode_netpol.go` and `tabnode_netpol_strict.go` | none | W4.2a | M |
+| W4.3 | 4 | UD18, UD19, UD22, AC3 | UDP in `tabnode_coredns.go`, `nslookup` over UDP in `coreutils.go`, `nc -u` in `coreutils_misc.go` | none | W4.1, W4.2a | M |
+| W4.4a | 4 | UDP of components on the Go side, MS2 to MS4 (UDP), AC1 (UDP messages) | `k8s/tabernetes/tabnode_wasi_udp.go` (new) | `tabnode_wasi_tcp.go` (the registration in `init()`, `tcpData`) | W4.1 | M |
+| W4.4b | 4 | UDP in the pod worker | the UDP part of `web/src/sockets.js` | `sockets.js` (the list of types in `createSocketTable`) | phase 3 | M |
+| W4.5a | 4 | The results of runwasi for phase 4, the Docker tests of UD | UDP test modes in `wasm-images/rust/echo`, step `wasi-udp` (in one pod and on one node) | none | phase 3 | M |
+| W4.5b | 4 | All UD and FL tests end-to-end, AC1 (UDP, combined) | the end-to-end tests of phase 4, `README.md` (phase 4) | `wasi-proxy-lib.mjs` | W4.1, W4.2a, W4.2b, W4.3, W4.4a, W4.4b, W4.5a | M |
 | W5.1 | 5 | ND2 to ND9, ND11, ND12, ND20 (page and node worker) | the `udp` channel in `podlink.go`, `web/src/channel.js`, `web/src/nodes.js`, `web/src/node.worker.js` | none | phase 4 | L |
 | W5.2 | 5 | ND13 to ND19, the agent part of ND3 and ND12 | `node/agent/podlink.go` | none | phase 4 | L |
 | W5.3 | 5 | ND1, ND10, the deferred tests | step `wasi-udp` (between nodes), `docs/networking-policy.md`, `README.md` (phase 5) | none | W5.1, W5.2 | M |
@@ -69,6 +72,27 @@ gives them to the other packages. W3.3b starts after these four packages.
 Section 8.3.2 of `wasi-sockets.md` gives the rules of the TCP and lookup
 messages. Each package of phase 3 changes only the rows of its requirements
 in sections 10.3 and 11 of `wasi-sockets.md`.
+
+Phase 4 has these rows in place of W4.2, W4.4 and W4.5 of the first
+plan. W4.2 (XL) is W4.2a and W4.2b, W4.4 is W4.4a (Go) and W4.4b (pod
+worker), and W4.5 is W4.5a (the results of runwasi, first) and W4.5b (the
+end-to-end tests, last). W3.1a already made the table of ports in use and
+the ephemeral ports of each IP, so W4.1 has the size M. Section 8.3.3 of
+`wasi-sockets.md` gives the rules of the UDP messages. The order:
+
+1. The docs PR of the parent (section 8.3.3, the decisions of phase 4)
+   merges first.
+2. W4.5a, W4.1, W4.4b and W2.4 start. W4.5a records the results of runwasi
+   first, and the parent session gives them to the other packages.
+3. W4.1 publishes its API on its branch early and reports it. W4.2a, W4.3
+   and W4.4a then start from this branch. They rebase onto `main` after W4.1
+   merges. W4.3 merges after W4.2a.
+4. W4.2b starts after W4.2a merges.
+5. W4.5b starts after all other packages of phase 4.
+
+In phase 4, only W4.5a (the results of runwasi) and W4.5b (the final
+results) change the rows of section 10.3. The other packages write their
+decisions into sections 8 and 11 and into their pull requests.
 
 W2.4 does not stop phase 3. It can run at the same time as phases 3 to 6.
 It does these items:
@@ -91,9 +115,17 @@ Phase 5 has only deferred tests. So W6.1 can run at the same time as phase
 
 - `tabnode_wasi.go`, `component.js` and `component.worker.js`: W1.4a puts
   the message handling into the dispatchers. Later packages add handlers in files of their own.
+- `wasi_messages.js`, `tabnode_wasi_msg.go`: the parent changes the limit of
+  `datagram` in the docs PR of phase 4. During phase 4, only W2.4 adds
+  messages to them.
 - `tabnode_dial.go`: W2.1b, W3.1a and W4.1, in the order of the phases.
-- `tabnode_net.go`, `tabnode_netpol.go`: W3.1a, W4.2 and W6.1.
-- `sockets.js`: W1.4b, W3.2, W3.3b (`TCP_DEFAULTS`) and W4.4.
+- `tabnode_net.go`: W3.1a, W4.2a and W6.1.
+- `tabnode_netpol.go`: W3.1a, W4.2b and W6.1.
+- `tabnode_wasi_tcp.go`: W3.1b. W4.4a changes only the registration in
+  `init()` and `tcpData`.
+- `tabnode_wasi_proxy.go`: W2.1a, W3.1a (PX5) and W4.1 (`listenProxy`).
+- `tabnode.go`: W4.2a changes only `releaseIP`.
+- `sockets.js`: W1.4b, W3.2, W3.3b (`TCP_DEFAULTS`) and W4.4b.
 - `mise.toml`: W1.1 changes `[tools]`, W1.2 adds a task, W1.3 changes the
   task `web`. The package that merges later rebases.
 - `check.sh`, `manifests.yaml`: W1.1 makes one file for each step. Later

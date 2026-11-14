@@ -120,6 +120,7 @@ func TestWasiDispatchExamines(t *testing.T) {
 		"bad port":              msg(map[string]any{"type": "bind", "socket": 2, "protocol": "tcp", "family": "ipv4", "address": "0.0.0.0", "port": 65536}),
 		"data above the credit": msg(map[string]any{"type": "data", "socket": 1, "bytes": buf(256<<10 + 1)}),
 		"socket ID 0":           msg(map[string]any{"type": "data", "socket": 0, "bytes": buf(1)}),
+		"datagram above 65507":  msg(map[string]any{"type": "datagram", "socket": 1, "address": "10.0.0.1", "port": 53, "bytes": buf(65508)}),
 		"empty name":            msg(map[string]any{"type": "lookup", "lookup": 8, "name": ""}),
 		"name too long":         msg(map[string]any{"type": "lookup", "lookup": 9, "name": strings.Repeat("a", 254)}),
 	}
