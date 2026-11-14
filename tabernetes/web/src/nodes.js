@@ -7,8 +7,9 @@ import { portChannel, openChannel } from "./channel.js";
 const MAX_WORKERS = 8; // every worker is a whole Go runtime: 100 MB and more
 
 // nodeBuiltins returns the commands. status is an element for the state of
-// the worker nodes under the terminal.
-export function nodeBuiltins({ workerURL, wasi, status }) {
+// the worker nodes under the terminal. connections are the connections of
+// join.js, name -> {remove(write)}: rmnode removes them, too.
+export function nodeBuiltins({ workerURL, wasi, status, connections = new Map() }) {
   const workers = new Map(); // name -> {worker, state}
 
   const render = () => {
@@ -72,19 +73,26 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
       write("They are Ready in a few seconds: k get nodes -w\n");
     },
     // rmnode [--force] <name>... drains nodes in workers (kubectl drain),
-    // stops them and deletes them. --force skips the drain.
+    // stops them and deletes them. --force skips the drain. A kubectl
+    // connection of "join --kubectl" is closed and its token voided.
     async rmnode(args, { write }) {
       const force = args.includes("--force") || args.includes("-f");
       const names = args.filter((a) => a !== "--force" && a !== "-f");
       if (!names.length) {
-        write(`usage: rmnode [--force] <name>... (${[...workers.keys()].join(", ") || "no nodes in workers"})\n`);
+        const known = [...workers.keys(), ...connections.keys()];
+        write(`usage: rmnode [--force] <name>... (${known.join(", ") || "no nodes in workers, no kubectl connections"})\n`);
         return 2;
       }
       let code = 0;
       for (const name of names) {
         const entry = workers.get(name);
         if (!entry) {
-          write(`rmnode: ${name}: not a node in a worker\n`);
+          const other = connections.get(name);
+          if (other) {
+            code = Math.max(code, await other.remove(write));
+            continue;
+          }
+          write(`rmnode: ${name}: not a node in a worker or a kubectl connection\n`);
           code = 1;
           continue;
         }
@@ -101,7 +109,7 @@ export function nodeBuiltins({ workerURL, wasi, status }) {
         entry.worker.terminate();
         workers.delete(name);
         render();
-        await globalThis.tabernetes.removeWorkerNode(name);
+        await globalThis.tabernetes.removeNode(name);
         write(`${name} stopped and deleted, its pods move to other nodes\n`);
       }
       return code;
