@@ -15,7 +15,8 @@ package main
 // A WASI preview 2 component runs in a pod worker of its own, which talks
 // with the Go side only through the messages of tabnode_wasi_msg.go
 // (docs/wasi-sockets.md, section 8.3). This file runs a command component
-// (wasi:cli/run); other components get an "unsupported" status.
+// (wasi:cli/run) or the function of an entrypoint, with the statuses of
+// runwasi; a proxy component gets an "unsupported" status until phase 2.
 //
 // Browsers cannot pull from most registries: ghcr.io and Docker Hub send no
 // CORS headers. Images come from a mirror next to the page instead, a
@@ -274,22 +275,41 @@ func (c *ctr) pullWasmOnce(ctx context.Context, rt js.Value) (*wasmImage, js.Val
 			return nil, js.Undefined(), err
 		}
 	}
-	res, err := await(ctx, rt.Call("load", img.source()))
+	src := img.source()
+	// runwasi takes the function after "#" from the first word of the
+	// command (path#function, CO3); the command of the container replaces
+	// the entrypoint of the image. The file stays the file of the image.
+	if fn := commandFunction(c.spec.Command); fn != "" && !img.artifact {
+		p, _, _ := strings.Cut(src.Get("path").String(), "#")
+		src.Set("path", p+"#"+fn)
+	}
+	res, err := await(ctx, rt.Call("load", src))
 	if err != nil {
 		return nil, js.Undefined(), fmt.Errorf("loading the module of %s: %v", ref, err)
 	}
 	if u := res.Get("unsupported"); u.Type() == js.TypeString {
 		return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, u.String())}
 	}
-	if comp := res.Get("component"); comp.Type() == js.TypeObject {
-		if why := componentUnsupported(jsStringList(comp.Get("imports")), componentExports(comp.Get("exports"))); why != "" {
-			return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, why)}
-		}
+	// A proxy component waits for phase 2 (docs/wasi-sockets.md, section
+	// 9). The other components start; startComponent gives the statuses of
+	// runwasi.
+	if comp := res.Get("component"); comp.Type() == js.TypeObject && comp.Get("world").Type() == js.TypeString && comp.Get("world").String() == "proxy" {
+		return nil, js.Undefined(), unsupportedError{fmt.Sprintf("%s: %s", ref, componentProxyText)}
 	}
 	wasmImages.Lock()
 	wasmImages.m[ref] = img
 	wasmImages.Unlock()
 	return img, res, nil
+}
+
+// commandFunction gives the function after "#" in the first word of a
+// command, or "".
+func commandFunction(command []string) string {
+	if len(command) == 0 {
+		return ""
+	}
+	_, fn, _ := strings.Cut(command[0], "#")
+	return fn
 }
 
 // source tells the page where the module is: a module layer, or a file in
@@ -812,11 +832,10 @@ func jsBytes(v js.Value) []byte {
 	return b
 }
 
-// The interfaces that the pod worker gives a command component, by
-// "<package>/<interface>". jco gives the name of an import without its
-// version if the component imports one version of the interface; else the
-// version must be 0.2.x. A command component gets no wasi:http, the same as
-// on runwasi (fact 5).
+// The interfaces that the pod worker gives a command component and the
+// function of an entrypoint, by "<package>/<interface>". It is the linker of
+// runwasi for these worlds (fact 5): WASI 0.2 without wasi:http. Each import
+// must have a version 0.2.x.
 var componentImports = map[string]bool{
 	"cli/environment": true, "cli/exit": true, "cli/stdin": true, "cli/stdout": true, "cli/stderr": true,
 	"cli/terminal-input": true, "cli/terminal-output": true, "cli/terminal-stdin": true, "cli/terminal-stdout": true, "cli/terminal-stderr": true,
@@ -828,36 +847,44 @@ var componentImports = map[string]bool{
 	"sockets/tcp": true, "sockets/tcp-create-socket": true, "sockets/udp": true, "sockets/udp-create-socket": true,
 }
 
-var componentImportRE = regexp.MustCompile(`^wasi:([a-z0-9-]+/[a-z0-9-]+)(@0\.2\.[0-9]+)?$`)
+var componentImportRE = regexp.MustCompile(`^wasi:([a-z0-9-]+/[a-z0-9-]+)@0\.2\.[0-9]+$`)
 
-// componentUnsupported gives the reason why the tab node cannot run a
-// component, or "". It finds the world as runwasi does (fact 5): the first
-// export with the prefix wasi:http/incoming-handler or wasi:cli/run.
-func componentUnsupported(imports []string, exports []string) string {
-	world := ""
-	for _, e := range exports {
-		if strings.HasPrefix(e, "wasi:http/incoming-handler") {
-			world = "proxy"
-			break
-		}
-		if strings.HasPrefix(e, "wasi:cli/run") {
-			world = "command"
-			break
-		}
-	}
-	switch world {
-	case "proxy":
-		return "it is a WASI preview 2 proxy component (it exports wasi:http/incoming-handler): the tab node cannot serve proxy components yet, only command components (wasi:cli/run)"
-	case "":
-		return "it is a WASI preview 2 component without the export wasi:cli/run: the tab node cannot call the function of an entrypoint yet, only command components (wasi:cli/run)"
-	}
+// componentProxyText is the status of a proxy component until phase 2.
+const componentProxyText = "it is a WASI preview 2 proxy component (its first export of the two worlds is wasi:http/incoming-handler): the tab node cannot serve proxy components yet (phase 2 of docs/wasi-sockets.md), only command components (wasi:cli/run) and the function of an entrypoint"
+
+// componentDefaultFunction is the function that runwasi calls when the
+// entrypoint names no function (path#function).
+const componentDefaultFunction = "_start"
+
+// componentStatus gives the text of runwasi for a command component or a
+// component with the function of an entrypoint that cannot start, or "".
+// world is "command" or "" (the world of component_world.js), imports are
+// the names of the component with their versions, exports its exports as
+// [name, kind], and fn the function of the entrypoint ("" for none).
+//
+// runwasi instantiates first: an import that its linker does not have gives
+// "component imports instance ..." (CO11, CO12, CR6). Then, without
+// wasi:cli/run, it looks for the function (CO4). The task exits with 137
+// (section 9.2).
+func componentStatus(world string, imports []string, exports [][2]string, fn string) string {
 	for _, i := range imports {
 		m := componentImportRE.FindStringSubmatch(i)
 		if m == nil || !componentImports[m[1]] {
-			return fmt.Sprintf("the component imports %s, which the tab node does not give to a command component", i)
+			return fmt.Sprintf("component imports instance `%s`, but a matching implementation was not found in the linker", i)
 		}
 	}
-	return ""
+	if world == "command" {
+		return ""
+	}
+	if fn == "" {
+		fn = componentDefaultFunction
+	}
+	for _, e := range exports {
+		if e[0] == fn && e[1] == "function" {
+			return ""
+		}
+	}
+	return fmt.Sprintf("component does not have exported function %q", fn)
 }
 
 func jsStringList(v js.Value) []string {
@@ -871,14 +898,14 @@ func jsStringList(v js.Value) []string {
 	return out
 }
 
-// componentExports gives the names of [[name, kind]] of the transpile cache.
-func componentExports(v js.Value) []string {
+// componentExports gives the [[name, kind]] of the names of a component.
+func componentExports(v js.Value) [][2]string {
 	if v.Type() != js.TypeObject {
 		return nil
 	}
-	out := make([]string, v.Length())
+	out := make([][2]string, v.Length())
 	for i := range out {
-		out[i] = v.Index(i).Index(0).String()
+		out[i] = [2]string{v.Index(i).Index(0).String(), v.Index(i).Index(1).String()}
 	}
 	return out
 }
@@ -918,14 +945,41 @@ func init() {
 	}
 }
 
-// startComponent runs a command component in a pod worker of its own. The
-// pod worker gets the component and its CLI in the message "start"; all
-// other traffic goes through the messages of tabnode_wasi_msg.go.
+// startComponent runs a command component, or the function of the
+// entrypoint of a component, in a pod worker of its own. The pod worker gets
+// the component and its CLI in the message "start"; all other traffic goes
+// through the messages of tabnode_wasi_msg.go.
+//
+// A component that runwasi cannot start (CO4, CO11, CO12, CR6) starts no
+// pod worker. The container starts, writes the text of runwasi to stderr and
+// exits with 137, as the task of runwasi does (section 9.2). runwasi writes
+// the text only to the log of the shim; the tab node writes it to the log of
+// the container, so that the name of the import shows (CO12).
 //
 // preopens is the copy of wasmPreopens: the pod worker gives it to the
 // component through its files adapter (files.js, section 8.10).
 func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Value, argv, env []string, dir string, preopens js.Value) (*process, error) {
 	name := c.w.namespace + "/" + c.w.name + "/" + c.spec.Name
+	names := comp.Get("names")
+	world := ""
+	if w := comp.Get("world"); w.Type() == js.TypeString {
+		world = w.String()
+	}
+	fn := ""
+	if e := comp.Get("entrypoint"); e.Type() == js.TypeString {
+		fn = e.String()
+	}
+	if names.Type() != js.TypeObject {
+		return nil, errors.New("the transpile result of the component has no names")
+	}
+	if why := componentStatus(world, jsStringList(names.Get("imports")), componentExports(names.Get("exports")), fn); why != "" {
+		_, cancel := context.WithCancel(ctx)
+		p := newProcess(cancel)
+		logs.writer("stderr").Write([]byte(why + "\n"))
+		cancel()
+		p.exit(wasiErrorExit)
+		return p, nil
+	}
 	opts := js.Global().Get("Object").New()
 	opts.Set("component", true)
 	opts.Set("name", name)
@@ -969,7 +1023,32 @@ func (c *ctr) startComponent(ctx context.Context, logs *logBuf, rt, comp js.Valu
 		peer.cli.exit(128, "the pod worker cannot start: "+err.Error())
 		return p, nil
 	}
+	// stdin of the component (CO5). Without stdin in the container spec,
+	// stdin ends at once, as /dev/null does.
+	if c.stdin == nil {
+		peer.send("stdin", map[string]any{"bytes": []byte{}, "end": true})
+	} else {
+		go func() {
+			r, buf := c.stdin.reader(ctx), make([]byte, 32<<10)
+			for {
+				n, err := r.Read(buf)
+				if n > 0 {
+					if peer.send("stdin", map[string]any{"bytes": append([]byte(nil), buf[:n]...), "end": false}) != nil {
+						return
+					}
+				}
+				if err != nil {
+					peer.send("stdin", map[string]any{"bytes": []byte{}, "end": true})
+					return
+				}
+			}
+		}()
+	}
 	// kill and the end of the pod terminate the pod worker: exit code 137.
 	context.AfterFunc(ctx, func() { h.Call("kill") })
 	return p, nil
 }
+
+// wasiErrorExit is the exit code of runwasi for each error of a component
+// that is not an exit (executor.rs of containerd-shim-wasm v0.6.1).
+const wasiErrorExit = 137

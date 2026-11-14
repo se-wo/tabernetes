@@ -804,6 +804,33 @@ import object with the same names: `getImportObject()` of `WASIShim` for a
 name without a version, `getImportObject({asVersion})` for a name with a
 version.
 
+The lists of jco are not sufficient for CO2, CO11 and CO12:
+
+- jco sorts the exports by name. So the sequence of the exports of the
+  component is not in the list.
+- jco adds an alias in camelCase for each interface that the component
+  exports, for example `run` and `incomingHandler`. These aliases do not
+  obey the WIT syntax. The check of CO15 accepts an alias only if the list
+  also contains the interface of the alias.
+- jco puts two versions of one interface under one name. For example,
+  `wasi-test-wasi03` imports `wasi:clocks/monotonic-clock@0.2.9` and
+  `wasi:clocks/monotonic-clock@0.3.0`, and jco gives only
+  `wasi:clocks/monotonic-clock`.
+
+Thus, the transpile worker also reads the import section and the export
+section of the outer component itself (`web/src/component_world.js`). It does
+not read types, core modules or nested components. The result of the
+transpile worker contains these names, with their versions and in the
+sequence of the component. It also contains the world that runwasi finds
+(fact 5): `command`, `proxy` or none. The Go side and the pod worker use
+this world. Each of these names must also obey the WIT syntax (CO16).
+
+runwasi takes the function of CO3 from the first word of the command of the
+container (`path#function`). The command of a pod replaces the entrypoint
+of the image. Thus, the tab node uses the function after `#` in the first
+word of the command, if the pod has a command. The file stays the file of
+the entrypoint of the image.
+
 ### 8.3 Messages
 
 The pod worker and the Go side use the current message channel of the pod
@@ -948,9 +975,67 @@ The pod worker of a command component gives these exit codes:
   worker does not give `exit-with-code`.
 - A return of `run` without an error gives 0.
 - A trap, an error result of `run` and a component that cannot instantiate
-  give 137, with a text on stderr. Phase 0 did not examine a trap and an
-  error result of `run`. 137 is the exit status of all other errors of
-  runwasi in section 9.2.
+  give 137, with a text on stderr. The step `wasi-command` of the Docker
+  check has no test image that traps. The source of runwasi v0.6.1 gives the
+  result: `executor.rs` of `containerd-shim-wasm` (lines 66 to 71) exits with
+  137 for each error of `run_wasi`. A trap, an error result of `run`
+  ("failed to run component targeting `wasi:cli/command` world") and a
+  failed instantiation are such errors. This agrees with section 9.2.
+
+The function of an entrypoint (CO3) gives the same exit codes as `run`.
+
+The Go side examines a component before it starts a pod worker. It uses the
+names and the world of the transpile worker (section 8.2), in the sequence
+of runwasi:
+
+1. A proxy component gets an "unsupported" text until phase 2. This text
+   ends as `StartError`.
+2. Each import must be an interface of WASI 0.2 that the linker of runwasi
+   has for the command world: `wasi:cli`, `wasi:clocks`, `wasi:filesystem`,
+   `wasi:io`, `wasi:random` and `wasi:sockets`, each with a version `0.2.x`.
+   `wasi:http` is not in this list (CR6). Another import gives the text of
+   wasmtime: "component imports instance `<name>`, but a matching
+   implementation was not found in the linker" (CO11, CO12).
+3. A component without `wasi:cli/run` must export the function of the
+   entrypoint, or `_start` without a function. If it does not, the text is
+   `component does not have exported function "<function>"` (CO4).
+
+For step 2 and step 3, the container starts with no pod worker. The Go side
+writes the text to stderr, and the container exits with 137. The pod then
+shows the exit code 137 and the reason `Error`, as on runwasi. runwasi
+writes the text only into the log of its shim. The tab node writes it into
+the log of the container, so that the name of the import shows (CO12).
+
+A function that the shim does not give, in an interface that the shim
+gives, fails in the pod worker. Examples are `exit-with-code` of CO18 and a
+function of a newer version `0.2.x`. The Go side cannot find these
+functions in the import section, because they are in the types of the
+component. The generated JavaScript of jco reads each function of the
+import object at the instantiation, and throws for a function that is not
+there. The pod worker records the functions that the generated JavaScript
+does not find. It writes the text of step 2 with the version of the
+interface and the name of the function to stderr, and exits with 137.
+
+The pod worker gives a component these parts:
+
+- stdin: the Go side sends the bytes of stdin in `stdin` messages. Without
+  stdin in the container spec, the Go side sends one `stdin` message with no
+  bytes and the end flag, as `/dev/null` gives. A read without data
+  suspends until the next `stdin` message (CO5).
+- memory: the pod worker gives its own `instantiateCore` to the generated
+  JavaScript. It records the memories that each core instance exports or
+  imports. It sends `mem` with the sum of their sizes when the sum changes
+  (CO6). An instance that the pod worker discards removes its memories from
+  the sum (CO7).
+- sockets: until phase 3, `web/src/sockets.js` gives the results of the
+  proxy world on runwasi (section 9.2, item 7). `create-tcp-socket` and
+  `create-udp-socket` give a socket. `start-bind` and `start-connect` give
+  `access-denied`. `resolve-addresses` gives `permanent-resolver-failure`.
+  The count of CO17 and the pause of CO19 are in `sockets.js`. The stream
+  functions of stdin and the later `http.js` use the same count.
+- `poll` of `wasi:io/poll` continues after one message on a
+  `MessageChannel` if a pollable is ready, not after `setTimeout` (CO19).
+- files: none until W1.5 (section 8.10).
 
 ### 8.4 Credits and queues
 
@@ -1196,6 +1281,10 @@ phase that makes the part:
 - The test of CO17 and CO19 needs a socket. It moves to phase 3 and uses a
   TCP socket.
 - The test of PX5 needs the loopback table. It moves to phase 3.
+- The part of the test of CO2 with `wasi:http/incoming-handler` first needs
+  the proxy server. It moves to phase 2. In phase 1, the test makes sure that
+  the tab node finds the proxy world and gives the "unsupported" text of
+  section 8.3.1.
 - AC1 has a part in each phase. Phase 2 tests the proxy server, phase 3
   TCP and phase 4 UDP.
 - The unit test of MS1 to MS6 grows in each phase. Each phase adds the

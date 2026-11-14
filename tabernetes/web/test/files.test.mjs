@@ -7,11 +7,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { browserFilesystem, tree, READ_ONLY_ERROR } from "../src/files.js";
-import { runCommand } from "../src/component.js";
+import { runComponent } from "../src/component.js";
 import { createPeer } from "../src/wasi_messages.js";
 
 const shim = new URL("../node_modules/@bytecodealliance/preview2-shim/dist/browser/", import.meta.url);
 const { createFilesystem, InMemoryFilesystemAdapter: Memory } = await import(new URL("filesystem.js", shim));
+const io = await import(new URL("io.js", shim));
 
 const enc = (s) => new TextEncoder().encode(s);
 const dec = (b) => new TextDecoder().decode(b);
@@ -138,20 +139,20 @@ test("isSameObject compares the files, not the descriptors", () => {
   assert.equal(a.isSameObject(dirs["/config"]), false);
 });
 
-test("runCommand gives WASIShim the files of the start message", async () => {
+test("runComponent gives WASIShim the files of the start message", async () => {
   let config = null;
   class Shim {
     constructor(c) { config = c; }
     getImportObject() { return {}; }
   }
   const peer = createPeer({ post: () => {} });
-  const component = { js: "", modules: {}, imports: [], exports: [["wasi:cli/run@0.2.3", "instance"]] };
+  const component = { js: "", modules: {}, imports: [], exports: [["wasi:cli/run@0.2.3", "instance"]], world: "command" };
   const load = async () => ({ instantiate: async () => ({ "wasi:cli/run@0.2.3": { run: async () => {} } }) });
   const msg = { component, args: [], env: [], cwd: "/", preopens: copy() };
-  assert.equal(await runCommand(msg, { peer, WASIShim: Shim, load, Memory }), 0);
+  assert.equal(await runComponent(msg, { peer, WASIShim: Shim, io: { ...io }, load, Memory }), 0);
   const fs = createFilesystem(config.browserFilesystem);
   assert.deepEqual(fs.preopens.getDirectories().map(([, g]) => g).sort(), ["/", "/config", "/rw"]);
   // Without the class of the in-memory file system: no option.
-  assert.equal(await runCommand(msg, { peer, WASIShim: Shim, load }), 0);
+  assert.equal(await runComponent(msg, { peer: createPeer({ post: () => {} }), WASIShim: Shim, io: { ...io }, load }), 0);
   assert.equal(config.browserFilesystem, undefined);
 });

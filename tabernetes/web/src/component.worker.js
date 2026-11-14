@@ -5,12 +5,14 @@
 // "start" and loads the JavaScript from a Blob URL that it makes.
 //
 // The task "web" of mise.toml bundles this file with WASIShim of
-// @bytecodealliance/preview2-shim and wasi_messages.js into one script, as
-// each *.worker.js: a data: worker cannot load other files of the page.
+// @bytecodealliance/preview2-shim, sockets.js and wasi_messages.js into one
+// script, as each *.worker.js: a data: worker cannot load other files of the
+// page.
 import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { InMemoryFilesystemAdapter as Memory } from "@bytecodealliance/preview2-shim/filesystem";
+import * as io from "@bytecodealliance/preview2-shim/io";
 import { createPeer } from "./wasi_messages.js";
-import { runCommand, ERROR_EXIT } from "./component.js";
+import { runComponent, ERROR_EXIT } from "./component.js";
 import { createMeter, meterSuspending } from "./cpu.js";
 
 const peer = createPeer({
@@ -27,7 +29,7 @@ peer.on("start", (msg) => {
   const meter = createMeter({ send: (ms) => peer.send("cpu", { ms }) });
   meterSuspending(meter);
   const timer = setInterval(() => meter.tick(), 1000);
-  runCommand(msg, { peer, WASIShim, Memory, meter }).finally(() => {
+  runComponent(msg, { peer, WASIShim, io: { ...io }, Memory, meter }).finally(() => {
     clearInterval(timer);
     meter.flush();
   }).then(

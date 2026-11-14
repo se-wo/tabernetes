@@ -96,5 +96,9 @@ The helpers:
 | `waitFor(fn, {timeout, interval, what})` | Calls `fn` until it gives a value that is not false. |
 | `tab(args)` | Runs `tab.mjs` with other commands: `screen`, `logs`, `status`. |
 
+`e2e/devtools.mjs` gives `evalOn(node, fn, arg)`: it runs `fn(arg)` on the Go
+thread of the tab node (the page) or of a node worker, over the DevTools
+port. A test file that uses it calls `closeDevtools` in an `after` hook.
+
 A test that waits 30 seconds or more of real time must use a clock that the
 test controls (see `docs/wasi-sockets-plan.md`).

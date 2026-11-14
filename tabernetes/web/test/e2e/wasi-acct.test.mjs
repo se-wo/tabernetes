@@ -8,7 +8,7 @@
 // the container ends.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apply, kubectl, namespace, nodeName, onNode, podPhase, waitFor, waitForPod } from "./harness.mjs";
+import { apply, kubectl, logs, namespace, nodeName, onNode, podPhase, waitFor, waitForPod } from "./harness.mjs";
 
 const IMAGE = "ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest";
 
@@ -38,4 +38,25 @@ test("AC2: a component in a loop of CPU work shows CPU in kubectl top pod", asyn
   }, { timeout: 150, interval: 5, what: "CPU of the pod busy in kubectl top pod" });
   // One loop of CPU work uses at most one core.
   assert.ok(cpu <= 1100, `${cpu}m`);
+});
+
+// CO6: the memory of the instance counts for limits.memory. A component
+// that fills 64 MiB with a limit of 32 MiB gets OOMKilled; with a limit of
+// 128 MiB it ends normally.
+test("CO6: a component above limits.memory gets OOMKilled", async (t) => {
+  const ns = await namespace(t);
+  const node = await nodeName("tab");
+  const env = [{ name: "ALLOC_MB", value: "64" }];
+  await apply([
+    cmdPod("over", node, env, { limits: { memory: "32Mi" } }),
+    cmdPod("under", node, env, { limits: { memory: "128Mi" } }),
+  ], ns);
+  const over = await waitForPod(ns, "over", podPhase("Succeeded", "Failed"));
+  const st = over.status.containerStatuses[0].state.terminated;
+  assert.equal(st.reason, "OOMKilled", JSON.stringify(st));
+  assert.equal(st.exitCode, 137);
+  const under = await waitForPod(ns, "under", podPhase("Succeeded", "Failed"));
+  const out = await logs(ns, "under");
+  assert.equal(under.status.phase, "Succeeded", out);
+  assert.match(out, /^alloc 64 MiB: 64$/m);
 });
