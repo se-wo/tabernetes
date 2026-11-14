@@ -12,7 +12,7 @@
 // starts. The tests write the numbers with t.diagnostic.
 //
 // The test file runs in the default run of run.mjs. It takes approximately
-// 2 minutes. To run it alone:
+// 4 minutes. To run it alone:
 //
 //   node web/test/e2e/run.mjs web/test/e2e/wasi-memory.test.mjs
 //
@@ -21,6 +21,7 @@
 // their connections.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { evalOn, closeDevtools } from "./devtools.mjs";
 import { apply, kubectl, logs, NODES, pod, podPhase, run, TAB_NODE, waitFor, waitForPod, worker } from "./harness.mjs";
@@ -29,7 +30,6 @@ const { chromium } = createRequire(import.meta.url)("playwright");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const image = (name) => `ghcr.io/se-wo/tabernetes/${name}:latest`;
-const ns = `e2e-mem-${Date.now().toString(36)}`;
 
 // probe gives the number of Wasm memories that the tab can still make.
 const PROBE = () => new Promise((resolve) => {
@@ -99,12 +99,22 @@ const client = (name, script) => ({
 // wget stops them after timeout seconds.
 const park = (ip, n, timeout) => Array.from({ length: n }, () => `wget -T ${timeout} -q -O /dev/null http://${ip}:8080/wait/3600000 &`).join("\n");
 
-const runningIP = (name) => waitFor(async () => {
+// Each test has its own namespace. t.after deletes it and waits for the end
+// of its pods, also when the test fails: a deleted pod stops its pod worker,
+// and that frees all memories of the pod.
+async function testNamespace(t) {
+  const ns = `e2e-mem-${randomBytes(3).toString("hex")}`;
+  await kubectl(`create namespace ${ns}`);
+  t.after(() => process.env.E2E_KEEP ? undefined : kubectl(`delete namespace ${ns} --wait=true`, { timeout: 300 }).catch(() => {}));
+  return ns;
+}
+
+const runningIP = (ns, name) => waitFor(async () => {
   const p = await pod(ns, name);
   return p.status?.containerStatuses?.[0]?.state?.running && p.status.podIP;
 }, { what: `the start of ${name}` });
-const terminated = async (name) => (await waitForPod(ns, name, podPhase("Succeeded", "Failed"))).status.containerStatuses[0].state.terminated;
-const del = (...names) => kubectl(`delete pod -n ${ns} ${names.join(" ")} --grace-period=0 --force --wait=true`, { timeout: 180 });
+const terminated = async (ns, name) => (await waitForPod(ns, name, podPhase("Succeeded", "Failed"))).status.containerStatuses[0].state.terminated;
+const del = (ns, ...names) => kubectl(`delete pod -n ${ns} ${names.join(" ")} --grace-period=0 --force --wait=true`, { timeout: 180 });
 
 // waitFree waits until the probe is at least n.
 const waitFree = (n, what) => waitFor(async () => {
@@ -112,25 +122,60 @@ const waitFree = (n, what) => waitFor(async () => {
   return f >= n ? f : false;
 }, { timeout: 120, interval: 2, what });
 
-let start = 0; // the probe before the tests
+// hold starts a worker of the page that takes each Wasm memory that becomes
+// free, every 100 ms, and keeps it. So the tab stays full while the checks of
+// a full tab run. release stops the worker and frees its memories.
+const hold = () => evalOn(TAB_NODE, () => {
+  const src = "const a = []; setInterval(() => { try { for (;;) a.push(new WebAssembly.Memory({ initial: 1 })); } catch {} }, 100);";
+  globalThis.tabernetesMemoryHold = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+  return true;
+});
+const release = () => evalOn(TAB_NODE, () => {
+  globalThis.tabernetesMemoryHold?.terminate();
+  globalThis.tabernetesMemoryHold = null;
+  return true;
+});
+
+// quiet waits until no namespace of the cluster is in deletion. The other
+// test files delete their namespaces without a wait: until their pods end,
+// their pod workers free memories during the measurement.
+const quiet = () => waitFor(async () => {
+  const items = JSON.parse(await kubectl("get namespaces -o json")).items;
+  return !items.some((n) => n.status?.phase === "Terminating");
+}, { timeout: 300, interval: 2, what: "the end of the namespaces in deletion" });
+
+// usedBy gives the memories of the pods in names: the probe while they run,
+// and the probe after their deletion. The deletion stops their pod workers,
+// so their garbage also goes. Two probes a short time apart do not depend on
+// the garbage of other pod workers, which can go at any time.
+async function usedBy(ns, names) {
+  const running = await settled();
+  await del(ns, ...names);
+  await sleep(1000);
+  const after = await settled();
+  return after - running;
+}
 
 before(async () => {
+  await quiet();
+  const ns = `e2e-mem-${randomBytes(3).toString("hex")}`;
   await kubectl(`create namespace ${ns}`);
-  // The first component of the tab node starts the transpile worker of the
-  // Go thread: a component that ends at once.
-  await apply(component("first", "wasi-test-core", TAB_NODE, { command: ["/wasi-test-core.wasm#go"] }), ns);
-  await terminated("first");
-  await del("first");
-  start = await settled();
+  try {
+    // The first component of the tab node starts the transpile worker of the
+    // Go thread: a component that ends at once.
+    await apply(component("first", "wasi-test-core", TAB_NODE, { command: ["/wasi-test-core.wasm#go"] }), ns);
+    await terminated(ns, "first");
+  } finally {
+    await kubectl(`delete namespace ${ns} --wait=true`, { timeout: 300 }).catch(() => {});
+  }
 });
 
-after(async () => {
-  if (!process.env.E2E_KEEP) await kubectl(`delete namespace ${ns} --wait=true`, { timeout: 300 }).catch(() => {});
-  await closeDevtools();
-});
+after(() => closeDevtools());
 
 test("the Wasm memories of one tab, and the memories of each kind of user", async (t) => {
+  const ns = await testNamespace(t);
   const limit = await total();
+  const start = await settled();
   t.diagnostic(`an empty renderer process: ${limit} Wasm memories`);
   t.diagnostic(`the tab with its nodes, before the tests: ${start} free, ${limit - start} used`);
   assert.ok(limit >= 32, `limit ${limit}`);
@@ -139,102 +184,111 @@ test("the Wasm memories of one tab, and the memories of each kind of user", asyn
 
   // A command component that waits for stdin: one memory.
   await apply(component("cmd", "wasi-test-cmd", TAB_NODE, { stdin: true, env: [{ name: "STDIN", value: "1" }] }), ns);
-  await waitFor(async () => (await pod(ns, "cmd")).status?.containerStatuses?.[0]?.state?.running, { what: "cmd" });
+  await runningIP(ns, "cmd");
   await sleep(2000);
-  const cmd = start - (await settled());
+  const cmd = await usedBy(ns, ["cmd"]);
   t.diagnostic(`a command component that runs: ${cmd}`);
   assert.equal(cmd, 1);
-  await del("cmd");
-  await waitFree(start, "the memory of cmd after its deletion");
 
   // A WASI preview 1 module: the module and the shared memory of its sleeps.
   await apply(component("module", "wasi-hello", TAB_NODE, { args: ["--ticks=-1"] }), ns);
-  await waitFor(async () => (await pod(ns, "module")).status?.containerStatuses?.[0]?.state?.running, { what: "module" });
+  await runningIP(ns, "module");
   await sleep(2000);
-  const mod = start - (await settled());
+  const mod = await usedBy(ns, ["module"]);
   t.diagnostic(`a module that runs: ${mod}`);
   assert.equal(mod, 2);
-  await del("module");
-  await waitFree(start, "the memories of the module after its deletion");
 
   // A proxy component without requests: the instance of the link check, until
-  // the garbage collection of its pod worker.
+  // the garbage collection of its pod worker (0 or 1).
   await apply(proxy("idle"), ns);
-  const ip = await runningIP("idle");
+  await runningIP(ns, "idle");
   await sleep(2000);
-  const idle = start - (await settled());
+  const idle = await usedBy(ns, ["idle"]);
   t.diagnostic(`a proxy container without requests: ${idle}`);
-  assert.ok(idle <= 1, `idle ${idle}`);
+  assert.ok(idle >= 0 && idle <= 1, `idle ${idle}`);
 
-  // Each active instance: one memory.
-  await apply(client("parker", park(ip, 4, 600)), ns);
-  const four = await waitFor(async () => {
-    const used = start - (await probe());
-    return used - idle >= 4 ? used : false;
-  }, { interval: 1, what: "4 active instances" });
+  // Each active instance: one memory. The container then uses 4, and 1 more
+  // while the instance of its link check is not collected.
+  const before4 = await settled();
+  await apply(proxy("active"), ns);
+  const ip = await runningIP(ns, "active");
+  await apply(client("parker", park(ip, 4, 120)), ns);
+  await runningIP(ns, "parker");
+  // The 4 requests start in a few seconds. This wait only gives them time:
+  // the assertion is on the result of usedBy.
+  await waitFor(async () => before4 - (await probe()) >= 4, { interval: 1, timeout: 60, what: "4 active instances" }).catch(() => {});
   await sleep(2000);
-  const active = start - (await settled()) - idle;
-  t.diagnostic(`4 active instances of a proxy component: ${active} (first ${four - idle})`);
+  const active = await usedBy(ns, ["active"]);
+  t.diagnostic(`a proxy container with 4 active instances: ${active}`);
   assert.ok(active >= 4 && active <= 5, `active ${active}`);
-  await kubectl(`delete namespace ${ns} --wait=true`, { timeout: 300 });
-  await kubectl(`create namespace ${ns}`);
-  await waitFree(start, "the memories of the proxy container after its deletion");
+  await del(ns, "parker");
 
   // A pod on a node worker uses the limit of the same renderer process.
   if (NODES.includes("worker")) {
     const node = await worker();
     await apply(component("remote", "wasi-hello", node, { args: ["--ticks=-1"] }), ns);
-    await waitFor(async () => (await pod(ns, "remote")).status?.containerStatuses?.[0]?.state?.running, { what: "remote" });
+    await runningIP(ns, "remote");
     await sleep(2000);
-    // The first component of the node worker can also start its transpile
-    // worker: 2 or 3.
-    const remote = start - (await settled());
+    const remote = await usedBy(ns, ["remote"]);
     t.diagnostic(`a module on the node worker ${node}, seen from the page: ${remote}`);
-    assert.ok(remote >= 2, `remote ${remote}`);
-    await del("remote");
+    assert.equal(remote, 2);
   }
 });
 
 test("a full tab: requests wait (PX34), a new proxy container waits with a line in its log, other pods fail with a clear status", async (t) => {
+  const ns = await testNamespace(t);
+  await quiet();
   const free = await settled();
   // 8 proxy containers with a maximum of 16 instances each (PX9) are more
   // than the tab can make.
   const names = Array.from({ length: 8 }, (_, i) => `p${i}`);
   await apply(names.map(proxy), ns);
   const ips = [];
-  for (const n of names) ips.push(await runningIP(n));
+  for (const n of names) ips.push(await runningIP(ns, n));
   const began = Date.now();
-  const TIMEOUT = 60; // wget closes the parked requests after this time
+  // wget closes the parked requests after this time. The checks of the full
+  // tab must end before it, also on a slow runner.
+  const TIMEOUT = 150;
   await apply(client("parker", ips.map((ip) => park(ip, 16, TIMEOUT)).join("\n")), ns);
   const full = await waitFor(async () => (await probe()) === 0 && Date.now(), { interval: 1, what: "a full tab" });
   t.diagnostic(`8 proxy containers with 16 requests each: the tab is full after ${((full - began) / 1000).toFixed(1)} s (${free} were free)`);
+  // Pod workers free some memories at their garbage collection. The hold
+  // takes them, so that each check below sees a full tab.
+  t.after(() => release().catch(() => {}));
+  await hold();
 
   // A new proxy container: it starts, writes a line into its log, and its
   // requests wait.
   await apply(proxy("late"), ns);
-  const lateIP = await runningIP("late");
+  const lateIP = await runningIP(ns, "late");
   await apply(client("late-client", `wget -q -O /dev/null http://${lateIP}:8080/context && echo served $(date +%s)`), ns);
   await waitFor(async () => /no Wasm memory left for a new instance; .*\(PX34\)/.test(await logs(ns, "late")), { what: "the line of PX34 in the log of late" });
   assert.doesNotMatch(await logs(ns, "late-client"), /served/);
 
   // A command component fails with exit code 137 and the text of the full tab.
   await apply(component("cmd", "wasi-test-cmd", TAB_NODE), ns);
-  const cmd = await terminated("cmd");
+  const cmd = await terminated(ns, "cmd");
   const cmdLog = await logs(ns, "cmd");
   assert.equal(cmd.exitCode, 137, cmdLog);
   assert.match(cmdLog, /^the component cannot instantiate: the browser tab has no Wasm memory left for a new instance/m);
 
   // A WASI preview 1 module fails with exit code 128 and the text of Chrome.
   await apply(component("module", "wasi-hello", TAB_NODE), ns);
-  const mod = await terminated("module");
+  const mod = await terminated(ns, "module");
   const modLog = await logs(ns, "module");
   assert.equal(mod.exitCode, 128, modLog);
   assert.match(modLog, /Out of memory/);
-  assert.ok(Date.now() - began < TIMEOUT * 1000, "the checks of the full tab ended before the parked requests");
+  const checks = (Date.now() - began) / 1000;
+  t.diagnostic(`the checks of the full tab ended ${checks.toFixed(1)} s after the start of the parked requests`);
+  assert.ok(checks < TIMEOUT, "the checks of the full tab ended before the parked requests");
+  assert.doesNotMatch(await logs(ns, "late-client"), /served/);
 
-  // The parked requests end: the waiting request of late gets an instance.
-  const served = await waitFor(async () => /served/.test(await logs(ns, "late-client")) && Date.now(), { timeout: 180, what: "the request of late" });
-  t.diagnostic(`the request of the new container: served ${((served - began) / 1000 - TIMEOUT).toFixed(1)} s after the end of the parked requests`);
+  // The hold ends, and then the parked requests: the waiting request of late
+  // gets an instance.
+  await release();
+  const released = Date.now();
+  const served = await waitFor(async () => /served/.test(await logs(ns, "late-client")) && Date.now(), { timeout: TIMEOUT + 180, what: "the request of late" });
+  t.diagnostic(`the request of the new container: served ${((served - released) / 1000).toFixed(1)} s after the end of the hold, ${((served - began) / 1000).toFixed(1)} s after the start of the parked requests`);
   assert.match(await logs(ns, "late"), /^tabernetes: a new instance got its Wasm memory after \d+\.\d s$/m);
 
   // The memories of the ended instances stay until the garbage collection of
