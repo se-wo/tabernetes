@@ -1,0 +1,62 @@
+// CPU time and memory of command components on the tab node
+// (docs/wasi-sockets.md, sections 7.1 and 7.11): AC2, CO6 and CO7. The image
+// wasi-test-cmd (wasm-images/rust/cmd) does CPU work for $BUSY_MS ms and fills
+// $ALLOC_MB MiB of memory.
+//
+// The part of CO7 for an instance of one request is for proxy components
+// (phase 2). A command component has one instance: its memory counts until
+// the container ends.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { apply, kubectl, logs, namespace, nodeName, onNode, podPhase, waitFor, waitForPod } from "./harness.mjs";
+
+const IMAGE = "ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest";
+
+const cmdPod = (name, node, env, resources) => ({
+  apiVersion: "v1",
+  kind: "Pod",
+  metadata: { name },
+  spec: {
+    runtimeClassName: "wasmtime",
+    restartPolicy: "Never",
+    nodeSelector: onNode(node),
+    containers: [{ name: "c", image: IMAGE, env, ...(resources ? { resources } : {}) }],
+  },
+});
+
+// AC2: the pod worker sends cpu messages, and metrics-server shows them. Its
+// window needs two scrapes of 15 seconds, so the loop runs longer than that.
+test("AC2: a component in a loop of CPU work shows CPU in kubectl top pod", async (t) => {
+  const ns = await namespace(t);
+  const node = await nodeName("tab");
+  await apply(cmdPod("busy", node, [{ name: "BUSY_MS", value: "240000" }]), ns);
+  await waitForPod(ns, "busy", podPhase("Running"));
+  const cpu = await waitFor(async () => {
+    const out = await kubectl(`top pod -n ${ns} busy --no-headers`).catch(() => "");
+    const m = /^busy\s+(\d+)m\s/m.exec(out);
+    return m && Number(m[1]) >= 200 && Number(m[1]);
+  }, { timeout: 150, interval: 5, what: "CPU of the pod busy in kubectl top pod" });
+  // One loop of CPU work uses at most one core.
+  assert.ok(cpu <= 1100, `${cpu}m`);
+});
+
+// CO6: the memory of the instance counts for limits.memory. A component
+// that fills 64 MiB with a limit of 32 MiB gets OOMKilled; with a limit of
+// 128 MiB it ends normally.
+test("CO6: a component above limits.memory gets OOMKilled", async (t) => {
+  const ns = await namespace(t);
+  const node = await nodeName("tab");
+  const env = [{ name: "ALLOC_MB", value: "64" }];
+  await apply([
+    cmdPod("over", node, env, { limits: { memory: "32Mi" } }),
+    cmdPod("under", node, env, { limits: { memory: "128Mi" } }),
+  ], ns);
+  const over = await waitForPod(ns, "over", podPhase("Succeeded", "Failed"));
+  const st = over.status.containerStatuses[0].state.terminated;
+  assert.equal(st.reason, "OOMKilled", JSON.stringify(st));
+  assert.equal(st.exitCode, 137);
+  const under = await waitForPod(ns, "under", podPhase("Succeeded", "Failed"));
+  const out = await logs(ns, "under");
+  assert.equal(under.status.phase, "Succeeded", out);
+  assert.match(out, /^alloc 64 MiB: 64$/m);
+});

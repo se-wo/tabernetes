@@ -21,6 +21,9 @@
 // waits only with JSPI, so the worker continues to receive messages.
 import { createIdle, createSockets, nextTask } from "./sockets.js";
 
+import { browserFilesystem } from "./files.js";
+import { tickImports } from "./cpu.js";
+
 // The exit code of a trap, of an error result of run, of a function that is
 // not there and of a component that cannot instantiate. runwasi gives 137 for
 // each error of the component that is not an exit (executor.rs of
@@ -290,11 +293,14 @@ export async function loadBlob(js) {
   }
 }
 
-// runComponent runs the start message {component, args, env, cwd} and gives
-// the exit code. WASIShim is the class of the shim; io is the io.js of the
-// shim ({poll, streams, error, pollableCreate}); load(js) gives the module of
-// the generated JavaScript. The handler of the message stdin goes on peer.
-export async function runComponent({ component, args, env, cwd }, { peer, WASIShim, io, load = loadBlob }) {
+// runComponent runs the start message {component, args, env, cwd, preopens}
+// and gives the exit code. WASIShim is the class of the shim; io is the io.js
+// of the shim ({poll, streams, error, pollableCreate}); load(js) gives the
+// module of the generated JavaScript. The handler of the message stdin goes
+// on peer. Memory is the class InMemoryFilesystemAdapter of the shim: with
+// it, the component gets the files of preopens (files.js, FS1 to FS3). meter
+// is the CPU meter of cpu.js (AC2), or null.
+export async function runComponent({ component, args, env, cwd, preopens }, { peer, WASIShim, io, load = loadBlob, Memory = null, meter = null }) {
   const error = (text) => {
     const b = new TextEncoder().encode(text + "\n");
     peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
@@ -317,20 +323,23 @@ export async function runComponent({ component, args, env, cwd }, { peer, WASISh
     stderr: sink(peer, "stderr", undefined, () => idle.call(true)),
     io: { ...io, poll: { ...io.poll, poll: pollWithTask(() => idle.call(true)), pollList: pollWithTask(() => idle.call(true)) } },
     sockets: createSockets({ idle, pollableCreate: io.pollableCreate }),
-    // W1.5: the browserFilesystem adapter over the files of the container
-    // (wasmPreopens, section 8.10) goes here. Until then, a component gets
-    // no preopened directories.
+    // The files of the container (wasmPreopens, section 8.10).
+    ...(Memory ? { browserFilesystem: browserFilesystem(preopens, Memory) } : {}),
   });
   const missing = [];
   const group = memory.group();
   let instance;
+  meter?.begin();
   try {
     const { instantiate } = await load(component.js);
-    instance = await instantiate((file) => component.modules[file], importObject(shim, component.imports, missing), group.instantiateCore);
+    const imports = importObject(shim, component.imports, missing);
+    instance = await instantiate((file) => component.modules[file], meter ? tickImports(meter, imports) : imports, group.instantiateCore);
   } catch (e) {
     if (e?.exitError) return e.code === 0 ? 0 : 1;
     const why = missingText(missing, e?.message ?? e, component.names?.imports);
     return error(why || `the component cannot instantiate: ${e?.message ?? e}`);
+  } finally {
+    meter?.end();
   }
   memory.report();
 
@@ -346,6 +355,7 @@ export async function runComponent({ component, args, env, cwd }, { peer, WASISh
     if (typeof f !== "function") return error(`component does not have exported function ${JSON.stringify(fn)}`);
     call = () => f();
   }
+  meter?.begin();
   try {
     // run and the function of the entrypoint are in asyncMode.val.exports:
     // they give a promise.
@@ -358,6 +368,7 @@ export async function runComponent({ component, args, env, cwd }, { peer, WASISh
     if (e !== null && typeof e === "object" && "payload" in e) return error("the component returned an error from wasi:cli/run");
     return error(`wasm trap: ${e?.message ?? e}`);
   } finally {
+    meter?.end();
     memory.report();
   }
 }

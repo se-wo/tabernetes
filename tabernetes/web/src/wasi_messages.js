@@ -30,7 +30,7 @@
 export const MESSAGES = Object.freeze({
   // Start and end of the pod worker.
   "ready": "w",
-  "start": "g component:component args:strings env:strings cwd:path",
+  "start": "g component:component args:strings env:strings cwd:path preopens?:preopens",
   "exit": "w code:code error?:text",
   // CLI of a command component.
   "stdout": "w bytes:chunk",
@@ -82,6 +82,7 @@ export const LIMITS = Object.freeze({
   ips: 256,
   strings: 65536, // arguments or environment variables
   string: 1 << 20, // one argument or environment variable
+  preopens: 256, // preopened directories of start
 });
 
 const u32 = (v) => Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
@@ -148,6 +149,12 @@ export const KINDS = Object.freeze({
   data: buf(LIMITS.data),
   datagram: buf(LIMITS.datagram),
   body: buf(LIMITS.body),
+  // The copy of the files of the container (wasmPreopens of tabnode_wasi.go,
+  // section 8.10): [{guest, readOnly, files: [[path, Uint8Array]], dirs:
+  // [path]}]. Only Go sends it; the size limit is wasmSnapshotLimit there.
+  preopens: (v) => Array.isArray(v) && v.length <= LIMITS.preopens && v.every((p) =>
+    p !== null && typeof p === "object" && KINDS.path(p.guest) && typeof p.readOnly === "boolean" &&
+    Array.isArray(p.files) && Array.isArray(p.dirs)),
   // The output of the transpile cache (wasi.js): only Go sends it.
   component: (v) => v !== null && typeof v === "object" && typeof v.js === "string" && v.modules !== null && typeof v.modules === "object",
 });
