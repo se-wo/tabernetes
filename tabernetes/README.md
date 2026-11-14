@@ -205,12 +205,23 @@ A container is not a process:
   a module (`web/src/files.js`): read-only volumes stay read-only, writes end
   with the pod worker, and a copy of more than 64 MiB fails. Its pod worker
   sends the busy time of the instance to `kubectl top` and the size of its
-  memory to `limits.memory`. Proxy components (`wasi:http`) and sockets come
-  in later phases. The
-  browser cannot pull from ghcr.io or Docker Hub (no CORS headers), so the
-  page ships an OCI mirror (`wasm-images/`, `images.txt`) next to it; other
-  registries are tried over HTTPS. On a Docker node the same manifest runs
-  with runwasi.
+  memory to `limits.memory`. A proxy component (an export of
+  `wasi:http/incoming-handler`) listens on the address of
+  `WASMTIME_HTTP_PROXY_SOCKET_ADDR` (default `0.0.0.0:8080`), as on runwasi,
+  so Services and `httpGet` probes reach it. Each request gets a new instance
+  with its `REQUEST_ID`, a maximum of 16 at the same time for each container,
+  more requests wait in a queue (`k8s/tabernetes/tabnode_wasi_proxy.go`,
+  `web/src/http.js`). All pods and nodes of one browser tab share
+  approximately 125 Wasm memories; when they are used, requests to proxy
+  components wait and other WebAssembly pods exit with a status
+  (`docs/wasi-sockets.md`, section 14). The client requests of a proxy
+  component (`wasi:http/outgoing-handler`) reach Services, pods and ClusterIPs
+  of the cluster with the same NetworkPolicy as other pods. They do not follow
+  redirects, add no headers other than `Host` and do not decompress the body,
+  as wasmtime. Sockets (`wasi:sockets`) come in later phases. The browser
+  cannot pull from ghcr.io or Docker Hub (no CORS headers), so the page ships
+  an OCI mirror (`wasm-images/`, `images.txt`) next to it; other registries
+  are tried over HTTPS. On a Docker node the same manifest runs with runwasi.
 
 What works like on a real node: init and sidecar containers, restart
 policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/
@@ -867,19 +878,36 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container
   has canonical mode only: full screen programs in a container (vi, top)
-  see lines, not keys. UDP services, sockets in WebAssembly pods and WASI
-  preview 2 proxy components (`wasi:http`) are not supported. A shell loop
+  see lines, not keys. UDP services and sockets in WebAssembly pods are not
+  supported. A shell loop
   without any command (`for ((;;)); do x=1; done`) still freezes the tab.
 - WASI preview 2 components need JavaScript Promise Integration (Chrome and
   Edge 137, Firefox 153, Safari 27 or newer); without it the pod gets
   `CreateContainerError`. Differences from runwasi on a Docker node
-  (`docs/wasi-sockets.md`, section 11): a component has no network yet; the
-  writes of a WebAssembly container to a volume stay in its worker and end
-  with it, so a restart does not see them; the files of a container are a
-  copy of at most 64 MiB; a component in a loop of CPU work receives no
-  messages, and only a stop of the container ends it; it shows CPU in
-  `kubectl top` only when it calls an import (a clock, for example) or
-  waits.
+  (`docs/wasi-sockets.md`, section 11):
+  - A component has no sockets (`wasi:sockets`) yet. Client requests and
+    name lookups to the internet fail: a name outside the cluster gives
+    `DNS-error`, an IP outside it gives `connection-refused`.
+  - A proxy component runs a maximum of 16 instances at the same time for
+    each container (runwasi has no maximum), all on one thread: an instance
+    in a loop of CPU work stops the other instances. Request and response
+    bodies are complete blocks of at most 16 MiB (413 and 500 above it),
+    not streams. When the client closes its connection, the pod worker
+    discards the instance and its client requests; runwasi lets `handle`
+    run to its end.
+  - A request of HTTP/1.1 without a `Host` header gets 400 from the tab
+    node; runwasi closes the connection with no response (as both do for
+    HTTP/1.0 without `Host`).
+  - `127.0.0.1` in `WASMTIME_HTTP_PROXY_SOCKET_ADDR` listens on the pod IP
+    and accepts all clients until phase 3 (on runwasi, only the pod reaches
+    it). A NetworkPolicy for client requests is not tested on a Docker node
+    yet.
+  - The writes of a WebAssembly container to a volume stay in its worker
+    and end with it, so a restart does not see them. The files of a
+    container are a copy of at most 64 MiB.
+  - A component in a loop of CPU work receives no messages, and only a stop
+    of the container ends it. It shows CPU in `kubectl top` only when it
+    calls an import (a clock, for example) or waits.
 - The printed `docker run` works when Docker runs on the same machine as the
   browser. For Docker on another machine in the LAN, publish the port on all
   interfaces (`-p 50001:50001/udp` for the first node) and pass

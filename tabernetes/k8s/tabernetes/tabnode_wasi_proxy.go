@@ -246,6 +246,14 @@ func (px *wasiProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	busy := time.Duration(0)
 	defer func() { px.charge(busy) }()
 
+	// PX31: runwasi gives no response to a request without a host header
+	// (HTTP/1.0), and the connection closes (the step wasi-proxy of the
+	// Docker check). net/http of Go answers such a request of HTTP/1.1 with
+	// 400 before it calls this handler.
+	if r.Host == "" {
+		busy += time.Since(start)
+		panic(http.ErrAbortHandler)
+	}
 	// PX18, PX19: a request body of more than 16 MiB gets 413.
 	if r.ContentLength > int64(proxyBodyLimit) {
 		proxyTooLarge(w, r)
@@ -383,16 +391,9 @@ func proxyHeaderNames(h http.Header) []string {
 
 // proxyRequestURL gives the url of the request message: http://, the value
 // of the host header and the request target with no change (section
-// 8.3.1). A request without a host header (HTTP/1.0) gets the local address
-// of the connection.
+// 8.3.1). ServeHTTP sends no request without a host header.
 func proxyRequestURL(r *http.Request) string {
-	host := r.Host
-	if host == "" {
-		if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
-			host = a.String()
-		}
-	}
-	return "http://" + host + r.RequestURI
+	return "http://" + r.Host + r.RequestURI
 }
 
 // proxyWriteResponse sends a response message with a status code to the

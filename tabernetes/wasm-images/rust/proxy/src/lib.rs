@@ -12,6 +12,19 @@
 //!   /error       response-outparam.set with an error code
 //!   /sockets     the result of each function of wasi:sockets
 //!   /fetch/URL   a client request to http://URL, the result in the body
+//!
+//! Paths of phase 2 (W2.3a). The paths above keep their output, because the
+//! results of the Docker check depend on it.
+//!
+//!   /stdio                  a line to stdout and a line to stderr (PX14)
+//!   /echo                   the request body as the response body, with
+//!                           the method in x-method and the length of the
+//!                           request body in x-body-length (PX18, PX29)
+//!   /fetchfull/URL          as /fetch, and also the response headers and
+//!                           the body bytes in hex (CR3 to CR5)
+//!   /fetchdrop/MS/URL       a client request to http://URL; after MS
+//!                           milliseconds, the component drops it without a
+//!                           response and answers (CR10)
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use wasi::exports::http::incoming_handler::Guest;
@@ -27,6 +40,10 @@ struct Component;
 wasi::http::proxy::export!(Component);
 
 fn respond(out: ResponseOutparam, status: u16, headers: &[(&str, &str)], body: &str) {
+    respond_bytes(out, status, headers, body.as_bytes());
+}
+
+fn respond_bytes(out: ResponseOutparam, status: u16, headers: &[(&str, &str)], body: &[u8]) {
     let list: Vec<(String, Vec<u8>)> = headers
         .iter()
         .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
@@ -38,7 +55,7 @@ fn respond(out: ResponseOutparam, status: u16, headers: &[(&str, &str)], body: &
     ResponseOutparam::set(out, Ok(resp));
     if !body.is_empty() {
         let s = ob.write().expect("stream");
-        for chunk in body.as_bytes().chunks(4096) {
+        for chunk in body.chunks(4096) {
             s.blocking_write_and_flush(chunk).expect("write");
         }
         drop(s);
@@ -133,6 +150,78 @@ fn sockets() -> String {
     out
 }
 
+/// start_fetch sends a client request to http://target.
+fn start_fetch(
+    target: &str,
+) -> Result<wasi::http::types::FutureIncomingResponse, wasi::http::types::ErrorCode> {
+    let (authority, path) = match target.split_once('/') {
+        Some((a, p)) => (a.to_string(), format!("/{p}")),
+        None => (target.to_string(), "/".to_string()),
+    };
+    let req = OutgoingRequest::new(Fields::new());
+    let _ = req.set_scheme(Some(&Scheme::Http));
+    let _ = req.set_authority(Some(&authority));
+    let _ = req.set_path_with_query(Some(&path));
+    wasi::http::outgoing_handler::handle(req, None)
+}
+
+fn read_all(body: &wasi::http::types::IncomingBody) -> Result<Vec<u8>, String> {
+    let s = body.stream().map_err(|_| "no stream".to_string())?;
+    let mut out = Vec::new();
+    loop {
+        match s.blocking_read(65536) {
+            Ok(b) => out.extend_from_slice(&b),
+            Err(wasi::io::streams::StreamError::Closed) => return Ok(out),
+            Err(e) => return Err(format!("{e:?}")),
+        }
+    }
+}
+
+/// fetch_full is fetch with the response headers and the body bytes.
+fn fetch_full(target: &str) -> String {
+    let fut = match start_fetch(target) {
+        Ok(f) => f,
+        Err(e) => return format!("handle error {e:?}\n"),
+    };
+    fut.subscribe().block();
+    let resp = match fut.get() {
+        Some(Ok(Ok(resp))) => resp,
+        Some(Ok(Err(e))) => return format!("error {e:?}\n"),
+        other => return format!("get {:?}\n", other.map(|r| r.map(|_| ()))),
+    };
+    let mut out = format!("status {}\n", resp.status());
+    for (k, v) in resp.headers().entries() {
+        out.push_str(&format!("h {k}: {}\n", String::from_utf8_lossy(&v)));
+    }
+    let body = resp.consume().expect("consume");
+    match read_all(&body) {
+        Ok(b) => {
+            let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            out.push_str(&format!("body-len {}\nbody-hex {hex}\n", b.len()));
+        }
+        Err(e) => out.push_str(&format!("body error {e}\n")),
+    }
+    out
+}
+
+/// fetch_drop starts a client request, waits ms milliseconds and drops it.
+fn fetch_drop(rest: &str) -> String {
+    let (ms, target) = rest.split_once('/').unwrap_or((rest, ""));
+    let ms: u64 = ms.parse().unwrap_or(1000);
+    let fut = match start_fetch(target) {
+        Ok(f) => f,
+        Err(e) => return format!("handle error {e:?}\n"),
+    };
+    sleep_ms(ms);
+    let state = if fut.get().is_some() {
+        "ready"
+    } else {
+        "pending"
+    };
+    drop(fut);
+    format!("dropped after {ms} ms, the response was {state}\n")
+}
+
 fn fetch(target: &str) -> String {
     let (authority, path) = match target.split_once('/') {
         Some((a, p)) => (a.to_string(), format!("/{p}")),
@@ -205,6 +294,36 @@ impl Guest for Component {
             }
             "sockets" => respond(out, 200, &[], &sockets()),
             "fetch" => respond(out, 200, &[], &fetch(parts.get(1).copied().unwrap_or(""))),
+            "stdio" => {
+                println!("stdout from the instance");
+                eprintln!("stderr from the instance");
+                respond(out, 200, &[], "wrote to stdout and stderr\n");
+            }
+            "echo" => {
+                let m = method(&request.method());
+                let body = request.consume().expect("consume");
+                let data = read_all(&body).unwrap_or_default();
+                drop(body);
+                let len = data.len().to_string();
+                respond_bytes(
+                    out,
+                    200,
+                    &[("x-method", m.as_str()), ("x-body-length", len.as_str())],
+                    &data,
+                );
+            }
+            "fetchfull" => respond(
+                out,
+                200,
+                &[],
+                &fetch_full(parts.get(1).copied().unwrap_or("")),
+            ),
+            "fetchdrop" => respond(
+                out,
+                200,
+                &[],
+                &fetch_drop(parts.get(1).copied().unwrap_or("")),
+            ),
             _ => respond(out, 404, &[], "unknown path\n"),
         }
     }

@@ -2,8 +2,9 @@
 # client requests of phase 2 of ../wasi-sockets.md on runwasi. All pods run on
 # node-1 with the test images of the step wasi-images.
 ---
-# The proxy component with its context and its client requests (/fetch).
-# restartPolicy Always, as a Deployment has it.
+# The proxy component without WASMTIME_HTTP_PROXY_SOCKET_ADDR (PX2), with its
+# context and its client requests (/fetch). restartPolicy Always, as a
+# Deployment has it.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-proxy, labels: {wasi-check: proxy, app: wasi-proxy}}
@@ -20,6 +21,37 @@ spec:
   selector: {app: wasi-proxy}
   ports: [{port: 8080}]
 ---
+# PX3: a value that does not parse.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-bad, labels: {wasi-check: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
+      env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "not-an-address"}]
+---
+# PX1, PX6: an address of the variable, and a readiness probe on it.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-probe, labels: {wasi-check: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
+      env:
+        - {name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "0.0.0.0:9090"}
+        - {name: WASMTIME_HTTP_BACKLOG, value: "64"}
+      readinessProbe:
+        httpGet: {path: /status/200, port: 9090}
+        periodSeconds: 2
+---
 # PX4: [::]:8080.
 apiVersion: v1
 kind: Pod
@@ -33,6 +65,42 @@ spec:
       imagePullPolicy: Never
       env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "[::]:8080"}]
 ---
+# PX32: port 0.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-port0, labels: {wasi-check: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
+      env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "0.0.0.0:0"}]
+---
+# PX33: an IP that the pod cannot bind.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-foreign, labels: {wasi-check: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest
+      imagePullPolicy: Never
+      env: [{name: WASMTIME_HTTP_PROXY_SOCKET_ADDR, value: "192.0.2.7:8080"}]
+---
+# PX26: handle sets no response. A pod of its own, because it restarts.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-nores, labels: {wasi-check: proxy}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: "ghcr.io/se-wo/tabernetes/wasi-test-proxy:latest", imagePullPolicy: Never}
+---
 # CR6: a command component with an import of wasi:http.
 apiVersion: v1
 kind: Pod
@@ -43,6 +111,38 @@ spec:
   restartPolicy: Never
   containers:
     - {name: c, image: "ghcr.io/se-wo/tabernetes/wasi-test-cmdhttp:latest", imagePullPolicy: Never}
+---
+# CR1, CR3, CR4, CR5: a test Service. For each connection, it sends a
+# redirect with a compressed body and Connection: close, and writes the
+# request that it receives to its log. The body is "compressed body\n",
+# compressed with gzip -n -9. web/test/e2e/wasi-proxy-cr.test.mjs has the
+# same server.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-proxy-cr, labels: {wasi-check: proxy, app: wasi-proxy-cr}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      env: [{name: BODY, value: H4sIAAAAAAACA0vOzy0oSi0uTk1RSMpPqeQCAAjb6mcQAAAA}]
+      command:
+        - sh
+        - -c
+        - >-
+          while true; do
+          { printf 'HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Encoding: gzip\r\nContent-Length: 36\r\nConnection: close\r\n\r\n';
+          echo "$BODY" | base64 -d; } | nc -l -p 8000;
+          echo '--- end';
+          done
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-proxy-cr}
+spec:
+  selector: {app: wasi-proxy-cr}
+  ports: [{port: 8000}]
 ---
 # The client: busybox, which the node image brings.
 apiVersion: v1
