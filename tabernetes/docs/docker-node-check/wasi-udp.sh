@@ -162,6 +162,10 @@ step_wasi_udp() {
 	udp_fact "nc -u no answer (192.0.2.1:7): $(udp_lines "$(udp_exec 'echo x | nc -u -w 2 192.0.2.1 7; echo rc=$?')")"
 	udp_fact "nc -u refused ($ip:9): $(udp_lines "$(udp_exec "echo x | nc -u -w 2 $ip 9; echo rc=\$?")")"
 	udp_fact "nc -u -v refused ($ip:9): $(udp_lines "$(udp_exec "echo x | nc -u -v -w 2 $ip 9; echo rc=\$?")")"
+	# W4.3: the second datagram of a connected socket takes the error of the
+	# first one. stdout and stderr separately.
+	udp_fact "nc -u refused, two datagrams ($ip:9): $(udp_lines "$(udp_exec "{ echo x; sleep 1; echo y; } | nc -u -w 2 $ip 9 2>/tmp/nc.err; echo rc=\$?; echo stderr:; cat /tmp/nc.err")")"
+	udp_fact "nc -u -v refused, two datagrams ($ip:9): $(udp_lines "$(udp_exec "{ echo x; sleep 1; echo y; } | nc -u -v -w 2 $ip 9 2>/tmp/nc.err; echo rc=\$?; echo stderr:; cat /tmp/nc.err")")"
 	udp_fact "nc -u no endpoints (wasi-udp-none:7): $(udp_lines "$(udp_exec 'echo x | nc -u -w 2 wasi-udp-none 7; echo rc=$?')")"
 	udp_fact "nc -u two lines, one answer each: $(udp_lines "$(udp_exec 'printf "a\nb\n" | nc -u -w 2 wasi-echo-udp 7; echo rc=$?')")"
 
