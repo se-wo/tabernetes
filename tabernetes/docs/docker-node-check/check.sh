@@ -4,10 +4,12 @@
 # the CKAD checks of issue #56 on it. See ../docker-node-check.md.
 #
 # Steps, in this order when none are given:
-#   images join apply coredns storage metrics ingress sanity leave
+#   images join apply coredns storage metrics ingress sanity
+#   wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave
 # Each step prints PASS, FAIL or SKIP with the reason, and writes what it ran
 # and saw to $OUT/<step>.txt. browser.mjs must already run. "leave" removes
-# the node, so it comes last.
+# the node, so it comes last. The steps wasi-* are in wasi-*.sh, with their
+# objects in wasi-*.yaml (../wasi-sockets.md, section 10.2).
 #
 # Env:
 #   IMAGE       the node image (default ghcr.io/se-wo/tabernetes:latest)
@@ -18,6 +20,8 @@
 #   OOM_WORKAROUND=1  tell containerd in the node not to lower oom_score_adj,
 #               for a Docker daemon without CAP_SYS_RESOURCE (nested Docker)
 #   OUT         directory for the output (default ./out)
+#   OCI         the OCI mirror of the page with the test images for wasi-images
+#               (default .build/site/oci, from mise run site)
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="${IMAGE:-ghcr.io/se-wo/tabernetes:latest}"
@@ -50,6 +54,52 @@ wait_for() {
 	done
 	printf '$ %s\n%s\n(no match for /%s/ after %s s)\n' "$1" "$out" "$2" "$3" >>"$OUT/$step.txt"
 	return 1
+}
+
+# node_ns sets crictl_ns: the nsenter flags for the namespaces of containerd
+# in the node. kubectl exec needs the serving certificate of the kubelet;
+# crictl exec does not. Without CAP_SYS_ADMIN the agent runs containerd in
+# namespaces of its own (node/agent/userns.go), and the stream server of
+# crictl exec and attach listens on 127.0.0.1 in there.
+crictl_ns=""
+node_ns() {
+	# shellcheck disable=SC2016 # for the shell in the node
+	crictl_ns="$(docker exec "$N" sh -c 'for p in /proc/[0-9]*; do
+		[ "$(cat "$p/comm")" = containerd ] || continue
+		f="-n -m"
+		[ "$(readlink "$p/ns/user")" = "$(readlink /proc/self/ns/user)" ] || f="-U --preserve-credentials $f"
+		echo "-t ${p#/proc/} $f"
+		break
+	done')"
+}
+
+# node_crictl runs crictl in the node, in the namespaces of containerd.
+node_crictl() {
+	[ -n "$crictl_ns" ] || node_ns
+	# shellcheck disable=SC2086 # crictl_ns is a list of flags
+	docker exec -i "$N" nsenter $crictl_ns crictl "$@"
+}
+
+# pod_exec <pod> '<shell command line>': runs it in the first container of a
+# pod on node-1, with crictl exec.
+pod_exec() {
+	local id
+	id="$(node_crictl ps -q --label "io.kubernetes.pod.name=$1" | head -1)"
+	if [ -z "$id" ]; then
+		echo "(no container of the pod $1)"
+		return 1
+	fi
+	node_crictl exec "$id" sh -c "$2" 2>&1
+}
+
+# apply_file <file>: deletes the objects of the file and creates them again.
+apply_file() {
+	run tab run "kubectl delete --ignore-not-found --wait=true -f - <<'EOF'
+$(cat "$1")
+EOF"
+	run tab run "kubectl apply -f - <<'EOF'
+$(cat "$1")
+EOF"
 }
 
 step_images() {
@@ -192,9 +242,15 @@ step_leave() {
 	fi
 }
 
+for f in "$here"/wasi-*.sh; do
+	# shellcheck source=/dev/null
+	. "$f"
+done
+
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(images join apply coredns storage metrics ingress sanity leave)
+[ ${#steps[@]} -gt 0 ] || steps=(images join apply coredns storage metrics ingress sanity
+	wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave)
 for step in "${steps[@]}"; do
 	: >"$OUT/$step.txt"
-	"step_$step"
+	"step_${step//-/_}"
 done

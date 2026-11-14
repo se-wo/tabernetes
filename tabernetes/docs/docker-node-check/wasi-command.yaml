@@ -1,0 +1,195 @@
+# Objects of the step wasi-command (wasi-command.sh): the command components
+# of phase 1 of ../wasi-sockets.md on runwasi. All pods run on node-1 with the
+# RuntimeClass wasmtime and the test images of the step wasi-images.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: wasi-command}
+data:
+  file: "from a volume"
+---
+# CO1, CO5, FS1: arguments, environment, a file of a volume and stdin.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-cmd, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      args: ["first arg", "second"]
+      stdin: true
+      stdinOnce: true
+      env:
+        - {name: GREETING, value: "hello component"}
+        - {name: FILE, value: /config/file}
+        - {name: STDIN, value: "1"}
+      volumeMounts:
+        - {name: config, mountPath: /config}
+  volumes:
+    - name: config
+      configMap: {name: wasi-command}
+---
+# CO18: std::process::exit with 0, 1 and 3.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-exit0, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: EXIT_CODE, value: "0"}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-exit1, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: EXIT_CODE, value: "1"}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-exit3, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: EXIT_CODE, value: "3"}]
+---
+# CO18: an import of exit-with-code gets the status of CO11.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-exitcode, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-exitcode:latest
+      imagePullPolicy: Never
+      env: [{name: EXIT_CODE, value: "3"}]
+---
+# CO2: the exports wasi:cli/run and then wasi:http/incoming-handler.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-both, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-both:latest
+      imagePullPolicy: Never
+---
+# CO2: the exports wasi:http/incoming-handler and then wasi:cli/run. The
+# readiness probe shows the proxy world.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-bothrev, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-bothrev:latest
+      imagePullPolicy: Never
+      readinessProbe:
+        httpGet: {path: /, port: 8080}
+        periodSeconds: 2
+---
+# CO3: the function that the entrypoint names. CO4: no such function.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-core-go, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-core:latest
+      imagePullPolicy: Never
+      command: ["/wasi-test-core.wasm#go"]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-core-start, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-core:latest
+      imagePullPolicy: Never
+---
+# CO11, CO12: an import of WASI 0.3.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-wasi03, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-wasi03:latest
+      imagePullPolicy: Never
+---
+# FS2: a write to a read-only volume.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-fs-ro, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: WRITE, value: /ro/x}]
+      volumeMounts:
+        - {name: ro, mountPath: /ro, readOnly: true}
+  volumes:
+    - {name: ro, emptyDir: {}}
+---
+# FS3: a write to a volume. The container exits with 1, and after the restart
+# it shows the old file.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-fs-rw, labels: {wasi-check: command}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: OnFailure
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env:
+        - {name: WRITE, value: /rw/x}
+        - {name: EXIT_CODE, value: "1"}
+      volumeMounts:
+        - {name: rw, mountPath: /rw}
+  volumes:
+    - {name: rw, emptyDir: {}}

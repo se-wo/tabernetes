@@ -1218,25 +1218,44 @@ namespace. Without the module, flannel does not start on the node.
 
 ### 10.1 Test images
 
-The mirror gets these images, in Rust:
+The mirror gets these images, in Rust. The crates are in
+`wasm-images/rust/`. `wasm-images/build.sh` builds them for
+`wasm32-wasip2` (the kind `component` in `wasm-images/images.txt`). Each
+image name starts with `ghcr.io/se-wo/tabernetes/`.
 
-- a command component that writes its arguments, its environment and a
-  file of a volume
-- an echo server for TCP, and an echo server for UDP
-- a proxy component that shows its context
-- a proxy component that sends client requests
+| Image | Contents |
+| --- | --- |
+| `wasi-test-cmd` | A command component. It writes its arguments, its environment, a file of a volume and stdin. It writes a file, looks up a name and exits with a code. Environment variables select each part. |
+| `wasi-test-exitcode` | A command component with an import of `exit-with-code` (CO18). |
+| `wasi-test-cmdhttp` | A command component with an import of `wasi:http` (CR6). |
+| `wasi-test-core` | A component without the two exports. It exports the function `go` (CO3, CO4). |
+| `wasi-test-both` | A component with the export `wasi:cli/run` and then the export `wasi:http/incoming-handler` (CO2). |
+| `wasi-test-bothrev` | The same component with the two exports in the opposite sequence (CO2). |
+| `wasi-test-wasi03` | A command component with an import of `wasi:clocks/monotonic-clock@0.3.0` (CO11, CO12). |
+| `wasi-test-echo` | An echo server for TCP, or for UDP with `PROTO=udp`. |
+| `wasi-test-proxy` | A proxy component. The path of the request selects the behavior. The path `/context` shows its context. The path `/fetch/<URL>` sends a client request. |
 
-The images are on ghcr.io and in the mirror of the page. A Docker node
-without a proxy cannot pull them (section 4.4). The Docker check imports
-them into the node with `ctr images import` (section 9.2, item 18).
+One proxy component has the two functions that phase 0 had in one component.
+Thus the mirror has one proxy image, not two.
+
+The images are on ghcr.io and in the mirror of the page. A push to `main`
+copies them to ghcr.io (`.github/workflows/docker-check.yaml`). A Docker node
+without a proxy cannot pull them (section 4.4). The step `wasi-images` of the
+Docker check imports them into the node with `ctr images import` (section
+9.2, item 18). The step takes the `.wasm` file of each image from the
+mirror. It builds an image with the same name and the same entrypoint in the
+Docker of the host.
 
 ### 10.2 Tests on a Docker node
 
-The Docker check runs the tests of the column "Docker". Each phase adds
-steps to `check.sh` and manifests to `manifests.yaml`:
+The Docker check runs the tests of the column "Docker". Each step has a
+script and a manifest file in `docs/docker-node-check/`, for example
+`wasi-command.sh` and `wasi-command.yaml`. `check.sh` runs the scripts. A
+later package changes only the files of its step.
 
 | Phase | Step | Contents |
 | --- | --- | --- |
+| 1 | `wasi-images` | The import of the test images of section 10.1. |
 | 1 | `wasi-command` | The command components and the files. |
 | 2 | `wasi-proxy` | The proxy components and the client requests. |
 | 3 | `wasi-sockets` | TCP and name lookup. |
@@ -1244,7 +1263,12 @@ steps to `check.sh` and manifests to `manifests.yaml`:
 
 A step that needs NetworkPolicy writes SKIP until the nfqueue item of
 section 4.4 closes. The Docker check records the result of each step in
-`$OUT/<step>.txt`.
+`$OUT/<step>.txt`. A step of a later phase records the results of runwasi
+and writes SKIP until the tab node has the parts of its phase.
+
+The workflow `.github/workflows/docker-check.yaml` runs the steps `images`,
+`join` and `wasi-*` on a GitHub runner. The workflow fails if a step writes
+FAIL.
 
 ### 10.3 Tests for each requirement
 
@@ -1259,7 +1283,7 @@ The column "Nodes" gives the nodes for the test:
 | --- | --- | --- |
 | CO1, CO5, FS1 | The command component writes its arguments, its environment and a file of a volume to stdout. It reads stdin. | tab, worker, Docker |
 | CO18 | The command component exits with 0, 1 and 3. The pod shows the exit codes 0, 1 and 1. A component with `exit-with-code` gets the status of CO11. | tab, Docker |
-| CO2 | A component with the two exports runs in the world of its first export. | tab, Docker |
+| CO2 | A component with the two exports runs in the world of its first export. With `wasi:cli/run` first, the component gets the command world. Its import of `wasi:http/types` then gives the status of CR6. With `wasi:http/incoming-handler` first, the component gets the proxy world and answers requests. | tab, Docker |
 | CO3, CO4 | A component without the two exports runs the function of the entrypoint. A second component without this function gets the status of phase 0. | tab, Docker |
 | CO6, CO7 | A component that uses more memory than `limits.memory` gets `OOMKilled`. During one request, the counted memory increases by the memory of the instance. After the response, it decreases by the same number. | tab |
 | CO8 | Two pods of the same image cause one transpiler run. A second entrypoint causes a second run. | tab, worker |

@@ -1,0 +1,31 @@
+# Objects of the step wasi-udp (wasi-udp.sh): UDP of phases 4 and 5 of
+# ../wasi-sockets.md on runwasi. All pods run on node-1 with the test images
+# of the step wasi-images.
+---
+# UD2, UD7, UD15: the UDP echo server.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-udp, labels: {wasi-check: udp, app: wasi-echo-udp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: PROTO, value: udp}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-echo-udp}
+spec:
+  selector: {app: wasi-echo-udp}
+  ports: [{port: 7, protocol: UDP}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-udp-client, labels: {wasi-check: udp}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: busybox, imagePullPolicy: IfNotPresent, command: [sleep, "86400"]}

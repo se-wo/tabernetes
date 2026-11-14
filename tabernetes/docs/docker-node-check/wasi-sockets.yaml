@@ -1,0 +1,55 @@
+# Objects of the step wasi-sockets (wasi-sockets.sh): TCP and name lookup of
+# phase 3 of ../wasi-sockets.md on runwasi. All pods run on node-1 with the
+# test images of the step wasi-images.
+---
+# TC1, TC8: the TCP echo server.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-echo-tcp, labels: {wasi-check: sockets, app: wasi-echo-tcp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: "ghcr.io/se-wo/tabernetes/wasi-test-echo:latest", imagePullPolicy: Never}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-echo-tcp}
+spec:
+  selector: {app: wasi-echo-tcp}
+  ports: [{port: 7, protocol: TCP}]
+---
+# NL1, NL2: name lookup of a Service by its short name and its full name.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-lookup, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: LOOKUP, value: kubernetes}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-lookup-fqdn, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest
+      imagePullPolicy: Never
+      env: [{name: LOOKUP, value: kubernetes.default.svc.cluster.local}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-sockets-client, labels: {wasi-check: sockets}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - {name: c, image: busybox, imagePullPolicy: IfNotPresent, command: [sleep, "86400"]}
