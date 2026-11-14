@@ -771,6 +771,16 @@ format, with `--external:node:*`, and start it as a module worker. The task
 must copy the four core modules of `jco-transpile` to `../vendor/`, relative
 to the bundle (fact 10). The server must send them with
 `Content-Type: application/wasm` for `WebAssembly.compileStreaming`.
+The bundle is `transpile/transpile.worker.js` next to `tabernetes.js`, so the
+core modules are in `vendor/` next to `transpile/`. The page and the site
+keep the two directories in the same place.
+
+`wasi.js` gives a component result only to a caller that sets
+`components: true` in `load`. Other callers get an "unsupported" text after
+the transpiler run. So pods with components get `CreateContainerError` until
+the pod worker can run components. The function of an entrypoint
+(`/file.wasm#go`) goes into the lists of `asyncMode` only if it is a WIT
+label.
 
 The pod worker of a component starts from a `data:` URL (decision 13). It
 loads the generated JavaScript from a `Blob` URL that it makes.

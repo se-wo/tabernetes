@@ -108,8 +108,18 @@ npx esbuild src/unzstd.js --bundle --minify --format=iife --target=es2022 --outf
 # Other workers, next to tabernetes.js.
 for f in src/*.worker.js; do
   [ -e "$f" ] || continue
+  [ "$f" = src/transpile.worker.js ] && continue
   npx esbuild "$f" --bundle --minify --format=iife --target=es2022 --outfile="$out/$(basename "$f")"
 done
+# The transpile worker of components (docs/wasi-sockets.md, section 8.2) is
+# a module worker in transpile/. jco-transpile has dynamic imports of node:*
+# for Node.js only, and loads its core modules from ../vendor/ relative to
+# the bundle.
+rm -rf "$out/transpile" "$out/vendor"
+npx esbuild src/transpile.worker.js --bundle --minify --format=esm --target=es2022 \
+  --external:'node:*' --outfile="$out/transpile/transpile.worker.js"
+mkdir -p "$out/vendor"
+cp node_modules/@bytecodealliance/jco-transpile/vendor/js-component-bindgen-component.core*.wasm "$out/vendor/"
 cp node_modules/@xterm/xterm/css/xterm.css "$out/xterm.css"
 '''
 

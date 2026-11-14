@@ -102,6 +102,8 @@ function jsPackages(web, out, entryPoints) {
     const r = esbuild.buildSync({
       entryPoints: [path.resolve(web, entry)], bundle: true, write: false, metafile: true, outdir: "/nonexistent",
       format: "esm", target: "es2022", logLevel: "silent", absWorkingDir: web,
+      // jco-transpile imports node:* only in Node.js (the transpile worker).
+      external: ["node:*"],
     });
     for (const input of Object.keys(r.metafile.inputs)) {
       const m = /^(.*node_modules\/)((?:@[^/]+\/)?[^/]+)\//.exec(input);
@@ -110,11 +112,20 @@ function jsPackages(web, out, entryPoints) {
   }
   // xterm.css is copied from the xterm package.
   pkgs.set(fs.realpathSync(path.join(web, "node_modules/@xterm/xterm")), null);
+  const pjs = new Map([...pkgs.keys()].map((dir) => [dir, JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"))]));
+  const repoOf = (pj) => (typeof pj.repository === "string" ? pj.repository : pj.repository?.url);
   const entries = [...pkgs.keys()].sort().map((dir) => {
-    const pj = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
-    const files = licenseFiles(dir);
+    const pj = pjs.get(dir);
+    const repo = repoOf(pj);
+    let files = licenseFiles(dir);
+    // A package without a license file (@bytecodealliance/jco) gets the
+    // files of another bundled package from the same repository with the
+    // same license (@bytecodealliance/jco-transpile).
+    if (!files.length && repo) {
+      const sibling = [...pjs].find(([d, o]) => d !== dir && repoOf(o) === repo && o.license === pj.license && licenseFiles(d).length);
+      if (sibling) files = licenseFiles(sibling[0]);
+    }
     if (!files.length) throw new Error(`no license file in ${dir} (package.json says ${pj.license})`);
-    const repo = typeof pj.repository === "string" ? pj.repository : pj.repository?.url;
     return {
       name: pj.name, version: pj.version, license: pj.license,
       url: pj.homepage || repo?.replace(/^git\+/, "") || `https://www.npmjs.com/package/${pj.name}`,

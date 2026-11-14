@@ -44,6 +44,19 @@ const css = copy("xterm.css");
 // Workers that tabernetes.js starts itself; they sit next to it.
 const workers = fs.readdirSync(assets).filter((f) => f.endsWith(".worker.js")).sort();
 workers.forEach(copy);
+// The transpile worker of components (docs/wasi-sockets.md, section 8.2) and
+// the four core modules of jco-transpile, which it loads from ../vendor/
+// relative to itself with WebAssembly.compileStreaming. The server must send
+// them as application/wasm: GitHub Pages and other static servers do this
+// for the extension .wasm.
+for (const dir of ["transpile", "vendor"]) {
+  const files = fs.readdirSync(need(path.join(assets, dir))).sort();
+  if (dir === "vendor" && files.filter((f) => /\.core\d*\.wasm$/.test(f)).length !== 4) {
+    throw new Error(`${path.join(assets, dir)} must have the four core modules of jco-transpile`);
+  }
+  fs.mkdirSync(path.join(out, dir));
+  for (const f of files) copy(path.join(dir, f));
+}
 
 // The service worker of the "proxy" command. Its scope is the directory it is
 // in, below the page (web/src/proxy.js registers it relative to the page).
@@ -66,7 +79,7 @@ fs.copyFileSync(need(path.join(root, "LICENSE")), path.join(out, "LICENSE.txt"))
 const goLicenses = JSON.parse(fs.readFileSync(need(path.join(assets, "THIRD_PARTY_LICENSES.go.json")), "utf8"));
 const jsJSON = path.join(assets, "THIRD_PARTY_LICENSES.js.json");
 execFileSync(process.execPath, [path.join(here, "third-party.mjs"), "js", path.join(tab, "web"), jsJSON,
-  "src/index.js", "src/unzstd.js", ...workers.map((w) => `src/${w}`)], { stdio: "inherit" });
+  "src/index.js", "src/unzstd.js", ...workers.map((w) => `src/${w}`), "src/transpile.worker.js"], { stdio: "inherit" });
 const jsLicenses = JSON.parse(fs.readFileSync(jsJSON, "utf8"));
 fs.writeFileSync(path.join(out, "THIRD_PARTY_LICENSES.txt"), thirdParty([goLicenses, jsLicenses], hasImages && imageList()));
 
