@@ -197,18 +197,20 @@ A container is not a process:
   memory to `limits.memory`. A proxy component (an export of
   `wasi:http/incoming-handler`) listens on the address of
   `WASMTIME_HTTP_PROXY_SOCKET_ADDR` (default `0.0.0.0:8080`), as on runwasi,
-  so Services and `httpGet` probes reach it. Each
-  request gets a new instance with its `REQUEST_ID`, a maximum of 16 at the
-  same time for each container, more requests wait in a queue
-  (`k8s/tabernetes/tabnode_wasi_proxy.go`, `web/src/http.js`). Its client
-  requests (`wasi:http/outgoing-handler`) reach Services, pods and ClusterIPs
-  of the cluster with the same NetworkPolicy as other pods. They do not
-  follow redirects, add no headers other than `Host` and do not decompress
-  the body, as wasmtime. Sockets (`wasi:sockets`) come in later phases. The
-  browser cannot pull from ghcr.io or Docker Hub (no CORS headers), so the
-  page ships an OCI mirror (`wasm-images/`, `images.txt`) next to it; other
-  registries are tried over HTTPS. On a Docker node the same manifest runs
-  with runwasi.
+  so Services and `httpGet` probes reach it. Each request gets a new instance
+  with its `REQUEST_ID`, a maximum of 16 at the same time for each container,
+  more requests wait in a queue (`k8s/tabernetes/tabnode_wasi_proxy.go`,
+  `web/src/http.js`). All pods and nodes of one browser tab share
+  approximately 125 Wasm memories; when they are used, requests to proxy
+  components wait and other WebAssembly pods exit with a status
+  (`docs/wasi-sockets.md`, section 14). The client requests of a proxy
+  component (`wasi:http/outgoing-handler`) reach Services, pods and ClusterIPs
+  of the cluster with the same NetworkPolicy as other pods. They do not follow
+  redirects, add no headers other than `Host` and do not decompress the body,
+  as wasmtime. Sockets (`wasi:sockets`) come in later phases. The browser
+  cannot pull from ghcr.io or Docker Hub (no CORS headers), so the page ships
+  an OCI mirror (`wasm-images/`, `images.txt`) next to it; other registries
+  are tried over HTTPS. On a Docker node the same manifest runs with runwasi.
 
 What works like on a real node: init and sidecar containers, restart
 policies with CrashLoopBackOff, Jobs, emptyDir/configMap/secret/projected/

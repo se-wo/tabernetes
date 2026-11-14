@@ -13,10 +13,14 @@ export const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 // sharedNamespace gives the name of one namespace for all tests of a file.
 // Call it at the top level of the file: it deletes the namespace after the
-// last test. create() creates it.
+// last test and waits until its pods are gone. The pod workers of the
+// proxy components then free their Wasm memories, which all pods of the tab
+// share (wasi-memory.test.mjs). create() creates it.
 export function sharedNamespace(prefix) {
   const ns = `${prefix}-${randomBytes(3).toString("hex")}`;
-  if (!process.env.E2E_KEEP) after(() => kubectl(`delete namespace ${ns} --wait=false`).catch(() => {}));
+  if (!process.env.E2E_KEEP) {
+    after(() => kubectl(`delete namespace ${ns} --wait=true --timeout=120s`, { timeout: 180 }).catch(() => {}));
+  }
   return { ns, create: () => kubectl(`create namespace ${ns}`) };
 }
 
