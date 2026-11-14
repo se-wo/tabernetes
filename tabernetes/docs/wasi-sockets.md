@@ -963,6 +963,33 @@ The HTTP messages obey these rules:
 - For a response with no `content-length` header, the Go side sends the
   body with `transfer-encoding: chunked` (PX31).
 
+The Go side does these steps for a client request (`tabnode_wasi_fetch.go`):
+
+- It examines the `url` of `fetch` before it makes a connection (MS5). A URL
+  that is not an absolute `http` or `https` URL with a host gives
+  `HTTP-request-URI-invalid`. A host outside the cluster gives `DNS-error`
+  for a name (CR2) and `connection-refused` for an IP (CR7). The Go side
+  sends only the code name. The pod worker adds the payload of the code.
+- It does not send the 9 headers of fact 20, if the pod worker sends them.
+  It sends no other headers than these of `fetch` and `host` (CR4).
+- Each client request has a connection of its own. The Go side does not
+  keep the connection for a different request.
+- A connect error gives `connection-refused`. A connection that
+  NetworkPolicy drops also gives `connection-refused`, after `synTimeout`
+  (CR8). Only the connect timeout of 600 seconds gives `connection-timeout`
+  (CR11).
+- An error after the connection gives `HTTP-protocol-error`. An error of
+  the certificate gives `TLS-certificate-error`, another TLS error gives
+  `TLS-protocol-error`. An error during the read of the response body gives
+  `HTTP-response-incomplete`.
+- A response body of more than 16 MiB gives `HTTP-response-body-size`. More
+  than 1,000 header lines give `HTTP-response-header-section-size`. A header
+  name or value above its limit gives `HTTP-response-header-size`.
+- `net/http` of Go does not keep the sequence of different header names. So
+  the headers of `fetched` are in the alphabetical sequence of their names.
+  The values of one name stay in their sequence. `net/http` removes
+  `transfer-encoding` from the headers. The Go side adds it again.
+
 The fields have these limits in addition to section 8.4:
 
 | Field | Limit |
