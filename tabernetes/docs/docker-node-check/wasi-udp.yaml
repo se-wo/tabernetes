@@ -1,19 +1,32 @@
-# Objects of the step wasi-udp (wasi-udp.sh): UDP of phases 4 and 5 of
+# Objects of the step wasi-udp (wasi-udp.sh): UDP of phase 4 of
 # ../wasi-sockets.md on runwasi. All pods run on node-1 with the test images
-# of the step wasi-images.
+# of the step wasi-images. The UDP modes of wasi-test-echo are in
+# wasm-images/rust/echo/src/main.rs. The client containers wait with DELAY_MS
+# until their servers listen and their names resolve.
 ---
-# UD2, UD7, UD15: the UDP echo server.
+# UD2, UD7, UD15: the UDP echo server on 0.0.0.0:7. UD13: the container
+# "self" sends to the Service of its own pod.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-echo-udp, labels: {wasi-check: udp, app: wasi-echo-udp}}
 spec:
   runtimeClassName: wasmtime
   nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
   containers:
     - name: c
       image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
       imagePullPolicy: Never
       env: [{name: PROTO, value: udp}]
+    - name: self
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp:7"}
+        - {name: CONNECTED, value: "1"}
+        - {name: LINE, value: self}
+        - {name: DELAY_MS, value: "10000"}
 ---
 apiVersion: v1
 kind: Service
@@ -22,6 +35,214 @@ spec:
   selector: {app: wasi-echo-udp}
   ports: [{port: 7, protocol: UDP}]
 ---
+# Fact 11 of W4.5a: a second ClusterIP with the same endpoint.
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-echo-udp2}
+spec:
+  selector: {app: wasi-echo-udp}
+  ports: [{port: 7, protocol: UDP}]
+---
+# The name wasi-echo-udp-pod resolves to the pod IP (UD8, UD9).
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-echo-udp-pod}
+spec:
+  clusterIP: None
+  selector: {app: wasi-echo-udp}
+  ports: [{port: 7, protocol: UDP}]
+---
+# UD10, UD11: a Service without endpoints.
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-udp-none}
+spec:
+  selector: {app: wasi-udp-none}
+  ports: [{port: 7, protocol: UDP}]
+---
+# UD20: the echo server on 127.0.0.1:7 and a client in the same pod. UD21:
+# the name wasi-udp-lo resolves to the pod IP, which has no socket on port 7.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-udp-lo, labels: {wasi-check: udp, app: wasi-udp-lo}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: PROTO, value: udp}
+        - {name: ADDR, value: "127.0.0.1:7"}
+    - name: client
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "127.0.0.1:7"}
+        - {name: LINE, value: lo}
+        - {name: DELAY_MS, value: "5000"}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-udp-lo}
+spec:
+  clusterIP: None
+  selector: {app: wasi-udp-lo}
+  ports: [{port: 7, protocol: UDP}]
+---
+# The clients in another pod. Each container is one component with its own
+# socket. A connected client sends 3 datagrams: the error of the first one
+# shows in the second one.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-udp-clients, labels: {wasi-check: udp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    # UD2, UD7, UD15: connected and not connected, through the Service.
+    - name: svc
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp:7"}
+        - {name: CONNECTED, value: "1"}
+        - {name: COUNT, value: "2"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: LINE, value: svc}
+        - {name: DELAY_MS, value: "10000"}
+    - name: unc
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp:7"}
+        - {name: LINE, value: unc}
+        - {name: DELAY_MS, value: "10000"}
+    # UD8, UD9: the pod IP of the echo pod, port 9 without a socket. Fact 3:
+    # the same without connect.
+    - name: noport
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp-pod:9"}
+        - {name: CONNECTED, value: "1"}
+        - {name: COUNT, value: "3"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: WAIT_MS, value: "1000"}
+        - {name: DELAY_MS, value: "10000"}
+    - name: noport-unc
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp-pod:9"}
+        - {name: COUNT, value: "3"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: WAIT_MS, value: "1000"}
+        - {name: DELAY_MS, value: "10000"}
+    # UD10, UD11: a Service without endpoints.
+    - name: noep
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-udp-none:7"}
+        - {name: CONNECTED, value: "1"}
+        - {name: COUNT, value: "3"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: WAIT_MS, value: "1000"}
+        - {name: DELAY_MS, value: "10000"}
+    # UD12: the ClusterIP of wasi-echo-udp with port 9, which no Service has.
+    - name: nosvc
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp:9"}
+        - {name: CONNECTED, value: "1"}
+        - {name: COUNT, value: "3"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: WAIT_MS, value: "1000"}
+        - {name: DELAY_MS, value: "10000"}
+    # UD21: the pod IP of wasi-udp-lo, where only 127.0.0.1:7 has a socket.
+    - name: lo
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-udp-lo:7"}
+        - {name: CONNECTED, value: "1"}
+        - {name: COUNT, value: "3"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: WAIT_MS, value: "1000"}
+        - {name: DELAY_MS, value: "10000"}
+    # Fact 11: one socket sends to two ClusterIPs with the same endpoint.
+    - name: clash
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-client}
+        - {name: CONNECT, value: "wasi-echo-udp:7,wasi-echo-udp2:7"}
+        - {name: COUNT, value: "2"}
+        - {name: INTERVAL_MS, value: "500"}
+        - {name: LINE, value: clash}
+        - {name: DELAY_MS, value: "10000"}
+---
+# UD14 and the facts of rules 2 to 7 of section 8.3.3, the UDP options
+# (TC22).
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-udp-facts, labels: {wasi-check: udp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: errors
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-errors}
+        - name: POD_IP
+          valueFrom: {fieldRef: {fieldPath: status.podIP}}
+    - name: options
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: udp-options}]
+---
+# UD5, UD6: 1,000 datagrams of 1,024 bytes to a server that does not read
+# until the flood is over.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-udp-queue, labels: {wasi-check: udp}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: server
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-queue}
+        - {name: ADDR, value: "0.0.0.0:7300"}
+        - {name: READ_DELAY_MS, value: "8000"}
+    - name: flood
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env:
+        - {name: MODE, value: udp-flood}
+        - {name: CONNECT, value: "127.0.0.1:7300"}
+        - {name: DELAY_MS, value: "3000"}
+---
+# Fact 9: busybox nc -u.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-udp-client, labels: {wasi-check: udp}}
