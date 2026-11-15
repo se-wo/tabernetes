@@ -72,8 +72,9 @@ browser tab (single wasm binary)                     docker run tabernetes
   ([gojq](https://github.com/itchyny/gojq)), `date`, `watch`, `less`, `df`,
   `du`, `mount`, `nc`, `ping`, `telnet`, `openssl` and more; `help` lists them
   all. They work in the terminal and in `kubectl exec` of tab node
-  containers, where paths go through the root of the container and `nc`,
-  `ping` and `telnet` dial from the pod IP. `openssl` covers keys, requests,
+  containers, where paths go through the root of the container, `nc` and
+  `telnet` dial from the pod IP, and `ping` sends ICMP echo requests from the
+  pod IP (see [ICMP echo](#icmp-echo)). `openssl` covers keys, requests,
   signing and `x509 -text` for the CertificateSigningRequest exercise.
   `kubectl convert` is compiled in, because plugins cannot run in Wasm.
   `ls` prints like BusyBox, with `-l -n -a -A -d -h -i -L -R -r -S -t -1` and
@@ -700,6 +701,29 @@ for UDP of components on Docker nodes (not tested yet), rules on domain names
 (egress to the internet goes through `fetch()`, without an IP), and an exact
 `except` of `ipBlock` for internet egress.
 
+### ICMP echo
+
+The tab node gets no IP packets, so the echo reply of `ping` is a function of
+the tab node. Each echo request goes through the engine, with no protocol and
+port 0, as kube-network-policies gives ICMP (`allowedICMP` in
+`tabnode_netpol.go`): the egress of the source and the ingress of the
+destination decide it. The source is the pod IP, or the node IP for the
+terminal and `hostNetwork` pods, which are never blocked.
+
+- A NetworkPolicy rule with `ports` does not match ICMP. A rule without
+  `ports` matches it, so `ping` gets replies only where such a rule (or no
+  policy) allows the pod.
+- A tab node examines each echo request, so a new policy stops the next
+  reply. A Docker node examines only the first echo request of an ICMP flow;
+  a new policy does not stop a running `ping` there.
+- Replies come from the pods of the same tab node, its node IP and
+  `127.0.0.1`. A ClusterIP gives no reply, as with the iptables mode of
+  kube-proxy. ICMP between nodes is not available: `ping` to a pod IP or a
+  node IP of another node prints `ping: <ip> is on node <name>: ICMP between
+  nodes is not available` and exits 1.
+- `ping` to a pod on another node worked over TCP before; it now shows the
+  text of IC3 (`docs/wasi-sockets.md`, section 7.9).
+
 ## Ingress
 
 The addons install ingress-nginx (`k8s/tabernetes/addons/ingress-nginx.yaml`):
@@ -895,8 +919,10 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   `CrashLoopBackOff`. The `etcd-tab` pod is the etcd shim.
 - `yq` runs jq expressions on YAML with gojq: the yq v4 commands and flags
   work, its own functions mostly do not (`strenv` and `env` do). `jq` and
-  `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes), and
-  `ping` has no ICMP: a TCP connection to the host stands in for it.
+  `yq` print keys sorted. `awk` cannot run commands (`system()`, pipes).
+- `ping` gets ICMP echo replies only on one tab node: from its pods, its node
+  IP and `127.0.0.1`. To an IP of another node, it shows "ICMP between nodes
+  is not available" ([ICMP echo](#icmp-echo)).
   `less` and `more` print the whole input.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
@@ -950,6 +976,9 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
     connected socket gets `connection-refused` on a later `send`, but not
     on a `send` at once after it: the error comes from the Go side a moment
     later. runwasi gives it to the next `send`.
+  - ICMP (phase 6): `ping` gets echo replies only on one tab node, and the
+    tab node examines each echo request. On a Docker node, ICMP goes between
+    all nodes, and only the first echo request of a flow is examined.
   - Until phase 5, the tab node drops datagrams to pods on other nodes and
     to Services with only such endpoints, without `connection-refused`.
     NetworkPolicy for UDP of components is not tested on a Docker node yet.
