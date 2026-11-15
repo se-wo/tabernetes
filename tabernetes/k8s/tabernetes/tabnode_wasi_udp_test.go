@@ -259,9 +259,10 @@ func TestWasiUDPConnect(t *testing.T) {
 	}
 }
 
-// UD9, rule 7: a connected socket sends to a port without a socket. The read
-// pump takes the pending error: exactly one "error" with
-// connection-refused. The credit comes back, and the socket continues.
+// UD9, rule 7: a connected socket sends to a port without a socket. The write
+// pump takes the pending error at once: exactly one "error" with
+// connection-refused, before the next send of the component. The credit
+// comes back, and the socket continues.
 func TestWasiUDPRefused(t *testing.T) {
 	ip := nextLoopbackIP()
 	w := udpPeer(t, ip, nil)
@@ -307,10 +308,10 @@ func TestWasiUDPRefused(t *testing.T) {
 	}
 }
 
-// UD9, rule 7: the write pump takes the pending error. The socket has no
-// read pump here, so only the write pump can take it. The datagram of the
-// send that takes it does not arrive, its credit comes back, and exactly one
-// "error" goes out.
+// UD9, rule 7: a pending error that another call set (here a Write of the
+// test) goes to the next WriteTo of the write pump. The datagram of that
+// send does not arrive, its credit comes back, and exactly one "error" goes
+// out.
 func TestWasiUDPRefusedOnWrite(t *testing.T) {
 	ip := nextLoopbackIP()
 	w := udpPeer(t, ip, nil)
@@ -522,8 +523,8 @@ func TestWasiUDPLoopback(t *testing.T) {
 	}
 	defer c.Close()
 	c.Write([]byte("other"))
-	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Read(make([]byte, 8)); !errors.Is(err, syscall.ECONNREFUSED) {
+	// Rule 7: the next send takes the pending error.
+	if _, err := c.Write([]byte("again")); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("other pod: %v, want ECONNREFUSED", err)
 	}
 	w.none("datagram", 1, 20*time.Millisecond)

@@ -18,6 +18,12 @@ package main
 //     two goroutines: the read pump calls ReadFrom and sends "datagram", the
 //     write pump calls WriteTo for each "datagram" of the pod worker and
 //     sends "credit".
+//   - The pending error (rule 7). On runwasi only the next send of the
+//     component gets connection-refused, and the UDP table gives the
+//     pending error only to WriteTo (udpPendingOnRead). The pod worker must
+//     know it before the next send of the component, so the write pump
+//     takes it at once after the WriteTo that set it, and sends one
+//     "error". The pod worker keeps it and gives it to the next send.
 //   - Each socket has a context from the context of the container
 //     (wasiPeerCtx). Its end closes the udpConn. "closed" (rule 8), MS6 and
 //     the stop of the container use this path.
@@ -338,7 +344,8 @@ func (k *udpSock) readPump() {
 		switch {
 		case errors.Is(err, syscall.ECONNREFUSED):
 			// Rule 7: this call took the pending error, so no other call
-			// gives it. One "error" for each pending error.
+			// gives it. One "error" for each pending error. Only when the
+			// table gives it to ReadFrom (udpPendingOnRead).
 			k.send("error", map[string]any{"error": "connection-refused"})
 		case err != nil:
 			return // the socket closed
@@ -397,19 +404,23 @@ func (k *udpSock) writePump() {
 			continue
 		}
 		var err error
+		refused := false
 		if k.conn != nil {
 			// The UDP table charges the time of WriteTo (AC1). WriteTo
 			// does not wait.
 			_, err = k.conn.WriteTo(d.data, d.to)
+			// A refusal happens in WriteTo: take the pending error now.
+			refused = k.conn.takePending()
 		}
 		// IPv6 (no socket in the table): the datagram is dropped.
 		start := time.Now()
 		if k.ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, syscall.ECONNREFUSED) {
-			// Rule 7: this send took the pending error and did not send
-			// its datagram.
+		if errors.Is(err, syscall.ECONNREFUSED) || refused {
+			// Rule 7: one "error" for each pending error. A WriteTo that
+			// took a pending error (set outside this pump) did not send its
+			// datagram; it cannot also set a new one.
 			k.send("error", map[string]any{"error": "connection-refused"})
 		}
 		// The credit goes back also for a datagram that the table dropped
@@ -422,4 +433,14 @@ func (k *udpSock) writePump() {
 		}
 		udpCharge(k.p, time.Since(start))
 	}
+}
+
+// takePending takes the pending error of the socket, if it has one, so that
+// no later call gets it (rule 7). It reports whether the socket had one.
+func (c *udpConn) takePending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	had := c.pending != nil
+	c.pending = nil
+	return had
 }
