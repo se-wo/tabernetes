@@ -227,8 +227,13 @@ A container is not a process:
   TCP sockets and name lookup (`wasi:sockets`, `k8s/tabernetes/tabnode_wasi_tcp.go`,
   `web/src/sockets.js`): they listen on the pod IP, connect to Services, pods
   and ClusterIPs with the NetworkPolicy of the pod, and look up names with
-  the search path of the pod. A socket on `127.0.0.1` accepts only its own
-  pod. UDP sockets come in phase 4. The browser
+  the search path of the pod. They also have UDP sockets
+  (`k8s/tabernetes/tabnode_wasi_udp.go`, `tabnode_udp.go`): a datagram to a
+  ClusterIP goes through the Service translation and a flow table with the
+  timeouts of conntrack (`tabnode_flows.go`), with `sessionAffinity`,
+  `internalTrafficPolicy` and the NetworkPolicy of the pod; the strict mode
+  removes the flows that a new policy denies. A socket on `127.0.0.1`
+  accepts only its own pod. UDP to other nodes comes in phase 5. The browser
   cannot pull from ghcr.io or Docker Hub (no CORS headers), so the page ships
   an OCI mirror (`wasm-images/`, `images.txt`) next to it; other registries
   are tried over HTTPS. On a Docker node the same manifest runs with runwasi.
@@ -377,11 +382,17 @@ directly (`k8s/patch.go`), so its service and pod proxy work, too.
 
 `tabnode_coredns.go` is the CoreDNS of the tab: the built-in image
 `registry.k8s.io/coredns/coredns` logs like the real one, serves `/health`,
-`/ready` and `/metrics` as the Corefile asks, and answers DNS over TCP from
-the same service proxy. There is no UDP in the tab. `hosts` entries and
+`/ready` and `/metrics` as the Corefile asks, and answers DNS over UDP and
+TCP on port 53 of `kube-dns` from the same service proxy. An answer over UDP
+of more than 512 bytes gets the TC bit without records, and the client asks
+again over TCP. `nslookup` (`-vc` for TCP) and `nc -u` in pods and in the
+terminal use the UDP table of the tab node. Until phase 5, `nslookup` to the
+default server uses TCP when `kube-dns` has no ready endpoint on this tab
+node, and the service proxy answers on a cluster without CoreDNS. `hosts` entries and
 `rewrite name` rules of `kubectl edit cm coredns -n kube-system` apply to the
 names of the tab at once. `forward` and the other plugins are ignored: the
-browser has no DNS. Pods on a Docker node need UDP, so once a Docker node is
+browser has no DNS. Pods on a Docker node need UDP to CoreDNS, and they
+cannot reach a tab pod over UDP until phase 5, so once a Docker node is
 Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
 two minutes) and the real CoreDNS runs there.
 
@@ -682,8 +693,11 @@ printf 'apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {name: 
 k exec client -- /agnhost connect web:80 --timeout=2s   # TIMEOUT
 ```
 
-Not covered: UDP (the tab nodes have none), rules on domain names (egress
-to the internet goes through `fetch()`, without an IP), and an exact
+UDP of tab pods works like on a real node: the engine decides the first
+datagram of a flow, a denied datagram makes no flow, and the strict mode
+removes the open flows that a new policy denies. Not covered: NetworkPolicy
+for UDP of components on Docker nodes (not tested yet), rules on domain names
+(egress to the internet goes through `fetch()`, without an IP), and an exact
 `except` of `ipBlock` for internet egress.
 
 ## Ingress
@@ -894,25 +908,29 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container
   has canonical mode only: full screen programs in a container (vi, top)
-  see lines, not keys. UDP services and UDP sockets in WebAssembly pods are
-  not supported (UDP comes in phase 4). A shell loop
+  see lines, not keys. UDP goes only between the pods of one tab node until
+  phase 5: the tab node drops datagrams to pods on other nodes, also to
+  Services with only such endpoints, and Docker pods cannot reach the CoreDNS
+  of a tab node over UDP. A shell loop
   without any command (`for ((;;)); do x=1; done`) still freezes the tab.
 - WASI preview 2 components need JavaScript Promise Integration (Chrome and
   Edge 137, Firefox 153, Safari 27 or newer); without it the pod gets
   `CreateContainerError`. Differences from runwasi on a Docker node
   (`docs/wasi-sockets.md`, section 11):
-  - A component has TCP sockets and name lookup, but no UDP sockets until
-    phase 4 (`not-supported`). Client requests, connections and name
-    lookups to the internet fail: a name outside the cluster gives
-    `DNS-error` (client requests) or `name-unresolvable` (lookups), an IP
-    outside it gives `connection-refused`. A name with characters outside
+  - A component has TCP and UDP sockets and name lookup. Client requests,
+    connections and name lookups to the internet fail: a name outside the
+    cluster gives `DNS-error` (client requests) or `name-unresolvable`
+    (lookups), an IP outside it gives `connection-refused`. A name with characters outside
     ASCII gives `invalid-argument`; wasmtime changes it with IDNA.
   - An IPv6 socket can bind to `::` and listen, but the tab node has no IPv6:
     nothing reaches it, and an IPv4 client gets `connection-refused`, as on
     runwasi (IPv6 only).
   - A socket on `127.0.0.1` accepts only its own pod, as on runwasi. Unlike
     runwasi, the pod also reaches it through its pod IP or a Service of the
-    pod: runwasi gives `connection-refused` there. A client of the same pod
+    pod, for TCP and for UDP: runwasi gives `connection-refused` there, and
+    the datagram does not arrive. A bind to `127.0.0.1:P` and a bind to the
+    pod IP with the same port P give `address-in-use`; on runwasi the two
+    binds work. A client of the same pod
     that dials `127.0.0.1` sees `127.0.0.1` at the two ends. A socket on
     `0.0.0.0` that accepts this client shows the pod IP at the two ends;
     runwasi shows `127.0.0.1`. A `hostNetwork` pod gets no row in the
@@ -922,6 +940,19 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
     that a component sets, with the defaults of runwasi, and have no other
     effect. runwasi passes them to the kernel, which can change the buffer
     sizes.
+  - A UDP socket keeps 256 KiB of datagrams before a receive and drops the
+    next ones; the sender gets no error. Linux counts an overhead for each
+    datagram: on the GitHub runner, it keeps 455 of 1,000 datagrams of
+    1,024 bytes. In the tab, no datagram is lost before a queue is full.
+  - A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod gets
+    the answers from the pod IP; runwasi shows `127.0.0.1`. An IPv6 UDP
+    socket receives nothing, also on `::1`. After a refused datagram, a
+    connected socket gets `connection-refused` on a later `send`, but not
+    on a `send` at once after it: the error comes from the Go side a moment
+    later. runwasi gives it to the next `send`.
+  - Until phase 5, the tab node drops datagrams to pods on other nodes and
+    to Services with only such endpoints, without `connection-refused`.
+    NetworkPolicy for UDP of components is not tested on a Docker node yet.
   - A listener that does not accept keeps its backlog and up to 128 more
     connections (the queue of the in-process network) before a client
     waits; Linux keeps the backlog plus one.
