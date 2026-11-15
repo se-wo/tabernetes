@@ -139,9 +139,18 @@ const TAB = {
     "rule2 udp bind 127.0.0.1:7203: ok then pod-ip:7203: ok": "rule2 udp bind 127.0.0.1:7203: ok then pod-ip:7203: address-in-use",
     "rule2 tcp listen pod-ip:7204: ok ok then 127.0.0.1:7204: ok ok": "rule2 tcp listen pod-ip:7204: ok ok then 127.0.0.1:7204: address-in-use invalid-state",
     // "A UDP socket of the family ipv6 on ::1 that sends to ::1 of its own
-    // pod": nothing arrives.
+    // pod": the send gives remote-unreachable, and nothing arrives.
     "rule4 ipv6 bind [::1]:7230: ok, bind [::1]:0: ok, send to [::1]:7230: ok, receive: 1 datagrams of 2 bytes from [::1]:ephemeral":
-      "rule4 ipv6 bind [::1]:7230: ok, bind [::1]:0: ok, send to [::1]:7230: ok, receive: empty",
+      "rule4 ipv6 bind [::1]:7230: ok, bind [::1]:0: ok, send to [::1]:7230: remote-unreachable, receive: empty",
+    // "A dial from a pod to its own socket on 127.0.0.1 through the pod IP
+    // ..., also a UDP datagram": it arrives, so no error.
+    "rule7 connected to pod-ip:7224 with a socket on 127.0.0.1:7224: send ok, send connection-refused":
+      "rule7 connected to pod-ip:7224 with a socket on 127.0.0.1:7224: send ok, send ok",
+    // "A send of a connected UDP socket at once after a send that the tab
+    // node refuses": the error message of the Go side comes after the
+    // second send, so a later send gets the error.
+    "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, connection-refused, empty":
+      "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, ok, empty",
     // "A UDP socket on 0.0.0.0 that sends to 127.0.0.1 of its own pod": the
     // answers come from the pod IP. The server on 0.0.0.0 sees the pod IP too.
     "addr 0.0.0.0:0 sends to 127.0.0.1:7240 (server on 0.0.0.0:7240): ok, the server sees 127.0.0.1:ephemeral, the answer comes from 127.0.0.1:7240":
@@ -428,8 +437,10 @@ test("UD20, UD21: a UDP server on 127.0.0.1 receives from its own pod, another p
   const a = await lines(ns, "lo", "client");
   const local = a.map((l) => l.match(/^local 0\.0\.0\.0:(\d+)$/)).find(Boolean);
   assert.ok(local, a.join("\n"));
-  assert.deepEqual(await clientLines(ns, "lo", "client"), ["answer echo lo from 127.0.0.1:7"]);
-  // The server sees 127.0.0.1 as the source, as on runwasi.
+  // "A UDP socket on 0.0.0.0 that sends to 127.0.0.1 of its own pod": the
+  // answer comes from the pod IP; runwasi gives 127.0.0.1:7 (section 11).
+  assert.deepEqual(await clientLines(ns, "lo", "client"), [`answer echo lo from ${IP.lo}:7`]);
+  // The server on 127.0.0.1 sees 127.0.0.1 as the source, as on runwasi.
   assert.ok((await lines(ns, "lo", "c")).includes(`udp 2 bytes from 127.0.0.1:${local[1]}`));
   // UD21: the second send gets the error, as on runwasi.
   await exited(ns, "refused", "lo");

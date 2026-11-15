@@ -944,7 +944,10 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
     1,024 bytes. In the tab, no datagram is lost before a queue is full.
   - A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod gets
     the answers from the pod IP; runwasi shows `127.0.0.1`. An IPv6 UDP
-    socket receives nothing, also on `::1`.
+    socket receives nothing, also on `::1`. After a refused datagram, a
+    connected socket gets `connection-refused` on a later `send`, but not
+    on a `send` at once after it: the error comes from the Go side a moment
+    later. runwasi gives it to the next `send`.
   - Until phase 5, the tab node drops datagrams to pods on other nodes and
     to Services with only such endpoints, without `connection-refused`.
     NetworkPolicy for UDP of components is not tested on a Docker node yet.
