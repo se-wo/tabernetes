@@ -1665,11 +1665,16 @@ table does these steps:
 
 Two flows can have the same tuple after the translation, for example when
 one client socket sends to two ClusterIPs with the same endpoint. The
-answer of the endpoint then matches the two flows. The newest flow stays,
-and the older flow ends, as conntrack does for a clash. The next datagram
-of the client to the older ClusterIP makes a new flow, and this flow then
-ends the other flow. Two client sockets have different tuples and keep two
-flows (FL1). Package W4.5a examines the clash on Linux if it can.
+original destinations of the two flows are different, so the two flows stay
+apart (FL1), as on Linux (fact 11 of package W4.5a). The answers of the
+endpoint must then have different tuples. Thus the second flow gets another
+source port on the IP of the client, as the source NAT of Linux does at a
+clash. The endpoint sees this port. The flow changes the answers to this
+port back to the client socket, with the ClusterIP and the port of the
+flow as the source. Each answer thus comes from its own ClusterIP. The new
+port is the first port from 32768 that no flow to the endpoint and no
+socket of the UDP table uses. The newest flow wins only at a real clash:
+the same tuple after the translation and the same original destination.
 
 ### 8.9 UDP between nodes
 

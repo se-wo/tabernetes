@@ -265,9 +265,10 @@ func TestUDPServiceOwnPod(t *testing.T) {
 	}
 }
 
-// FL1: one client pod to two ClusterIPs with the same endpoint gives two
-// flows. With one client socket for both, the two flows have the same tuple
-// after the translation: the newest flow wins (section 8.8).
+// FL1: one client to two ClusterIPs with the same endpoint gives two flows,
+// also with one client socket for both (fact 11 of W4.5a): the tuple of the
+// answers then gets another source port, as the source NAT of Linux does.
+// Each answer comes from its own ClusterIP.
 func TestUDPFlowTuples(t *testing.T) {
 	eip := nextLoopbackIP()
 	s := flowNode(t, []*v1.Service{
@@ -290,18 +291,35 @@ func TestUDPFlowTuples(t *testing.T) {
 		}
 	}
 
-	// The clash: one socket to the two ClusterIPs.
+	// One unconnected socket to the two ClusterIPs, two rounds.
 	u := udpListen(t, ctx, ":0")
-	u.WriteTo([]byte("1"), udpTo("10.96.88.15:53"))
-	udpRecv(t, ep)
-	u.WriteTo([]byte("2"), udpTo("10.96.88.16:53"))
-	udpRecv(t, ep)
-	if n := s.flowCount(); n != 3 {
-		t.Errorf("%d flows after the clash, want 3", n)
+	for round := range 2 {
+		var froms []net.Addr
+		for i, svc := range []string{"10.96.88.15:53", "10.96.88.16:53"} {
+			u.WriteTo([]byte(strconv.Itoa(i)), udpTo(svc))
+			b, from := udpRecv(t, ep)
+			if string(b) != strconv.Itoa(i) {
+				t.Fatalf("round %d: endpoint got %q", round, b)
+			}
+			froms = append(froms, from)
+		}
+		if froms[0].String() != u.LocalAddr().String() || froms[1].String() == froms[0].String() {
+			t.Errorf("round %d: the endpoint sees the sources %v", round, froms)
+		}
+		for i, svc := range []string{"10.96.88.15:53", "10.96.88.16:53"} {
+			ep.WriteTo([]byte("x"), froms[i])
+			if _, from := udpRecv(t, u); from.String() != svc {
+				t.Errorf("round %d: the answer to %s comes from %v", round, svc, from)
+			}
+		}
 	}
-	ep.WriteTo([]byte("x"), u.LocalAddr())
-	if _, from := udpRecv(t, u); from.String() != "10.96.88.16:53" {
-		t.Errorf("the answer comes from %v, want the newest flow", from)
+	if n := s.flowCount(); n != 4 {
+		t.Errorf("%d flows, want 4", n)
+	}
+	// FL13 also removes the flow with the other source port.
+	theTabNode.releaseIP(u.local.Addr().String())
+	if n := s.flowCount(); n != 0 {
+		t.Errorf("%d flows after releaseIP", n)
 	}
 }
 

@@ -54,10 +54,11 @@ func routeUDP(ctx context.Context, src, dst netip.AddrPort) (from, to netip.Addr
 type flowTuple struct{ src, dst netip.AddrPort }
 
 // udpFlow is one flow of section 8.8 (FL1). The tuple before the Service
-// translation is orig. The tuple after it is orig.src and ep.
+// translation is orig. The tuple after it is via and ep.
 type udpFlow struct {
 	orig    flowTuple      // the client and the destination that the client gave
 	ep      netip.AddrPort // the endpoint: the destination after the translation
+	via     netip.AddrPort // the source that the endpoint sees: orig.src, or another port at a clash
 	service bool           // orig.dst is a ClusterIP or a node port of a UDP Service
 
 	first     time.Time // the first datagram
@@ -74,7 +75,7 @@ type flowEntry struct {
 }
 
 // replyTuple is the tuple of the answers of the endpoint.
-func (f *udpFlow) replyTuple() flowTuple { return flowTuple{src: f.ep, dst: f.orig.src} }
+func (f *udpFlow) replyTuple() flowTuple { return flowTuple{src: f.ep, dst: f.via} }
 
 func (f *udpFlow) last() time.Time {
 	if f.lastReply.After(f.lastOrig) {
@@ -125,7 +126,7 @@ func (s *serviceProxy) routeUDP(ctx context.Context, src, dst netip.AddrPort) (f
 			if e.reply {
 				from, to = e.f.orig.dst, e.f.orig.src // UD15
 			} else {
-				from, to = src, e.f.ep
+				from, to = e.f.via, e.f.ep
 			}
 			s.flowMu.Unlock()
 			return from, to, udpDeliver
@@ -142,11 +143,11 @@ func (s *serviceProxy) routeUDP(ctx context.Context, src, dst netip.AddrPort) (f
 	if !udpPolicy(ctx, src, ep) {
 		return src, dst, udpDrop // FL12: no flow
 	}
-	f := &udpFlow{orig: key, ep: ep, service: service, first: now, lastOrig: now}
+	f := &udpFlow{orig: key, ep: ep, via: src, service: service, first: now, lastOrig: now}
 	s.flowMu.Lock()
 	s.addFlowLocked(f)
 	s.flowMu.Unlock()
-	return src, ep, udpDeliver
+	return f.via, ep, udpDeliver
 }
 
 // translateUDP is the Service translation of a new datagram from src to dst
@@ -183,11 +184,20 @@ func (s *serviceProxy) translateUDP(src, dst netip.AddrPort) (netip.AddrPort, bo
 	return netip.AddrPortFrom(ip.Unmap(), uint16(e.port)), true, udpDeliver
 }
 
-// addFlowLocked adds f. A flow that has one of the tuples of f ends: the
-// newest flow wins, as at a clash of conntrack (section 8.8).
+// addFlowLocked adds f. If another flow has the tuple of the answers of f
+// (the same endpoint and client, another original destination), f gets
+// another source port, as the source NAT of Linux does at a clash: the two
+// flows stay apart, and each answer comes from its own original
+// destination (section 8.8). A flow that still has one of the tuples of f
+// ends: the newest flow wins.
 func (s *serviceProxy) addFlowLocked(f *udpFlow) {
 	if s.flows == nil {
 		s.flows = map[flowTuple]flowEntry{}
+	}
+	if e, ok := s.flows[f.replyTuple()]; ok && e.f.orig != f.orig {
+		if p, ok := s.freeViaLocked(f); ok {
+			f.via = p
+		}
 	}
 	reply := f.replyTuple()
 	for _, k := range []flowTuple{f.orig, reply} {
@@ -202,6 +212,28 @@ func (s *serviceProxy) addFlowLocked(f *udpFlow) {
 	if s.flowTimer == nil {
 		s.flowTimer = time.AfterFunc(flowSweepEvery, s.sweepFlows)
 	}
+}
+
+// freeViaLocked gives a source port for f on the IP of the client that no
+// flow to the endpoint of f and no socket of the UDP table uses.
+func (s *serviceProxy) freeViaLocked(f *udpFlow) (netip.AddrPort, bool) {
+	ip := f.orig.src.Addr()
+	for port := proxyEphemeralFirst; port <= proxyEphemeralLast; port++ {
+		via := netip.AddrPortFrom(ip, uint16(port))
+		if _, used := s.flows[flowTuple{src: f.ep, dst: via}]; used {
+			continue
+		}
+		if _, used := s.flows[flowTuple{src: via, dst: f.ep}]; used {
+			continue
+		}
+		udpMu.Lock()
+		bound := udpSockets[via] != nil
+		udpMu.Unlock()
+		if !bound {
+			return via, true
+		}
+	}
+	return netip.AddrPort{}, false
 }
 
 func (s *serviceProxy) removeFlowLocked(f *udpFlow) {
@@ -293,7 +325,7 @@ func (s *serviceProxy) removeFlowsOf(ip string) {
 	}
 	a = a.Unmap()
 	s.removeFlows(s.openFlows(), func(f *udpFlow) bool {
-		return f.orig.src.Addr() == a || f.orig.dst.Addr() == a || f.ep.Addr() == a
+		return f.orig.src.Addr() == a || f.orig.dst.Addr() == a || f.ep.Addr() == a || f.via.Addr() == a
 	})
 }
 
