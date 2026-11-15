@@ -1822,6 +1822,15 @@ The Go side of the page and of a node worker is in
   a drop (`send`). The page relays datagrams between other nodes as work
   of the control plane. No pod pays for this CPU time.
 
+In pion, a write on a detached data channel can wait when
+`EnableDataChannelBlockWrite` is set: SCTP waits until the queue of the
+association (all channels of the peer connection) has space. Thus the node
+agent (`node/agent/udplink.go`) writes to the `udp` channel from one
+goroutine. A queue of 64 messages is in front of this goroutine. The agent
+drops a datagram when the queue is full. Each tab address that has flows
+has one socket on the Docker node. The agent closes this socket after the
+last flow of the address closed.
+
 #### 8.9.1 The udp channel
 
 These rules are the contract between the page and a node worker
@@ -2316,7 +2325,7 @@ The column "Nodes" gives the nodes for the test:
 | TC13 | The client closes its send direction. The server reads the end of the stream and sends its answer. | tab, Docker |
 | TC14 | After `kubectl delete pod --grace-period=0 --force` of the server, the client gets the end of its connection. The unit test of the Go side is `TestWasiTCPStop`. At the stop, the Go side closes each connection at once. It does not write the bytes of `data` that it did not write yet. After `closed` from the pod worker, it writes them first (`TestWasiTCPClosedDrains`). | tab |
 | TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. On runwasi, a second bind without a listener gives no error. With a listener, it gives `address-in-use` (rule 3 of section 8.3.2). The other calls give the error codes of fact 12. | tab, Docker |
-| TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Until phase 4, `bind` and `connect` with the protocol `udp` give `not-supported`. | tab |
+| TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Since phase 4, `bind` and `connect` with the protocol `udp` make a UDP socket (rule 1 of section 8.3.3, `TestWasiUDPEcho`, `TestWasiUDPConnect`). | tab |
 | TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, all options other than the buffer sizes agree (section 11). The defaults of runwasi: keep-alive off, 7,200 s, 75 s, count 9, hop limit 64, buffers 65,536 and 8,192 bytes. An idle time of 1.5 s gives 2 s. The value 0 gives `invalid-argument`. | tab, Docker |
 | NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). The unit test of the Go side is `TestWasiTCPLookup`. It also makes sure that the hostname of the pod gives the pod IP. | tab, worker, Docker |
 | NL3 | The name `example.com` fails with `name-unresolvable`. The end-to-end test uses the mode `client` of the echo image, which writes the name of the error code. A name with characters outside ASCII gives `invalid-argument` (section 11). The unit test of the Go side is `TestWasiTCPLookup`. | tab |
@@ -2330,30 +2339,31 @@ The column "Nodes" gives the nodes for the test:
 | NL1, NL2, NL3 (pod worker) | A unit test (`web/test/lookup.test.mjs`): an IP literal gives its address without a message. A correct name has 1 to 253 characters and labels of 1 to 63 ASCII letters, digits, `-` or `_`. A dot at the end is permitted. Another name gives `invalid-argument` without a message. A correct name sends `lookup`. | tab |
 | NL3 (pod worker) | A unit test: the error code of `addresses` comes from `resolve-next-address` one time. Then the stream is empty. `addresses` for a dropped stream is discarded. | tab |
 | CO17 (pod worker) | A unit test: 1,000 TCP reads without bytes, 1,000 calls of `check-write` that give 0, or 1,000 calls of `resolve-next-address` that give `would-block`, give a pause. A read with bytes, a `check-write` with credit, and `finish-connect`, `finish-bind`, `finish-listen` or `accept` without an error reset the count. | tab |
-| UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
-| UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. | tab |
-| AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. | tab |
-| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. On runwasi, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. | tab, worker, Docker |
-| UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. | tab |
-| UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. | tab |
-| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. On runwasi (wasmtime 36), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
-| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
+| UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. Unit tests: `TestUDPAndTCPSamePort`, `TestWasiUDPAddressInUse`, `TestUDPServiceTCPAndUDP`, `TestDNSOverUDP`. End-to-end test: `wasi-udp.test.mjs`. | tab |
+| UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. Unit tests: `TestDNSTruncated`, `TestNslookupTCP`. End-to-end test: `wasi-udp.test.mjs`. `nc -u` sends the query. | tab |
+| AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. The unit test is `TestCoreDNSChargeUDP`. | tab |
+| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. On runwasi and on the tab node, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. Unit tests: `TestWasiUDPEcho`, `TestUDPServiceTCPAndUDP`. End-to-end test: `wasi-udp.test.mjs`. | tab, worker, Docker |
+| UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. Unit tests: `TestUDPEphemeralPorts`, `TestWasiUDPEphemeralPort`. End-to-end test: `wasi-udp.test.mjs`. | tab |
+| UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. Unit tests: `TestUDPQueueFull`, `TestWasiUDPNoCredit`. End-to-end test: `wasi-udp.test.mjs`. runwasi keeps 455 (section 11). | tab |
+| UD8, UD9 | A connected client sends to a port without a socket. On runwasi (wasmtime 36) and on the tab node (rule 7 of section 8.3.3), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
+| UD10, UD11 | A connected client sends to a Service without endpoints. The next `send` gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
 | UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. On the GitHub runner, the client gets no answer and no error. | tab, Docker |
-| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. | tab, Docker |
-| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. | tab, Docker |
-| UD19 | `nc -u` sends a line to the UDP echo pod and receives it. | tab |
-| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`, and the client in another pod gets the error on its second `send`. | tab, Docker |
-| FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. | tab |
-| FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. | tab |
-| FL2 | A flow without answers is not in the flow table after 31 seconds. | tab |
-| FL3 | A flow with answers for 5 seconds is in the flow table after 100 seconds without datagrams. | tab |
-| FL4 | One query and one answer: the flow is not in the flow table after 31 seconds. | tab |
-| FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. | tab |
-| FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. | tab |
-| FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. | tab |
-| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.1b. | tab, worker (phase 5) |
-| FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. | tab |
-| FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. | tab |
+| UD8 to UD12 (tests) | Unit tests: `TestUDPFact3Refused`, `TestWasiUDPRefused`, `TestWasiUDPRefusedOnWrite` (UD8, UD9), `TestUDPServiceNoEndpoints`, `TestUDPRouteRefuse` (UD10, UD11), `TestUDPServiceNoPort` (UD12). End-to-end test: `wasi-udp.test.mjs`, with the results of runwasi on the tab node. | tab |
+| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. The unit test is `TestUDPServiceOwnPod`. End-to-end test: `wasi-udp.test.mjs`. | tab, Docker |
+| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. The unit test is `TestUDPFact2DatagramSize`. End-to-end test: `wasi-udp.test.mjs`. Its lines of rules 2 to 7 are the lines of runwasi, with the differences of section 11. | tab, Docker |
+| UD19 | `nc -u` sends a line to the UDP echo pod and receives it. Unit tests: `TestNslookup*`, `TestNcUDP*`. End-to-end test: `wasi-udp.test.mjs`. Also on a node worker. | tab |
+| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`; on the tab node, from the pod IP (section 11). On both, the client in another pod gets the error on its second `send`. Tests: `TestUDPLoopback`, `TestWasiUDPLoopback`, `wasi-udp.test.mjs`. | tab, Docker |
+| FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. The unit test is `TestUDPFlowTuples`. | tab |
+| FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. Unit tests: `TestUDPPolicyIngress`, `TestUDPPolicyProtocol`, `TestUDPPolicyOneDecision`. | tab |
+| FL2 | A flow without answers is not in the flow table after 31 seconds. The unit test is `TestUDPFlowTimeoutNoAnswer`, with the clock `flowNow` (plan rule 5). | tab |
+| FL3 | A flow with answers for 5 seconds is in the flow table after 100 seconds without datagrams. The unit test is `TestUDPFlowTimeoutStream`, with the clock `flowNow`. | tab |
+| FL4 | One query and one answer: the flow is not in the flow table after 31 seconds. The unit test is `TestUDPFlowTimeoutAnswer`, with the clock `flowNow`. | tab |
+| FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. The unit test is `TestUDPFlowEndpointGone`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. The unit test is `TestUDPPolicyStrictMode`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. The unit test is `TestUDPFlowAffinity`. End-to-end test: `wasi-udp-flows.test.mjs`. 10 `nc -u` at the same time give the 10 sockets. | tab |
+| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.3. The unit test is `TestUDPFlowLocalPolicy`. | tab, worker (phase 5) |
+| FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. Unit tests: `TestUDPFlowPolicyDeny`, `TestUDPPolicyDeniedNoFlow`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. The unit test is `TestUDPFlowReleaseIP`. | tab |
 | ND1 | The tests with "worker" or "Docker" in this table. | worker, Docker |
 | ND2 | UDP between pods on the page node and on a node worker. | tab, worker |
 | ND3 | A unit test of the page and a unit test of the agent read the settings of the channel `udp`. | tab, Docker |
@@ -2373,7 +2383,8 @@ The column "Nodes" gives the nodes for the test:
 | IC7, IC8 | `README.md` contains the two texts. | none |
 | MS1 to MS6 | A unit test sends messages with a foreign socket ID, a size above the limit, `data` above the credit or a URL outside the cluster. The Go side drops each message and closes the socket or the request. A `bind` with a foreign IP gets `bound` with `address-not-bindable`, and the socket stays open (section 8.3.2). | tab |
 | MS2 to MS4 (TCP) | The unit tests are `TestWasiTCPForeignID` (MS2), `TestWasiTCPNotBindable` (MS3) and `TestWasiTCPDataAboveCredit` (MS4). A `data` or a `shutdown` for a socket without a connection, and a `data` after `shutdown` of the send direction, also fail the examination (MS6). | tab |
-| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. The TCP part is `TestWasiTCPChargesCPU`. | tab |
+| MS2 to MS4 (UDP) | The unit tests are `TestWasiUDPForeignID` (MS2), `TestWasiUDPNotBindable` (MS3) and `TestWasiUDPDatagramAboveCredit` (MS4). `data` and `shutdown` for a UDP socket also fail the examination (MS6, rule 1 of section 8.3.3). | tab |
+| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. The TCP part is `TestWasiTCPChargesCPU`. The UDP part is `TestWasiUDPServiceChargesCPU`: 10 MB through a UDP Service, and the answers back. | tab |
 | AC2 | If the pod worker sends `cpu`, a component in a loop of CPU work shows CPU in `kubectl top pod`. | tab |
 
 ## 11 Differences from a Docker node
@@ -2398,7 +2409,8 @@ These differences stay after this design. `README.md` must show them.
 | A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work, for TCP and for UDP (runwasi) |
 | The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram. On the GitHub runner (`receive-buffer-size` 524,288), a server keeps 455 of 1,000 datagrams of 1,024 bytes. |
 | A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod | The answers come from the pod IP | The answers come from `127.0.0.1` |
-| A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | Nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
+| A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | The `send` gives `remote-unreachable`, and nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
+| A `send` of a connected UDP socket at once after a datagram that no socket can receive | The `send` works: the `error` message of the Go side comes later, and a later `send` gets `connection-refused` (rule 7 of section 8.3.3) | The `send` gets `connection-refused`: the kernel has the ICMP error already |
 | UDP to pods on other nodes, and to Services with only such endpoints, until phase 5 | The tab node drops the datagram | It arrives |
 | A socket of a `hostNetwork` pod on `127.0.0.1` | It listens on the node IP without a row in the loopback table. Other pods can connect. | Only the host of the node can connect |
 | The addresses of a connection that a socket on `0.0.0.0` accepts from a client of the same pod that used `127.0.0.1` | The pod IP | `127.0.0.1` |
@@ -2426,7 +2438,7 @@ These differences stay after this design. `README.md` must show them.
 | Chrome 153 gives one renderer process 125 Wasm memories. The page, the node workers and their pod workers share them (section 14). | 8 proxy containers with 16 requests each make the tab full. New components exit with 137, new modules with 128. A new node worker does not start. | PX34, section 8.6. A suspended instance continues with an exception. W2.4: 8 memories stay for starts for 2 s. |
 | The memory of an instance that ended stays until the garbage collection of its pod worker. An idle pod worker collects its garbage late. | After a load, the tab stays full or almost full. New pods fail (section 14). | Chrome collects the garbage of a pod worker that cannot make a memory. A deletion of pods frees their memories. W2.4: `collect` on a full tab. |
 | The Go thread moves the data of all sockets of pods. | Much network traffic of pods makes the control plane slower. This is the same reason as for the rejection of a TCP/IP stack in section 13, but only for traffic of pods. | The credits of section 8.4 set a limit to the memory. AC1 shows the time in the container. A later design can move bytes between workers with shared memory. |
-| The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | The item is not complete in `docs/networking-policy.md`. Phase 5 cannot end before it (decision 16). |
+| The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | Closed (W5.0). The step `netpol` of the Docker check shows nfqueue on the GitHub runner: a NetworkPolicy denies a connection on node-1 in 2 seconds. Without `nft_queue`: SKIP. Deferred tests can be PASS or FAIL lines. |
 | A Docker node without a proxy has no internet (section 4.4). | The Docker check cannot pull the Rust test images. | Phase 0, item 18. |
 | The host network namespace of a Docker node does not reach tab pods (issue #61). | NodePort and hostPort for UDP cannot work with an endpoint on `tab`. | Out of scope. Section 11. |
 | WASI 0.3 is near. jco-transpile already uses `preview3-shim`. | New components do not run on a tab node. | CO11 and CO12 give a clear text. A later design can add WASI 0.3. |

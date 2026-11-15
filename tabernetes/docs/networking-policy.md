@@ -1,8 +1,9 @@
 # NetworkPolicy on Tabernetes nodes
 
 Status: phases 1 to 6 are implemented, see "Implementation" at the end.
-Phase 0 (nfqueue in a rootless Docker node) and the end-to-end runs of phase 7 need
-a Docker node and are still open. The proofs of concept in
+Phase 0 (nfqueue in a rootless Docker node) is complete: the step `netpol` of
+the Docker check shows it on a Linux host (the GitHub runner). The end-to-end
+runs of phase 7 need a Docker node and are still open. The proofs of concept in
 `networking-policy-poc/` answer the open questions that code could settle.
 
 Before this work a NetworkPolicy was stored and nothing enforced it. This
@@ -47,12 +48,19 @@ Docker nodes run the upstream DaemonSet unchanged, next to flannel.
 | Can a rootless Docker node catch traffic to tab pods? (`run.sh tproxy`) | Yes, on this kernel. In a new user and network namespace (the agent's setup), an nftables `tproxy` rule hands a pod's connection to a listener with `IP_TRANSPARENT`. The listener sees the source pod IP and the original destination. |
 | Is `net.bridge.bridge-nf-call-iptables` settable there? | Yes. It is per network namespace and writable by root of the user namespace (kernel 6.18, built-in `br_netfilter`). |
 
-Not verified: nfqueue in the rootless node. The sandbox kernel lacks
-`nft_queue` (`CONFIG_NFT_QUEUE` is not set), so no rule with `queue` loads
-there. nftables rules, conntrack labels and `NETFILTER_NETLINK_QUEUE` work.
-The netlink calls of nfqueue check `CAP_NET_ADMIN` in the user namespace that
-owns the network namespace, so it should work. It must be tried on Docker
-Desktop and on a Linux host first (phase 0).
+nfqueue in the rootless node works on a Linux host with `nft_queue`. The
+sandbox kernel of the proofs of concept lacks `nft_queue` (`CONFIG_NFT_QUEUE`
+is not set), so no rule with `queue` loads there. The step `netpol` of the
+Docker check (`docker-node-check/netpol.sh`) runs on the GitHub runner
+(Ubuntu 26.04, kernel 7.0, `nft_queue` and `nfnetlink_queue` already loaded,
+no `modprobe` necessary). There the pod of kube-network-policies is Ready
+without restarts, the network namespace of the node has the rules
+`queue flags bypass to 98`, and a NetworkPolicy that denies ingress stops a
+connection between two pods of the node within 2 seconds. The netlink calls
+of nfqueue check `CAP_NET_ADMIN` in the user namespace that owns the network
+namespace, so the rootless node is sufficient. Docker Desktop is not tried.
+A host kernel without `nft_queue` keeps no policy on its Docker nodes: the
+step `netpol` then writes SKIP with the reason.
 
 A correction to earlier notes: kube-network-policies v1.1.3 (current) ships
 `plugins/npa-v1alpha1` (AdminNetworkPolicy, BaselineAdminNetworkPolicy) and
@@ -449,7 +457,7 @@ Each phase is one small PR.
 
 | # | What | Effort |
 | --- | --- | --- |
-| 0 | Try nfqueue and the upstream DaemonSet in the rootless node, on Docker Desktop and a Linux host. Also a non-root helper with ambient `CAP_NET_RAW` and `IP_TRANSPARENT` (H7). If it fails, stop before phase 4 and decide again. | 1 day |
+| 0 | Try nfqueue and the upstream DaemonSet in the rootless node, on Docker Desktop and a Linux host. Also a non-root helper with ambient `CAP_NET_RAW` and `IP_TRANSPARENT` (H7). If it fails, stop before phase 4 and decide again. Done on a Linux host (the step `netpol` of the Docker check); Docker Desktop is not tried. | 1 day |
 | 1 | Vendor the engine (`patch.go`, `mise.toml`), `tabnode_netpol.go` with informers, nothing hooked. `kubectl get` shows nothing new; the build proves the vendoring. | 1 day |
 | 2 | Tab nodes: H1 to H4, deny as timeout, host and loopback rules, `dialCluster` DNAT. Pods on one tab node obey NetworkPolicy. `agnhost connect`. | 3 days |
 | 3 | The `pod` channel between tab nodes (tab, workers), H5 and H6; the service proxy stops using port-forward for pods. | 3 days |

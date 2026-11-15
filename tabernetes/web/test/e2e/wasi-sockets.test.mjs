@@ -31,11 +31,11 @@
 import { before, test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  apply, forEachNode, kubectl, logs, namespace, nodeName, pod, podPhase, podReady, run, TAB_NODE, waitFor, waitForPod,
+  apply, forEachNode, kubectl, namespace, nodeName, pod, podPhase, podReady, run, TAB_NODE, waitFor, waitForPod,
 } from "./harness.mjs";
 import { busyboxPod, inPod, podIP, proxyPod, running, service, sharedNamespace } from "./wasi-proxy-lib.mjs";
+import { echoPod, exited, lines, logLine } from "./wasi-lib.mjs";
 
-const ECHO = "ghcr.io/se-wo/tabernetes/wasi-test-echo:latest";
 const CMD = "ghcr.io/se-wo/tabernetes/wasi-test-cmd:latest";
 
 // The results of runwasi (wasi-sockets.sh and the report of W3.3a).
@@ -70,45 +70,7 @@ const RUNWASI = {
   localhost: "lookup localhost: [::1, 127.0.0.1]",
 };
 
-// echoPod is a pod of the echo image. containers: [name, env object,
-// extra fields of the container].
-function echoPod(name, node, containers, { restartPolicy, labels = {} } = {}) {
-  return {
-    apiVersion: "v1",
-    kind: "Pod",
-    metadata: { name, labels: { app: name, ...labels } },
-    spec: {
-      runtimeClassName: "wasmtime",
-      nodeSelector: { "kubernetes.io/hostname": node },
-      terminationGracePeriodSeconds: 1,
-      ...(restartPolicy ? { restartPolicy } : {}),
-      containers: containers.map(([c, env = {}, extra = {}]) => ({
-        name: c,
-        image: extra.image ?? ECHO,
-        env: Object.entries(env).map(([k, v]) => (typeof v === "string" ? { name: k, value: v } : { name: k, ...v })),
-        ...Object.fromEntries(Object.entries(extra).filter(([k]) => k !== "image")),
-      })),
-    },
-  };
-}
-
 const tcpProbe = (port) => ({ readinessProbe: { tcpSocket: { port }, periodSeconds: 2 } });
-
-// lines gives the lines of the logs of a container.
-const lines = async (ns, name, c) => (await logs(ns, name, c)).replace(/\r/g, "").split("\n");
-
-// logLine waits until a container logs a line that matches re and resolves
-// with the line.
-const logLine = (ns, name, c, re, timeout = 120) =>
-  waitFor(async () => (await lines(ns, name, c)).find((l) => re.test(l)),
-    { timeout, what: `a line ${re} in the logs of ${ns}/${name}/${c}` });
-
-// exited waits until a container has ended and resolves with its exit code.
-const exited = (ns, name, c, timeout = 180) => waitFor(async () => {
-  const p = await pod(ns, name);
-  const t = p.status?.containerStatuses?.find((s) => s.name === c)?.state?.terminated;
-  return t && { code: t.exitCode };
-}, { timeout, what: `the end of ${ns}/${name}/${c}` });
 
 // readyOf gives the ready flag of a container.
 const readyOf = (p, c) => p.status?.containerStatuses?.find((s) => s.name === c)?.ready;
