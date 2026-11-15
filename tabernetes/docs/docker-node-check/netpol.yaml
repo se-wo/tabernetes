@@ -1,0 +1,32 @@
+# Objects of the step netpol (netpol.sh): a deny test of NetworkPolicy
+# between two busybox pods on node-1. kube-network-policies (nfqueue) decides
+# on the Docker node. The policy netpol-deny is not here: the step creates it
+# after the first connection.
+apiVersion: v1
+kind: Namespace
+metadata: {name: netpol-check}
+---
+# The server answers "ok" on each TCP connection to port 8080.
+apiVersion: v1
+kind: Pod
+metadata: {name: netpol-server, namespace: netpol-check, labels: {app: netpol-server}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: c
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      command: [sh, -c, "while true; do echo ok | nc -l -p 8080; done"]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: netpol-client, namespace: netpol-check, labels: {app: netpol-client}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: c
+      image: busybox
+      imagePullPolicy: IfNotPresent
+      command: [sleep, "3600"]
