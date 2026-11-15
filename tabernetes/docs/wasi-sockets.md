@@ -2308,9 +2308,9 @@ These differences stay after this design. `README.md` must show them.
    | A `FinalizationRegistry` for the memories of ended instances, without a garbage collection | No callback after 5 seconds. The callbacks come with the garbage collection |
    | 60 requests in a sequence to one container, then `collect` without a full tab | 120 free before, 89 after the requests, 88 after `collect` |
    | The same, then `collect` on a full tab | 121 free after 1.5 seconds |
-   | The full tab of W2.3b (8 proxy containers with 16 parked requests): the request of a new container after the end of the hold | Served after 0.7 to 3.7 seconds (without the broker: 12.7 and 13.7 seconds) |
-   | The same, free memories 5 and 30 seconds after the end of the parked requests | 89 to 94, and 118 to 121 (without the broker: 0 to 23, and 23 to 38) |
-   | 8 proxy containers, 16 clients each, 10 requests of 1 second each | LOADNUMBERS |
+   | The full tab of W2.3b (8 proxy containers with 16 parked requests): the request of a new container after the end of the hold | Served after 0.6 to 3.7 seconds (without the broker: 12.7 and 13.7 seconds) |
+   | The same, free memories 5 and 30 seconds after the end of the parked requests | 0 to 94, and 118 to 121 (without the broker: 0 to 23, and 23 to 38) |
+   | 8 proxy containers, 16 clients each, 10 requests of 1 second each | Asks wait after 1.1 to 1.2 seconds, at a count of 117 of 125. A command component that started during the load ended with 0 after 3.0 to 3.4 seconds (3 runs). All 1,280 requests got their responses in 21 to 25 seconds |
 
    - `collect` frees the memories of ended instances only on a full tab. The
      refusal of the new memory starts the garbage collection of the worker
