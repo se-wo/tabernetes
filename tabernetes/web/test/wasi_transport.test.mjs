@@ -5,6 +5,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "../src/wasi.js";
+import { createBroker } from "../src/memory.js";
 
 const SCRIPT = "/* the bundle of component.worker.js */ postMessage({type: 'ready'});";
 
@@ -168,4 +169,51 @@ test("a component worker script that cannot be fetched gives exit 128", async ()
   assert.equal(got.length, 1);
   assert.equal(got[0].code, 128);
   assert.match(got[0].error, /cannot start: GET http:\/\/x\/missing.worker.js: 404/);
+});
+
+// The broker of the Wasm memories (memory.js, section 8.6).
+const brokerRuntime = (memory) =>
+  createRuntime({ workerURL: "http://x/wasi.worker.js", mirror: "", transpileURL: "http://x/transpile/t.js", componentWorkerURL: "http://x/c.js", memory, Worker: FakeWorker, fetch: fetchScript });
+
+test("wasi.js takes the messages of the broker out of the transport, and the broker answers the pod worker", async () => {
+  const memory = createBroker({ limit: 20, reserve: 2 });
+  const rt = brokerRuntime(memory);
+  const h = rt.start({ component: true, name: "ns/p/c" });
+  const got = [];
+  h.onMessage((m) => got.push(m));
+  await tick();
+  const w = FakeWorker.all[0];
+  w.emit({ type: "ready" });
+  // The pod worker counts 1.
+  assert.equal(memory.stats().used, 1);
+  w.emit({ type: "memory-ask" });
+  w.emit({ type: "memory-full" });
+  w.emit({ type: "memory-free" });
+  w.emit({ type: "cpu", ms: 1 });
+  // Only cpu goes to the Go side.
+  assert.deepEqual(got, [{ type: "cpu", ms: 1 }]);
+  const types = w.posted.map(([m]) => m.type);
+  assert.ok(types.includes("memory-grant"), types.join());
+  assert.ok(types.includes("collect"), types.join());
+  // After memory-full the broker uses the count (2) as the limit: the next
+  // ask waits. The end of the pod worker frees its memory and its asks.
+  w.emit({ type: "memory-ask" });
+  assert.deepEqual([memory.stats().used, memory.stats().waiting], [1, 1]);
+  h.kill();
+  assert.deepEqual([memory.stats().used, memory.stats().waiting], [0, 0]);
+});
+
+test("a module counts 2 memories until its exit, and an exit for a full tab sends memory-full", async () => {
+  const memory = createBroker({ limit: 20 });
+  const rt = brokerRuntime(memory);
+  const h = rt.start({ module: {}, args: [], env: [], preopens: [] });
+  assert.equal(memory.stats().used, 2);
+  const w = FakeWorker.all[0];
+  w.emit({ type: "exit", code: 128, error: "the module cannot instantiate: the browser tab has no Wasm memory left for a new instance (Out of memory: Cannot allocate Wasm memory for new instance)" });
+  assert.equal(memory.stats().used, 0);
+  // The broker learned a lower limit: the count at the refusal.
+  assert.equal(memory.stats().limit, 2);
+  let code = null;
+  h.onExit((c) => (code = c));
+  assert.equal(code, 128);
 });

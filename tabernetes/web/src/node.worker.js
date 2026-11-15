@@ -9,8 +9,13 @@ import { countBusy, patchWalltime } from "./clock.js";
 import { portChannel, openChannel } from "./channel.js";
 import { installWasi } from "./wasi.js";
 import { installGPU } from "./gpu.js";
+import { isMemoryError, remoteBroker } from "./memory.js";
 
 const early = []; // channels that arrive before Go is up
+
+// The Wasm memories of the pod workers of this node count at the broker of
+// the page (memory.js, section 8.6).
+const memory = remoteBroker((m) => self.postMessage(m));
 
 const attach = (ch) => {
   if (globalThis.tabernetes?.attachChannel) globalThis.tabernetes.attachChannel(ch);
@@ -20,6 +25,7 @@ const attach = (ch) => {
 self.onmessage = (e) => {
   const m = e.data;
   if (m.type === "channel") attach(portChannel(m.port, m.label));
+  else if (m.type === "memory") memory.deliver(m);
   else if (m.type === "start") start(m).catch((err) => self.postMessage({ type: "error", error: String(err?.message ?? err) }));
 };
 
@@ -34,7 +40,7 @@ async function start({ module, config, wasi }) {
     } else console.debug(s.replace(/\n$/, ""));
   });
   // WebAssembly pods of this node run in workers of this worker.
-  if (wasi) installWasi(wasi);
+  if (wasi) installWasi({ ...wasi, memory });
   // addnode --gpu: this node probes WebGPU in the worker (config.gpu).
   installGPU();
   globalThis.tabernetesNodeConfig = config;
@@ -43,7 +49,17 @@ async function start({ module, config, wasi }) {
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
   patchWalltime(go);
   countBusy(go);
-  const instance = await WebAssembly.instantiate(module, go.importObject);
+  let instance;
+  try {
+    instance = await WebAssembly.instantiate(module, go.importObject);
+  } catch (err) {
+    // A full tab: the page shows the state "no Wasm memory" (nodes.js).
+    if (isMemoryError(err)) {
+      self.postMessage({ type: "no-memory", error: String(err?.message ?? err) });
+      return;
+    }
+    throw err;
+  }
   go.run(instance).then(
     () => self.postMessage({ type: "exit" }),
     (err) => self.postMessage({ type: "exit", error: String(err?.message ?? err) }),

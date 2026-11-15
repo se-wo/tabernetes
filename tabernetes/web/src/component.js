@@ -25,6 +25,9 @@ import { createIdle, createSocketTable, createSockets, nextTask } from "./socket
 import { browserFilesystem } from "./files.js";
 import { tickImports } from "./cpu.js";
 import { createHttp, responseFields } from "./http.js";
+import { MAX_INSTANCES, isMemoryError, NO_MEMORY } from "./memory.js";
+
+export { MAX_INSTANCES, isMemoryError, NO_MEMORY };
 
 // The exit code of a trap, of an error result of run, of a function that is
 // not there and of a component that cannot instantiate. runwasi gives 137 for
@@ -304,7 +307,12 @@ export async function loadBlob(js) {
 // is the CPU meter of cpu.js (AC2), or null.
 //
 // For a proxy component, the other options go to serveProxy.
-export async function runComponent({ component, args, env, cwd, preopens }, { peer, WASIShim, io, load = loadBlob, Memory = null, meter = null, ...proxy }) {
+//
+// grants is the side of the broker of the pod worker (createGrants of
+// memory.js), or null. With it, the instances 2 to 16 of a proxy container
+// ask for a grant, and an instantiation that the browser refuses sends
+// memory-full.
+export async function runComponent({ component, args, env, cwd, preopens }, { peer, WASIShim, io, load = loadBlob, Memory = null, meter = null, grants = null, ...proxy }) {
   const error = (text) => {
     const b = new TextEncoder().encode(text + "\n");
     peer.send("stderr", { bytes: b.buffer }, [b.buffer]);
@@ -312,7 +320,7 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
   };
   const world = component.world ?? "";
   // A proxy component gets no preopens (fact 4): Memory is not used.
-  if (world === "proxy") return serveProxy({ component, env }, { peer, WASIShim, io, load, meter, ...proxy });
+  if (world === "proxy") return serveProxy({ component, env }, { peer, WASIShim, io, load, meter, grants, ...proxy });
   const fn = world === "command" ? "" : component.entrypoint || DEFAULT_FUNCTION;
 
   const memory = createMemory(peer);
@@ -343,6 +351,7 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
   } catch (e) {
     if (e?.exitError) return e.code === 0 ? 0 : 1;
     const why = missingText(missing, e?.message ?? e, component.names?.imports);
+    if (!why && isMemoryError(e)) grants?.full();
     return error(why || cannotInstantiate(e));
   } finally {
     meter?.end();
@@ -385,26 +394,17 @@ export async function runComponent({ component, args, env, cwd, preopens }, { pe
 // each request, calls handle, sends one response message and discards the
 // instance.
 
-// MAX_INSTANCES is the maximum of instances of one container at the same
-// time (PX9). More requests wait in a queue (PX10).
-export const MAX_INSTANCES = 16;
+// MAX_INSTANCES (memory.js) is the maximum of instances of one container at
+// the same time (PX9). More requests wait in a queue (PX10).
 
 // MEMORY_RETRY_MS is the time after which a request that could not get the
 // memory of its instance (PX34) tries again, if no other instance of the
 // container ends before.
 export const MEMORY_RETRY_MS = 1000;
 
-// isMemoryError tells if an instantiation failed because the browser cannot
-// make one more Wasm memory (section 9.2, item 15). Chrome gives a RangeError
-// "Out of memory: Cannot allocate Wasm memory for new instance".
-export function isMemoryError(e) {
-  return /out of memory|cannot allocate wasm memory|could not allocate memory/i.test(String(e?.message ?? e));
-}
-
-// NO_MEMORY is the text for an instantiation that failed with isMemoryError.
-// All workers of the tab share one limit of Wasm memories (docs/wasi-sockets.md,
-// section 14, open question 2).
-export const NO_MEMORY = "the browser tab has no Wasm memory left for a new instance";
+// isMemoryError and NO_MEMORY are in memory.js: wasi.worker.js uses them,
+// too. All workers of the tab share one limit of Wasm memories
+// (docs/wasi-sockets.md, section 14, open question 2).
 
 // cannotInstantiate gives the text of the log for an instantiation that
 // failed for a cause other than a missing import.
@@ -590,7 +590,13 @@ export function handlerExport(exports) {
 // The handlers of request, cancel and fetched go on peer, one for each type;
 // they find the request or the client request by its ID. stdin of the Go
 // side has a handler that discards the bytes (PX13).
-export function serveProxy({ component, env }, { peer, WASIShim, io, load = loadBlob, meter = null, limit = MAX_INSTANCES, retryMs = MEMORY_RETRY_MS, noteMs = MEMORY_NOTE_MS, onInstance = () => {} }) {
+//
+// With grants (createGrants of memory.js), an instance that starts while
+// another instance of the container runs asks the broker of the page for a
+// grant (section 8.6). A start without other instances does not ask. A
+// request that waits for a grant writes the lines of PX34 when the grant
+// does not come in time, and then tries to instantiate without it.
+export function serveProxy({ component, env }, { peer, WASIShim, io, load = loadBlob, meter = null, grants = null, limit = MAX_INSTANCES, retryMs = MEMORY_RETRY_MS, noteMs = MEMORY_NOTE_MS, onInstance = () => {} }) {
   const memory = createMemory(peer);
   const idle = createIdle({ onCall: () => memory.report() });
   const fetches = createFetches(peer);
@@ -599,6 +605,8 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
   const queue = [];
   let nextRequestID = 0;
   let running = 0;
+  let asking = 0; // requests that wait for a grant of the broker
+  let baseFree = true; // no instance uses the memory that the pod worker counts
   let instantiate = null;
   let linked = false; // the link check is complete: requests can start
   let memoryWait = null; // the timer of PX34
@@ -624,7 +632,7 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
     if (!memorySince) memorySince = now;
     if (now - memoryNoted < noteMs) return;
     memoryNoted = now;
-    const waiting = queue.filter((e) => !e.done).length;
+    const waiting = queue.filter((e) => !e.done).length + asking;
     textLine(`tabernetes: ${NO_MEMORY}; ${waiting} request${waiting === 1 ? "" : "s"} of this container wait${waiting === 1 ? "s" : ""} (PX34)`);
   };
   const memoryBack = () => {
@@ -706,11 +714,37 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
   // run serves one request with one instance.
   const run = async (entry) => {
     const scope = (entry.scope = createScope());
+    // The pod worker counts the memory of one instance: an instance uses it
+    // while no other instance does, and does not ask. The other instances
+    // (2 to 16) ask the broker. Without a grant in time, the instance tries
+    // without it (PX34 then handles a failure).
+    let granted = false;
+    let base = false;
+    if (grants && baseFree) {
+      baseFree = false;
+      base = true;
+    } else if (grants) {
+      asking++;
+      granted = await grants.ask();
+      asking--;
+      if (!granted) noteMemory();
+      if (entry.done) {
+        // The request was cancelled during the wait.
+        if (granted) grants.free();
+        entry.scope = null;
+        running--;
+        pump();
+        return;
+      }
+    }
     let made;
     try {
       made = await newInstance(entry.id, scope);
     } catch (e) {
       running--;
+      if (granted) grants.free();
+      if (base) baseFree = true;
+      if (isMemoryError(e)) grants?.full();
       if (isMemoryError(e) && !entry.done) {
         // PX34: the request waits at the front of the queue.
         queue.unshift(entry);
@@ -747,6 +781,8 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
     scope.cancel();
     entry.scope = null;
     group.release();
+    if (granted) grants.free();
+    if (base) baseFree = true;
     running--;
     memoryFree();
     pump();
@@ -815,12 +851,18 @@ export function serveProxy({ component, env }, { peer, WASIShim, io, load = load
         memory.report();
         if (!handlerOf(instance)) return textExit("the component has no function handle in wasi:http/incoming-handler");
         memoryBack();
+        // The memory of the link check stays until the garbage collection of
+        // this pod worker, and the first instance uses one more (section
+        // 14): the pod worker counts 1, and this grant counts the other. It
+        // does not wait.
+        grants?.keep();
         break;
       } catch (e) {
         if (!isMemoryError(e)) {
           const why = missingText(e.missing ?? [], e?.message ?? e, component.names?.imports);
           return textExit(why || cannotInstantiate(e));
         }
+        grants?.full();
         noteMemory();
         await new Promise((resolve) => setTimeout(resolve, retryMs));
       }

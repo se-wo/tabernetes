@@ -11,8 +11,12 @@
 // For this short time the tab is full, so the probe runs only while no pod
 // starts. The tests write the numbers with t.diagnostic.
 //
+// The tests of package W2.4 check the broker of the page (web/src/memory.js,
+// section 8.6): the state of a node worker without memory, a load with asks
+// that wait at the broker, and collect.
+//
 // The test file runs in the default run of run.mjs. It takes approximately
-// 4 minutes. To run it alone:
+// 6 minutes. To run it alone:
 //
 //   node web/test/e2e/run.mjs web/test/e2e/wasi-memory.test.mjs
 //
@@ -24,7 +28,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { evalOn, closeDevtools } from "./devtools.mjs";
-import { apply, kubectl, logs, NODES, pod, podPhase, run, TAB_NODE, waitFor, waitForPod, worker } from "./harness.mjs";
+import { apply, kubectl, logs, NODES, pod, podPhase, sh, TAB_NODE, waitFor, waitForPod, worker } from "./harness.mjs";
 
 const { chromium } = createRequire(import.meta.url)("playwright");
 
@@ -41,6 +45,10 @@ const PROBE = () => new Promise((resolve) => {
   };
 });
 const probe = () => evalOn(TAB_NODE, PROBE);
+// stats gives the count of the broker of the page (memory.js).
+const stats = () => evalOn(TAB_NODE, () => globalThis.tabernetesWasmMemories.stats());
+// statusLine gives the text of the status line under the terminal.
+const statusLine = () => evalOn(TAB_NODE, () => document.getElementById("tabernetes-status")?.textContent ?? "");
 
 // settled gives the probe when two probes, 1 second apart, agree.
 async function settled() {
@@ -277,7 +285,14 @@ test("a full tab: requests wait (PX34), a new proxy container waits with a line 
   const mod = await terminated(ns, "module");
   const modLog = await logs(ns, "module");
   assert.equal(mod.exitCode, 128, modLog);
-  assert.match(modLog, /Out of memory/);
+  assert.match(modLog, /^the module cannot instantiate: the browser tab has no Wasm memory left for a new instance \(.*Out of memory/m);
+
+  // A new node worker: its Go binary gets no memory. The status line shows
+  // the state (W2.4, item 4), and rmnode removes it.
+  await sh("addnode");
+  const noMemory = await waitFor(async () => /(tab-worker-\d+) no Wasm memory/.exec(await statusLine())?.[1], { timeout: 60, interval: 1, what: "the state no Wasm memory of the new node worker" });
+  t.diagnostic(`a new node worker on the full tab: ${noMemory} no Wasm memory`);
+  await sh(`rmnode --force ${noMemory}`);
   const checks = (Date.now() - began) / 1000;
   t.diagnostic(`the checks of the full tab ended ${checks.toFixed(1)} s after the start of the parked requests`);
   assert.ok(checks < TIMEOUT, "the checks of the full tab ended before the parked requests");
@@ -301,4 +316,71 @@ test("a full tab: requests wait (PX34), a new proxy container waits with a line 
   await kubectl(`delete namespace ${ns} --wait=true`, { timeout: 300 });
   const back = await waitFree(free, "the memories after the deletion of the containers");
   t.diagnostic(`after the deletion of the containers: ${back} free`);
+});
+
+test("W2.4: under a load, asks wait at the broker, and each request still gets its response", async (t) => {
+  const ns = await testNamespace(t);
+  await quiet();
+  const names = Array.from({ length: 8 }, (_, i) => `l${i}`);
+  await apply(names.map(proxy), ns);
+  const ips = [];
+  for (const n of names) ips.push(await runningIP(ns, n));
+  const dropsBefore = (await stats()).drops;
+  // 16 clients for each container, each with 10 requests of 1 second in a
+  // sequence: more instances than the tab can make.
+  const loops = ips.flatMap((ip) => Array.from({ length: 16 }, () =>
+    `(n=0; for j in $(seq 10); do wget -T 60 -q -O /dev/null http://${ip}:8080/wait/1000 || n=$((n+1)); done; echo "failed $n") &`));
+  await apply(client("loader", `${loops.join("\n")}\nwait\necho all-done`), ns);
+  const began = Date.now();
+  // The load reaches the reserve: asks wait at the broker.
+  const busy = await waitFor(async () => {
+    const s = await stats();
+    return s.waiting > 0 && s;
+  }, { interval: 0.5, timeout: 60, what: "asks that wait at the broker" });
+  t.diagnostic(`the load: after ${((Date.now() - began) / 1000).toFixed(1)} s, the broker counts ${busy.used} of ${busy.limit}, ${busy.waiting} asks wait`);
+  // A command component during the load. The reserve keeps memories for it
+  // only while the asks wait less than 2 seconds, and the memories of ended
+  // instances are not in the count (section 8.6): record the result.
+  await apply(component("cmd", "wasi-test-core", TAB_NODE, { command: ["/wasi-test-core.wasm#go"] }), ns);
+  const cmd = await terminated(ns, "cmd");
+  t.diagnostic(`a command component during the load: exit code ${cmd.exitCode} after ${((Date.now() - began) / 1000).toFixed(1)} s; the broker: ${JSON.stringify(await stats())}`);
+  // No request fails: an instance without a grant tries anyway (PX34).
+  const out = await waitFor(async () => {
+    const l = await logs(ns, "loader");
+    return /all-done/.test(l) && l;
+  }, { timeout: 300, interval: 2, what: "the end of the load" });
+  t.diagnostic(`the load of 1,280 requests ended after ${((Date.now() - began) / 1000).toFixed(1)} s`);
+  assert.equal((out.match(/^failed 0$/gm) ?? []).length, 128, out);
+  const end = await stats();
+  // The pod workers keep their asks and grants in the limits of the broker.
+  assert.equal(end.drops - dropsBefore, 0, "the broker dropped messages of the pod workers");
+});
+
+test("W2.4: collect frees the memories of ended instances on a full tab, not on a tab with free memories", async (t) => {
+  const ns = await testNamespace(t);
+  await quiet();
+  await apply(proxy("seq"), ns);
+  const ip = await runningIP(ns, "seq");
+  const empty = await settled();
+  // 60 requests in a sequence leave the memories of ended instances.
+  await apply(client("seq-client", `for i in $(seq 60); do wget -T 10 -q -O /dev/null http://${ip}:8080/context; done; echo done`), ns);
+  await waitFor(async () => /done/.test(await logs(ns, "seq-client")), { what: "60 requests" });
+  await sleep(1000);
+  const garbage = await settled();
+  // collect on a tab with free memories: the one new memory of each pod
+  // worker does not fail, so its garbage stays.
+  await evalOn(TAB_NODE, () => globalThis.tabernetesWasmMemories.collect());
+  await sleep(500);
+  const notFull = await settled();
+  // collect on a full tab: the new memory fails, and the pod worker collects
+  // its garbage first.
+  await hold();
+  await sleep(300);
+  const t0 = Date.now();
+  await evalOn(TAB_NODE, () => globalThis.tabernetesWasmMemories.collect());
+  await sleep(500);
+  await release();
+  const full = await settled();
+  t.diagnostic(`free memories: ${empty} before the requests, ${garbage} after 60 requests, ${notFull} after collect on a tab with free memories, ${full} after collect on a full tab (${Date.now() - t0} ms)`);
+  assert.ok(full > notFull || garbage >= empty - 1, `collect on a full tab freed nothing: ${garbage} -> ${notFull} -> ${full}`);
 });
