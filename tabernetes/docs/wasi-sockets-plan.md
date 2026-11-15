@@ -61,10 +61,13 @@ order. Packages with the same predecessors can run at the same time.
 | W4.4b | 4 | UDP in the pod worker | the UDP part of `web/src/sockets.js` | `sockets.js` (the list of types in `createSocketTable`) | phase 3 | M |
 | W4.5a | 4 | The results of runwasi for phase 4, the Docker tests of UD | UDP test modes in `wasm-images/rust/echo`, step `wasi-udp` (in one pod and on one node) | none | phase 3 | M |
 | W4.5b | 4 | All UD and FL tests end-to-end, AC1 (UDP, combined) | the end-to-end tests of phase 4, `README.md` (phase 4) | `wasi-proxy-lib.mjs` | W4.1, W4.2a, W4.2b, W4.3, W4.4a, W4.4b, W4.5a | M |
-| W5.1 | 5 | ND2 to ND9, ND11, ND12, ND20 (page and node worker) | the `udp` channel in `podlink.go`, `web/src/channel.js`, `web/src/nodes.js`, `web/src/node.worker.js` | none | phase 4 | L |
-| W5.2 | 5 | ND13 to ND19, the agent part of ND3 and ND12 | `node/agent/podlink.go` | none | phase 4 | L |
-| W5.3 | 5 | ND1, ND10, the deferred tests | step `wasi-udp` (between nodes), `docs/networking-policy.md`, `README.md` (phase 5) | none | W5.1, W5.2 | M |
-| W6.1 | 6 | IC1 to IC8 | ICMP in `tabnode_netpol.go`, `ping` in `coreutils_misc.go`, `README.md` (phase 6) | none | phase 4 | M |
+| W5.0 | 5 | The nfqueue item of `docs/networking-policy.md` (phase 0, decision 16) | step `netpol` of the Docker check (new: `netpol.sh`, `netpol.yaml`), phase 0 and the status line of `docs/networking-policy.md` | `check.sh` (the list of steps), `docker-check.yaml` (kernel modules), `wasi-sockets.md` (the risk of nfqueue in section 12) | phase 4 | S |
+| W5.1a | 5 | ND2 (the channel), ND3 to ND5, ND7, ND8, ND11, ND12 (the page), ND20 | `k8s/tabernetes/podlink_udp.go` (new): the `udp` channel of the page and of a node worker | `tunnel.go` (`attachChannel`, `joinedNode`), `nodeworker.go` (`prepareWorkerNode`, `forgetNode`, the channel of a node worker) | phase 4 | M |
+| W5.1b | 5 | ND2 (end-to-end), ND6, ND9, FL11 (worker) | UDP to and from other nodes in `tabnode_udp.go` and `tabnode_flows.go`, `web/test/e2e/wasi-udp-nodes.test.mjs` (new) | `wasi-proxy-lib.mjs` | phase 4, merges after W5.1a | M |
+| W5.2a | 5 | ND3 to ND5, ND12 (the agent), ND19 | `node/agent/udplink.go` (new): the `udp` channel and the flows of the node agent | `node/agent/main.go` (the start of the channel), `node/agent/podlink.go` (one call in `servePodLinks`) | phase 4 | M |
+| W5.2b | 5 | ND13 to ND18 | `node/agent/udplink_net.go` (new): the nftables rules and the sockets for UDP | `node/agent/podlink.go` (`podLinkRules`, `socketAs`), `node/agent/podlink_test.go` (the network namespace test) | W5.2a | M |
+| W5.3 | 5 | ND1, ND10, the deferred tests, UD19 (phase 5) | step `wasi-udp` (between nodes), `kubeDNSProto` (`tabnode_coredns.go`), the default server of `nslookup` (`coreutils.go`), `docs/networking-policy.md`, `README.md` (phase 5) | the deferred lines of `wasi-proxy.sh` and `wasi-sockets.sh`, the echo image (UDP modes), `docker-check.yaml` (`paths`) | W5.0, W5.1a, W5.1b, W5.2a, W5.2b | L |
+| W6.1 | 6 | IC1 to IC8 | ICMP in `tabnode_netpol.go`, `ping` in `coreutils_misc.go`, `web/test/e2e/icmp.test.mjs` (new), `README.md` (phase 6) | `coreutils_misc_test.go` | phase 4 | M |
 
 W3.1a, W3.1b, W3.2 and W3.3a run at the same time. W3.1a merges before
 W3.1b. W3.3a records the results of runwasi first, and the parent session
@@ -93,6 +96,28 @@ the ephemeral ports of each IP, so W4.1 has the size M. Section 8.3.3 of
 In phase 4, only W4.5a (the results of runwasi) and W4.5b (the final
 results) change the rows of section 10.3. The other packages write their
 decisions into sections 8 and 11 and into their pull requests.
+
+Phase 5 has these rows in place of W5.1 and W5.2 of the first plan. W5.1
+is W5.1a (the `udp` channel) and W5.1b (the UDP table and the flows
+between nodes). W5.2 is W5.2a (the channel and the flows of the node
+agent) and W5.2b (the kernel part of the node agent). W5.0 examines
+nfqueue on the Docker node first. Section 8.9.1 of `wasi-sockets.md` gives
+the rules of the `udp` channel. At most four sessions run at the same
+time. The order:
+
+1. The pull request of the parent (section 8.9.1, the hooks in
+   `udplink_hooks.go`, these rows) merges first.
+2. W5.0, W5.1a, W5.1b and W5.2a start. W5.0 reports the result of nfqueue
+   at once.
+3. W5.2a publishes its API on its branch early and reports it. W5.2b starts
+   from this branch when a session ends (W5.0 first). It merges
+   `origin/main` into its branch after W5.2a merges.
+4. W5.1b merges after W5.1a. W6.1 starts when W5.1a or W5.2a merged.
+5. W5.3 starts after W5.0, W5.1a, W5.1b, W5.2a and W5.2b.
+
+In phase 5, only W5.3 changes the rows of section 10.3. W6.1 changes the
+rows of IC. The other packages write their decisions into sections 8 and
+11 and into their pull requests.
 
 W2.4 does not stop phase 3. It can run at the same time as phases 3 to 6.
 It does these items:
@@ -131,3 +156,14 @@ Phase 5 has only deferred tests. So W6.1 can run at the same time as phase
 - `check.sh`, `manifests.yaml`: W1.1 makes one file for each step. Later
   packages change only the file of their step.
 - `README.md`: only the last package of each phase.
+- `udplink_hooks.go`: the parent, in the pull request of the contract of
+  phase 5.
+- `tabnode_udp.go`, `tabnode_flows.go`: W4.1 and W4.2a, then W5.1b.
+- `tabnode_coredns.go`, `coreutils.go`: W4.3, then W5.3.
+- `tunnel.go`, `nodeworker.go`: W5.1a changes only the lines of the `udp`
+  channel.
+- `node/agent/podlink.go`: W5.2a adds one call in `servePodLinks`. W5.2b
+  changes only `podLinkRules` and `socketAs`.
+- `docker-check.yaml`: W5.0 (kernel modules), then W5.3 (`paths`).
+- `README.md` in phases 5 and 6: W5.3 and W6.1. The package that merges
+  later merges `origin/main` first.
