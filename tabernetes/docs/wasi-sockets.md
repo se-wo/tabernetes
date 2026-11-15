@@ -1325,8 +1325,11 @@ once, so the pod worker cannot wait for the Go side in these calls.
      queue of the socket (UD5) is in the pod worker, with 256 KiB.
    - A `datagram` from the pod worker with more bytes than its credit fails
      the examination (MS4).
-   - `check-send` gives the number of datagrams of 65,507 bytes that the
-     credit permits, and not more than wasmtime gives.
+   - `check-send` gives the permit of wasmtime: 16 datagrams, not a count of
+     bytes (package W4.5a). A datagram that is larger than the credit is not
+     sent: `send` stops there, as a send that would block on runwasi. Then
+     `check-send` gives 0 until the credit permits a datagram of 65,507
+     bytes.
 7. Errors. The UDP table can refuse a datagram of a connected socket to its
    remote address, because no socket can receive it (UD8, UD10, UD21). The
    socket then has one pending error (section 8.7):
@@ -1336,8 +1339,11 @@ once, so the pod worker cannot wait for the Go side in these calls.
      datagram back.
    - For each pending error, the Go side sends one `error` with
      `connection-refused` (UD9, UD11).
-   - The pod worker gives this error code to the next `receive` or `send` of
-     the component, one time.
+   - The pod worker gives this error code to the next `send` of the
+     component, one time, as runwasi does (package W4.5a). This send does
+     not send its datagram. `receive` never gets the error, and
+     `check-send` does not change. Two `error` messages before this send
+     give one error.
    - Different from rule 8 of section 8.3.2, the socket continues. A later
      datagram can make a new pending error.
    - A socket that is not connected gets no `error`, as on Linux.
