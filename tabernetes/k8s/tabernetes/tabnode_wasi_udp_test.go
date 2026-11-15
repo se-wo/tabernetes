@@ -582,3 +582,22 @@ func TestWasiUDPChargesCPU(t *testing.T) {
 		t.Fatalf("CPU of the container %d, before %d: nothing charged", after, before)
 	}
 }
+
+// Rule 4: runwasi permits IPv4 multicast. connect and datagram to
+// 224.0.0.0/4 pass the examination; the UDP table drops the datagrams, the
+// credit comes back, and the socket stays.
+func TestWasiUDPMulticast(t *testing.T) {
+	w := udpPeer(t, nextLoopbackIP(), nil)
+	udpTabNode(t)
+	w.udpBound(1, "0.0.0.0", 0)
+	w.udpConnect(1, "224.0.0.1", 5000)
+	w.datagram(1, "224.0.0.1", 5000, []byte("group"))
+	w.udpCredits(1, 5)
+	w.udpConnect(1, "0.0.0.0", 0)
+	w.datagram(1, "239.255.255.250", 1900, []byte("ssdp"))
+	w.udpCredits(1, 4)
+	w.none("error", 1, 20*time.Millisecond)
+	if w.p.Drops() != 0 || udpOf(w.p).get(1) == nil {
+		t.Fatalf("%d drops, socket %v", w.p.Drops(), udpOf(w.p).get(1))
+	}
+}
