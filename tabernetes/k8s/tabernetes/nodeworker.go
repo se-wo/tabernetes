@@ -50,7 +50,7 @@ func (c *cluster) prepareWorkerNode(open js.Value, gpu bool) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
-	jn := &joinedNode{name: name, ip: ip, open: open, ln: ln}
+	jn := &joinedNode{name: name, ip: ip, open: open, ln: ln, worker: true}
 	nodesMu.Lock()
 	nodes[name] = jn
 	nodesMu.Unlock()
@@ -78,6 +78,9 @@ func forgetNode(name string) {
 	if jn != nil {
 		jn.ln.Close()
 	}
+	// A terminated worker sends no null on its ports, so the onclose of its
+	// udp channel never runs.
+	udpLinkForget(name)
 }
 
 // runWorkerNode is the life of the instance in a Web Worker: a node, no
@@ -132,5 +135,9 @@ func runWorkerNode(cfg js.Value) error {
 			}()
 		}
 	}()
-	return startTabNode(context.Background(), nc)
+	if err := startTabNode(context.Background(), nc); err != nil {
+		return err
+	}
+	go udpLinkOpenWorker() // the udp channel to the page (podlink_udp.go)
+	return nil
 }

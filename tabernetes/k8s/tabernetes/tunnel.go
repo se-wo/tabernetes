@@ -125,6 +125,10 @@ func splice(a, b io.ReadWriteCloser) {
 // from, as the page knows it ("" in a Web Worker).
 func attachChannel(dc js.Value, from string) {
 	label := dc.Get("label").String()
+	if label == udpLinkLabel { // messages, not a stream (podlink_udp.go)
+		udpLinkAttach(dc, from)
+		return
+	}
 	conn := newDCConn(dc)
 	if _, _, ok := podLinkNode(label); ok {
 		go attachPodLink(conn, label, from)
@@ -157,6 +161,9 @@ type joinedNode struct {
 	ip   string
 	open js.Value // JS function(label) => Promise<RTCDataChannel>
 	ln   net.Listener
+	// worker marks a node worker (nodeworker.go): its udp channel has
+	// credits and no WebRTC settings (podlink_udp.go).
+	worker bool
 }
 
 var (
