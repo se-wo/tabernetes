@@ -2132,16 +2132,16 @@ The column "Nodes" gives the nodes for the test:
 | UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
 | UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. | tab |
 | AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. | tab |
-| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. | tab, worker, Docker |
+| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. On runwasi, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. | tab, worker, Docker |
 | UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. | tab |
 | UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. | tab |
-| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. | tab, Docker |
-| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. | tab, Docker |
-| UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. | tab, Docker |
-| UD13 | The UDP echo pod sends to its own Service and gets its answer. | tab, Docker |
-| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. | tab, Docker |
+| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. On runwasi (wasmtime 36), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
+| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
+| UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. On the GitHub runner, the client gets no answer and no error. | tab, Docker |
+| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. | tab, Docker |
+| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. | tab, Docker |
 | UD19 | `nc -u` sends a line to the UDP echo pod and receives it. | tab |
-| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. | tab, Docker |
+| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`, and the client in another pod gets the error on its second `send`. | tab, Docker |
 | FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. | tab |
 | FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. | tab |
 | FL2 | A flow without answers is not in the flow table after 31 seconds. | tab |
@@ -2191,11 +2191,11 @@ These differences stay after this design. `README.md` must show them.
 | A name with characters outside ASCII in `ip-name-lookup` | `invalid-argument` | wasmtime changes the name with IDNA, then looks it up |
 | UDP in the tab node | No loss before a queue has no space | Loss is possible |
 | `connection-refused` for UDP between nodes | Not available | Available |
-| Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). |
+| Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). For UDP, runwasi gives the hop limit 64 and the buffer sizes of the kernel divided by 2: on the GitHub runner, 524,288 bytes to receive and 106,496 bytes to send. |
 | The connections that a listener keeps before an `accept` | The backlog and up to 128 more in the queue of the in-process network (`SOMAXCONN` of `net_fake.go`). Then a client waits. | The backlog and one more |
 | A dial from a pod to its own socket on `127.0.0.1` through the pod IP or through a Service of the pod, also a UDP datagram | It connects, and the datagram arrives (section 8.11) | `connection-refused` |
-| A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work. Package W4.5a records the result of runwasi. |
-| The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram, so fewer datagrams. Package W4.5a records the number. |
+| A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work, for TCP and for UDP (runwasi) |
+| The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram. On the GitHub runner (`receive-buffer-size` 524,288), a server keeps 455 of 1,000 datagrams of 1,024 bytes. |
 | A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod | The answers come from the pod IP | The answers come from `127.0.0.1` |
 | A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | Nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
 | UDP to pods on other nodes, and to Services with only such endpoints, until phase 5 | The tab node drops the datagram | It arrives |
