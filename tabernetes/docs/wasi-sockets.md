@@ -1742,7 +1742,7 @@ table does these steps:
   makes no flow.
 - Until phase 5, the Service translation selects only endpoints on this tab
   node. A Service with only endpoints on other nodes: "drop", without an
-  error, and no flow. Package W5.1 sends these datagrams at this step.
+  error, and no flow. Package W5.1b sends these datagrams at this step.
 - Else `pick` selects one of the endpoints on this tab node, with
   `sessionAffinity` and `internalTrafficPolicy` as for TCP (FL10, FL11).
 - A ClusterIP without a UDP Service on this port: "drop" (UD12).
@@ -1770,7 +1770,9 @@ Docker pod -> tproxy -> node agent -> udp channel -> page
 ```
 
 The page is the center. The page forwards each datagram between two
-nodes, as for TCP. Each message has this header:
+nodes, as for TCP. Each message has a header of 14 bytes. The numbers are
+in network byte order (big-endian). Section 8.9.1 gives the rules of the
+channel.
 
 | Byte | Contents |
 | --- | --- |
@@ -1790,6 +1792,122 @@ A node worker sends a credit after it takes datagrams from the channel
 (ND20). The page subtracts the credit from the bytes that it sent (ND11).
 Only the channel to a node worker has credits. A WebRTC channel has
 `bufferedAmount`.
+
+#### 8.9.1 The udp channel
+
+These rules are the contract between the page and a node worker
+(`k8s/tabernetes/podlink_udp.go`) and between the page and the node agent
+(`node/agent/udplink.go`). "The node" is the node worker or the Docker
+node at the other end of the channel.
+
+1. Channel. The node opens one channel with the label `udp` to the page.
+   The page does not open it.
+   - A node worker opens it with `tabernetesOpen("udp")`, after its tab
+     node started. It is a MessagePort (`web/src/channel.js`).
+   - The node agent opens a WebRTC data channel with `ordered: false` and
+     `maxRetransmits: 0` (ND3). It opens it after the peer connection is
+     connected. If the channel closes while the connection continues, the
+     node agent writes a line to its log and does not open it again.
+   - The page closes a `udp` channel of a Docker node with other settings
+     and writes a line to its log (ND3).
+   - A second `udp` channel of the same node replaces the first one. The
+     page closes the first one.
+   - A `kubectl` connection of `join --kubectl` gets no `udp` channel.
+2. Messages. Each message of the channel is one header and, for a
+   datagram, the datagram. One `send` is one message.
+   - Type 1, datagram: bytes 2 to 13 have the source and the destination.
+     The datagram follows. A datagram has 0 to 65,507 bytes, so a message
+     has 14 to 65,521 bytes (ND5).
+   - Type 2, credit: bytes 2 to 5 have the number of bytes (an unsigned
+     32-bit number). The sender writes 0 into bytes 6 to 13. The receiver
+     ignores them. A credit has exactly 14 bytes.
+3. Examination. Each receiver (the page, the node worker and the node
+   agent) drops a message and sends nothing back in these conditions:
+   - It has less than 14 bytes, or the version is not 1.
+   - The type is not 1 or 2. Other types are for a later design.
+   - A datagram message has more than 65,521 bytes, or a port is 0.
+   - A credit does not come from a node worker to the page, or it does
+     not have 14 bytes.
+
+   The receiver counts the dropped messages. It writes a line to its log
+   at most one time each 10 seconds.
+4. The page as the center. For each datagram from the channel of node N,
+   the page does these steps:
+   - The source must be the node IP or in a pod CIDR of N. Else the page
+     drops the datagram (ND7, ND8).
+   - The destination node is the node whose pod CIDR contains the
+     destination IP, or whose node IP (`InternalIP`) is the destination
+     IP. Without a destination node, or when the destination node is N,
+     the page drops the datagram.
+   - For the node of the page, the page gives the datagram to its UDP
+     table (section 8.7).
+   - For another node, the page sends the datagram on the `udp` channel of
+     that node, with no change. Without such a channel, the page drops
+     the datagram.
+5. A tab node as the source. The UDP table sends a datagram to the `udp`
+   channel when the destination after `udpRoute` (section 8.7, step 4) is
+   in the pod CIDR of another node or is the node IP of another node. The
+   page sends it to the channel of the destination node. A node worker
+   sends it to the page. Other destinations without a socket stay as in
+   section 8.7: "refuse" for an IP of this tab node, else "drop". The node
+   IP is a source for the terminal and for `hostNetwork` pods, so the
+   answers to them go to a node IP.
+6. NetworkPolicy. The page forwards a datagram between two other nodes
+   without an examination. A tab node examines the first datagram of each
+   flow in its flow table (section 8.8): as the source node the egress
+   (ND6), and as the destination node the ingress (ND9). On a Docker
+   node, the kernel examines the datagrams (ND10).
+7. No refusal. The channel has no message for "port unreachable". A
+   datagram to a pod of another node without a socket is lost. The sender
+   gets no error (section 11). Rule 7 of section 8.3.3 applies only to
+   refusals on the same tab node.
+8. Credits (ND11, ND20). Only the channel between the page and a node
+   worker has credits.
+   - The page counts the bytes of each message (the header and the
+     datagram) that it sends to a node worker. The page subtracts each
+     credit. A credit that is larger than the count sets the count to 0.
+   - The count belongs to one channel. A new `udp` channel of the node
+     starts at 0.
+   - If the count plus the next message is more than 1,048,576 bytes, the
+     page drops this message (ND11).
+   - The node worker sends a credit for the bytes of the messages that it
+     took from the channel (rule 10). It can put the bytes of many
+     messages into one credit. It sends the credit before it has 65,536
+     bytes without a credit, and not later than 50 ms after it took the
+     first message of the credit.
+   - The page does not send credits. A node worker sends to the page
+     without a limit.
+9. WebRTC (ND12). Before each send on a `udp` data channel, the page and
+   the node agent read `bufferedAmount`. If it is more than 1,048,576
+   bytes, the sender drops the datagram. A send never waits.
+10. Work in the callbacks. The page and the node worker get each message
+    in a callback of JavaScript. The callback copies the message, puts it
+    into a queue of at most 1,048,576 bytes and returns. A full queue
+    drops the message. One goroutine for each channel takes the messages
+    from the queue and does the work. A node worker counts a message for
+    its credit when this goroutine took it, also when it drops it.
+11. Limits of the node agent. The node agent keeps at most 4,096 flows
+    and 1,024 sockets for tab addresses. A datagram that needs a new flow
+    or a new socket above the limit is a counted drop.
+
+Two unit tests, one in each file, use these messages:
+
+- A datagram from 10.244.1.5:5353 to 10.244.0.7:53 with the two bytes
+  `hi`: `01 01 0a f4 01 05 14 e9 0a f4 00 07 00 35 68 69` (16 bytes).
+- A credit of 65,521 bytes: `01 02 00 00 ff f1 00 00 00 00 00 00 00 00`.
+
+The Go side of the tab node has two hooks between the UDP table and the
+channel (`k8s/tabernetes/udplink_hooks.go`):
+
+- `udpToNode(src, dst, b) bool`: the UDP table gives a datagram to
+  the channel. `podlink_udp.go` sets it. It must not wait and must not
+  keep `b`. It gives false when it dropped the datagram.
+- `udpFromNode(src, dst, b)`: the channel gives a datagram for this tab
+  node to the UDP table. `tabnode_udp.go` sets it. It must not wait. It
+  can keep `b`.
+- The addresses are IPv4 addresses without the IPv4-in-IPv6 form
+  (`Unmap`). `udpToNode` drops another address.
+- A hook that is not set drops the datagram.
 
 ### 8.10 Files of components
 
@@ -2204,7 +2322,7 @@ The column "Nodes" gives the nodes for the test:
 | FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. | tab |
 | FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. | tab |
 | FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. | tab |
-| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.3. | tab, worker (phase 5) |
+| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.1b. | tab, worker (phase 5) |
 | FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. | tab |
 | FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. | tab |
 | ND1 | The tests with "worker" or "Docker" in this table. | worker, Docker |
