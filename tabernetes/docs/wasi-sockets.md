@@ -156,7 +156,9 @@ These items are not in the scope of this document:
   hosts, it gives `http.DefaultClient`, which uses `fetch()` of the browser
   (lines 109 to 118).
 - `tabnode_net.go` (the kube-proxy and the DNS of the tab node) does not
-  forward UDP ports (lines 162 and 163). CoreDNS on a tab node uses TCP only.
+  forward UDP ports (lines 162 and 163). Until phase 4, CoreDNS on a tab node
+  used TCP only. Phase 4 (UD18) adds DNS over UDP on the UDP table (section
+  8.7).
 - `netPolicy.allowed` examines TCP only (`tabnode_netpol.go`, line 135).
 - `dialFromPod` decides NetworkPolicy before the connection exists
   (`tabnode_netpol.go`, lines 201 to 244). `policyListener.Accept` decides
@@ -1340,8 +1342,11 @@ once, so the pod worker cannot wait for the Go side in these calls.
      queue of the socket (UD5) is in the pod worker, with 256 KiB.
    - A `datagram` from the pod worker with more bytes than its credit fails
      the examination (MS4).
-   - `check-send` gives the number of datagrams of 65,507 bytes that the
-     credit permits, and not more than wasmtime gives.
+   - `check-send` gives the permit of wasmtime: 16 datagrams, not a count of
+     bytes (package W4.5a). A datagram that is larger than the credit is not
+     sent: `send` stops there, as a send that would block on runwasi. Then
+     `check-send` gives 0 until the credit permits a datagram of 65,507
+     bytes.
 7. Errors. The UDP table can refuse a datagram of a connected socket to its
    remote address, because no socket can receive it (UD8, UD10, UD21). The
    socket then has one pending error (section 8.7):
@@ -1351,8 +1356,11 @@ once, so the pod worker cannot wait for the Go side in these calls.
      datagram back.
    - For each pending error, the Go side sends one `error` with
      `connection-refused` (UD9, UD11).
-   - The pod worker gives this error code to the next `receive` or `send` of
-     the component, one time.
+   - The pod worker gives this error code to the next `send` of the
+     component, one time, as runwasi does (package W4.5a). This send does
+     not send its datagram. `receive` never gets the error, and
+     `check-send` does not change. Two `error` messages before this send
+     give one error.
    - Different from rule 8 of section 8.3.2, the socket continues. A later
      datagram can make a new pending error.
    - A socket that is not connected gets no `error`, as on Linux.
@@ -1610,10 +1618,18 @@ It gives the same functions to all code of the tab node:
 - `listenPodUDP(ctx, addr)` gives a socket (`udpConn`, a `net.PacketConn`)
   on the pod IP. The hosts `0.0.0.0`, `::`, `127.0.0.0/8`, `localhost` and
   `::1` give the pod IP. A loopback host also adds a row with the protocol
-  `udp` to the loopback table (UD20). Outside a pod and in a `hostNetwork`
-  pod, the IP is the node IP.
+  `udp` to the loopback table (UD20). Another IP gives `EADDRNOTAVAIL`.
+  Port 0 gives the first free UDP port of the IP from 32768 (UD3, UD4). An
+  address in use gives `errPortInUse`. Outside a pod and in a `hostNetwork`
+  pod, the IP is the node IP. The socket closes at the end of the context
+  of the container.
 - `dialClusterUDP(ctx, addr)` gives a connected socket with an ephemeral
-  port.
+  port. The host resolves as for `dialCluster`.
+- `Connect` sets the remote address of a socket. The zero address, and
+  `0.0.0.0` with the port 0, remove it. A connected socket receives only
+  from its remote address.
+- `WriteTo` and `Write` never wait. `ReadFrom` and `Read` wait for a
+  datagram, a deadline, `Close` or the end of the context.
 
 The UDP table does not use the in-process network of Go. Its ports are in
 the table of the ports in use of `tabnode_dial.go`, with the protocol `udp`.
@@ -1623,20 +1639,25 @@ The UDP table does these steps for each datagram:
 
 1. More than 65,507 bytes give `EMSGSIZE` (UD14).
 2. A destination in `127.0.0.0/8` becomes the IP of the socket.
-3. The hook `udpRoute` gives the Service translation and the flows of
-   section 8.8. Its result is "deliver", "drop" or "refuse". Without
-   section 8.8, it delivers with no change.
+3. The hook `udpRoute(ctx, src, dst)` gives the Service translation and
+   the flows of section 8.8. `src` is the address of the socket that sends.
+   `dst` is the destination after step 2. The hook gives the source for the
+   receiver, the destination socket and the result "deliver", "drop" or
+   "refuse". Without section 8.8, it delivers with no change.
 4. A destination without a socket: for a pod IP or the node IP of this tab
    node, "refuse" (UD8). For another IP, "drop" without an error. Section 8.9
    (phase 5) sends these datagrams on the `udp` channel.
 5. A socket with a row in the loopback table receives only from its own pod
-   IP. Else "refuse" (UD21).
-6. A full queue of the receiver drops the datagram (UD6).
+   IP. Else "refuse" (UD21). The examination uses the real sender, not the
+   source that `udpRoute` gives.
+6. A connected receiver drops a datagram from another source. A full queue
+   of the receiver drops the datagram (UD6).
 
 For "refuse", a connected sender gets one pending `ECONNREFUSED`, if the
 destination is its remote address (UD9, UD11). Exactly one call takes it:
-the next receive or the next send. A send that takes it does not send its
-datagram, as on Linux.
+the next send. A receive does not take it, as on runwasi (package W4.5a).
+The send that takes it does not send its datagram. Two refused datagrams
+before the next send give one error.
 
 The other programs of the tab node use the UDP table:
 
@@ -1654,9 +1675,14 @@ The other programs of the tab node use the UDP table:
 
 ### 8.8 UDP flows
 
-The flow table is in `tabnode_flows.go` (new), next to the service proxy of
-`tabnode_net.go`. It sets the hook `udpRoute` of section 8.7. A flow has
-these items:
+The flow table is in `tabnode_flows.go`, next to the service proxy of
+`tabnode_net.go`. It sets the hook `udpRoute` of section 8.7 in an `init`
+function. The UDP ports of the Services have no listener: `sync` keeps them
+by ClusterIP and port, next to the TCP listeners, so one ClusterIP can have
+the same port for TCP and UDP (UD17). `svcPort` has the protocol of its
+port, and `endpoints` uses the port of the EndpointSlice with the same
+protocol. Inside the tab node, the node IP and the node port of a UDP
+Service also get the translation. A flow has these items:
 
 - the tuple before the Service translation and the tuple after it
 - the endpoint that the service proxy selected
@@ -1665,31 +1691,74 @@ these items:
 - the time of the last datagram in each direction
 
 The service proxy, NetworkPolicy and the node agent use the same timeouts
-(FL2 to FL4). The tab node removes flows in these conditions:
+(FL2 to FL4). A flow with an answer becomes a "stream" at a datagram 2
+seconds or more after its first datagram, as in `nf_conntrack`. A datagram
+that finds a closed flow removes it. A timer removes the other closed flows.
+The tests use the clock `flowNow`. The tab node removes flows in these
+conditions:
 
-- An endpoint is not in the EndpointSlices (FL5). An event of the
-  EndpointSlices starts this examination.
+- An endpoint is not in the EndpointSlices, or the Service port is gone
+  (FL5). An event of the EndpointSlices or of the Services starts this
+  examination.
 - A policy changes (FL8, FL9).
 - A pod stops (FL13). `releaseIP` (`tabnode.go`) removes the flows of the
   pod IP, before a new pod can get it.
 
 A denied datagram makes no flow (FL12). The hook `udpPolicy` of the flow
 table gives the NetworkPolicy examination of the first datagram of a flow
-(`tabnode_netpol.go`).
+(`tabnode_netpol.go`). It gets the tuple after the Service translation. Only
+new flows go to `udpPolicy`: the next datagrams of an open flow, in the two
+directions, use the flow (FL7). `recheckFlows` examines all open flows again
+for the strict mode and removes the flows that the policy denies now (FL8,
+FL9). The work of the translation and of `udpPolicy` is in `udpRoute`, so
+the UDP table charges it to the sender (AC1).
+
+The `init()` of `tabnode_netpol.go` sets `udpPolicy` to `allowedUDP` of the
+policy of the tab node. Without a tab node or a policy engine, it allows.
+`allowedUDP` gives the engine of kube-network-policies a packet with the
+protocol UDP, the client as the source and the endpoint as the destination.
+Thus a rule for a Service port uses the port of the endpoint, as for TCP. A
+port of the protocol TCP in a policy does not allow UDP, and a port of the
+protocol UDP does not allow TCP. The engine examines the egress of the
+client and the ingress of the endpoint in one call. Until the informers of
+the engine have synced, `allowedUDP` allows all datagrams, as for TCP. As
+`admitIngress` does for TCP, `allowedUDP` does not examine the host of the
+node: a source in 127.0.0.0/8, the node IP, and a datagram of a pod to its
+own pod IP.
+
+The strict mode (`tabnode_netpol_strict.go`) calls `recheckFlows` in the
+same recheck as the TCP connections. Each change of a pod, a namespace, a
+NetworkPolicy or a ClusterNetworkPolicy starts the recheck after
+`recheckDelay` (200 milliseconds). Thus a flow that a new policy denies is
+gone approximately 200 milliseconds after the informer gets the change. The
+next datagram of that flow is a new flow and gets a new examination. A
+denied datagram makes no flow, so the first datagram after a policy that
+allows it arrives (FL12).
 
 For a new datagram to a ClusterIP and a port of a UDP Service, the flow
 table does these steps:
 
-- A Service without endpoints: "refuse" (UD10, UD11, fact 17).
+- A Service without endpoints: "refuse" (UD10, UD11, fact 17). The table
+  makes no flow.
 - Until phase 5, the Service translation selects only endpoints on this tab
   node. A Service with only endpoints on other nodes: "drop", without an
-  error.
+  error, and no flow. Package W5.1 sends these datagrams at this step.
+- Else `pick` selects one of the endpoints on this tab node, with
+  `sessionAffinity` and `internalTrafficPolicy` as for TCP (FL10, FL11).
 - A ClusterIP without a UDP Service on this port: "drop" (UD12).
 
 Two flows can have the same tuple after the translation, for example when
-one client socket sends to two ClusterIPs with the same endpoint. Then the
-newest flow stays, and the older flow ends, as conntrack does for a clash.
-Package W4.5a examines this on Linux if it can.
+one client socket sends to two ClusterIPs with the same endpoint. The
+original destinations of the two flows are different, so the two flows stay
+apart (FL1), as on Linux (fact 11 of package W4.5a). The answers of the
+endpoint must then have different tuples. Thus the second flow gets another
+source port on the IP of the client, as the source NAT of Linux does at a
+clash. The endpoint sees this port. The flow changes the answers to this
+port back to the client socket, with the ClusterIP and the port of the
+flow as the source. Each answer thus comes from its own ClusterIP. The new
+port is the first port from 32768 that no flow to the endpoint and no
+socket of the UDP table uses. The newest flow wins only at a real clash:
+the same tuple after the translation and the same original destination.
 
 ### 8.9 UDP between nodes
 
@@ -2117,16 +2186,16 @@ The column "Nodes" gives the nodes for the test:
 | UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
 | UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. | tab |
 | AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. | tab |
-| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. | tab, worker, Docker |
+| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. On runwasi, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. | tab, worker, Docker |
 | UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. | tab |
 | UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. | tab |
-| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. | tab, Docker |
-| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. | tab, Docker |
-| UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. | tab, Docker |
-| UD13 | The UDP echo pod sends to its own Service and gets its answer. | tab, Docker |
-| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. | tab, Docker |
+| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. On runwasi (wasmtime 36), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
+| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
+| UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. On the GitHub runner, the client gets no answer and no error. | tab, Docker |
+| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. | tab, Docker |
+| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. | tab, Docker |
 | UD19 | `nc -u` sends a line to the UDP echo pod and receives it. | tab |
-| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. | tab, Docker |
+| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`, and the client in another pod gets the error on its second `send`. | tab, Docker |
 | FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. | tab |
 | FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. | tab |
 | FL2 | A flow without answers is not in the flow table after 31 seconds. | tab |
@@ -2176,11 +2245,11 @@ These differences stay after this design. `README.md` must show them.
 | A name with characters outside ASCII in `ip-name-lookup` | `invalid-argument` | wasmtime changes the name with IDNA, then looks it up |
 | UDP in the tab node | No loss before a queue has no space | Loss is possible |
 | `connection-refused` for UDP between nodes | Not available | Available |
-| Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). |
+| Socket options | They keep their values and have no effect | The kernel uses them. It can change the buffer sizes (Linux doubles `SO_RCVBUF`). For UDP, runwasi gives the hop limit 64 and the buffer sizes of the kernel divided by 2: on the GitHub runner, 524,288 bytes to receive and 106,496 bytes to send. |
 | The connections that a listener keeps before an `accept` | The backlog and up to 128 more in the queue of the in-process network (`SOMAXCONN` of `net_fake.go`). Then a client waits. | The backlog and one more |
 | A dial from a pod to its own socket on `127.0.0.1` through the pod IP or through a Service of the pod, also a UDP datagram | It connects, and the datagram arrives (section 8.11) | `connection-refused` |
-| A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work. Package W4.5a records the result of runwasi. |
-| The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram, so fewer datagrams. Package W4.5a records the number. |
+| A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work, for TCP and for UDP (runwasi) |
+| The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram. On the GitHub runner (`receive-buffer-size` 524,288), a server keeps 455 of 1,000 datagrams of 1,024 bytes. |
 | A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod | The answers come from the pod IP | The answers come from `127.0.0.1` |
 | A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | Nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
 | UDP to pods on other nodes, and to Services with only such endpoints, until phase 5 | The tab node drops the datagram | It arrives |
@@ -2190,6 +2259,8 @@ These differences stay after this design. `README.md` must show them.
 | Writes of a WebAssembly container to a volume | They change only the copy in the worker. A restart does not show them. | They change the volume. A restart shows them. |
 | Files of a WebAssembly container | A copy of a maximum of 64 MiB | The volumes, no maximum |
 | CPU time of a component in `kubectl top` | Only from calls of imports and from waits. A loop without imports shows its time at its end. | The cgroup counts all time |
+| `nslookup` to the default server (the ClusterIP of `kube-dns`), until phase 5 | UDP only if `kube-dns` has a ready endpoint for 53/UDP on this tab node. Else TCP to the same ClusterIP. If `kube-dns` has no endpoint, the service proxy gives the answer (UD19, `kubeDNSProto` in `tabnode_coredns.go`). | UDP |
+| An answer of CoreDNS over UDP that is too large (UD22) | The header and the question with the TC bit, and no records | The TC bit and the records that fit |
 | NodePort and hostPort for UDP with an endpoint on `tab` | Out of scope | The host network namespace does not reach tab pods (issue #61) |
 
 ## 12 Risks

@@ -35,6 +35,12 @@ const fetchScript = async (url) => {
 const runtime = (componentWorkerURL = "http://x/component.worker.js") =>
   createRuntime({ workerURL: "http://x/wasi.worker.js", mirror: "", transpileURL: "http://x/transpile/t.js", componentWorkerURL, Worker: FakeWorker, fetch: fetchScript });
 const tick = () => new Promise((r) => setTimeout(r, 5));
+// until waits for cond in steps of tick, for up to 2 s. The fake data:
+// worker fails on a timer that starts after the async launch, so a single
+// tick can be too short on a loaded machine.
+async function until(cond) {
+  for (let i = 0; i < 400 && !cond(); i++) await tick();
+}
 
 beforeEach(() => {
   FakeWorker.all = [];
@@ -101,7 +107,7 @@ test("decision 13: if a data: worker does not start, the pod worker starts from 
   const got = [];
   h.onMessage((m) => got.push(m));
   h.post({ type: "start" }, []);
-  await tick();
+  await until(() => FakeWorker.all.length >= 2);
   assert.equal(FakeWorker.all.length, 2);
   const [d, b] = FakeWorker.all;
   assert.ok(d.url.startsWith("data:") && d.terminated);
@@ -111,7 +117,7 @@ test("decision 13: if a data: worker does not start, the pod worker starts from 
   assert.deepEqual(got, []);
   // The next pod worker starts from the Blob URL at once.
   rt.start({ component: true }).onMessage(() => {});
-  await tick();
+  await until(() => FakeWorker.all.length >= 3);
   assert.equal(FakeWorker.all.length, 3);
   assert.equal(FakeWorker.all[2].url, b.url);
 });

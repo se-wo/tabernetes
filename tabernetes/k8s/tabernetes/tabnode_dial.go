@@ -28,7 +28,7 @@ var errPortInUse = errors.New("address in use")
 // listeners of listenPod and the local ports of dialClusterFrom use it. The
 // in-process network does not examine the local port of a dial, and it gives
 // port 0 a counter from 1 (fact 11), so this table keeps the ports. The key
-// has the protocol: W4.1 adds UDP.
+// has the protocol: the UDP table (tabnode_udp.go) uses "udp".
 var (
 	portsMu sync.Mutex
 	ports   = map[loopbackKey]*portUse{}
@@ -98,6 +98,25 @@ func claimListener(proto, ip string, port int) (release func(), err error) {
 	}
 	u.listener = true
 	return onceFunc(func() { dropPortUse(k, func(u *portUse) { u.listener = false }) }), nil
+}
+
+// claimFreePort notes a listener on the first free port of ip from 32768 to
+// 60999 in the table of the ports in use (UD3, UD4). A free port has no
+// reservation and no listener. The search and the claim are one step under
+// portsMu, so two sockets never get the same port. The UDP table
+// (tabnode_udp.go) uses it for port 0: a UDP bind is exclusive (section
+// 8.3.3, rule 2).
+func claimFreePort(proto, ip string) (port int, release func(), err error) {
+	portsMu.Lock()
+	defer portsMu.Unlock()
+	for p := proxyEphemeralFirst; p <= proxyEphemeralLast; p++ {
+		k := newLoopbackKey(proto, ip, p)
+		if ports[k] == nil {
+			ports[k] = &portUse{listener: true}
+			return p, onceFunc(func() { dropPortUse(k, func(u *portUse) { u.listener = false }) }), nil
+		}
+	}
+	return 0, nil, errPortInUse
 }
 
 func dropPortUse(k loopbackKey, change func(*portUse)) {

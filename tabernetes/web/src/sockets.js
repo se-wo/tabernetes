@@ -5,8 +5,8 @@
 // A command component (and the function of an entrypoint) gets TCP and name
 // lookup through the socket messages of section 8.3.2: createSocketTable
 // gives the table of the socket IDs and lookup IDs of one pod worker, and
-// createSockets({idle, io, table}) gives the objects for WASIShim. UDP stays
-// a stub until phase 4.
+// createSockets({idle, io, table}) gives the objects for WASIShim. UDP uses
+// the messages of section 8.3.3 (createUdp).
 //
 // A proxy component keeps the stub (rule 12, PX15): createSockets without a
 // table. Each function then gives the result of the proxy world on runwasi
@@ -26,7 +26,7 @@
 // call returns a promise that continues after one message on a
 // MessageChannel. So a component that polls without a wait still lets the
 // pod worker receive messages. The streams of component.js, http.js and the
-// TCP streams here use the same count.
+// TCP and UDP streams here use the same count.
 
 import { LIMITS } from "./wasi_messages.js";
 
@@ -131,11 +131,21 @@ const SECOND = 1_000_000_000n;
 const MIN_RECEIVE_BUFFER = 1_152n;
 const MIN_SEND_BUFFER = 2_304n;
 
-const UDP_DEFAULTS = Object.freeze({
+// The defaults of the UDP socket options (TC22, fact 7 of package W4.5a).
+// They have no effect, as for TCP. The values are those of runwasi on the
+// reference runner of package W4.5a; the buffer sizes depend on the host
+// (section 11, "Socket options").
+export const UDP_DEFAULTS = Object.freeze({
   unicastHopLimit: 64,
-  receiveBufferSize: 212_992n,
-  sendBufferSize: 212_992n,
+  receiveBufferSize: 524_288n,
+  sendBufferSize: 106_496n,
 });
+
+// The smallest UDP buffer sizes that runwasi gives after a set (fact 7 of
+// package W4.5a). The expected values are those of TCP: the minimum of the
+// kernel is the same for all sockets.
+export const UDP_MIN_RECEIVE_BUFFER = MIN_RECEIVE_BUFFER;
+export const UDP_MIN_SEND_BUFFER = MIN_SEND_BUFFER;
 
 // DEFAULT_BACKLOG is the backlog of listen when the component does not set
 // one: the default of wasmtime.
@@ -299,7 +309,7 @@ export function createSocketTable({ peer, io, idle = null }) {
     },
   };
   const route = (m) => entries.get(m.socket)?.[m.type]?.(m);
-  for (const t of ["bound", "listening", "connected", "data", "credit", "error"]) peer.on(t, route);
+  for (const t of ["bound", "listening", "connected", "data", "datagram", "credit", "error"]) peer.on(t, route);
   peer.on("accepted", (m) => {
     const h = entries.get(m.socket);
     if (h?.accepted) h.accepted(m);
@@ -919,12 +929,519 @@ class TcpOptions {
   }
 }
 
+// UdpOptions keeps the socket options of a UDP socket (TC22). A set to 0
+// gives invalid-argument. As on runwasi, a small buffer size reads as the
+// minimum of the kernel (fact 7 of package W4.5a).
+class UdpOptions {
+  #options = { ...UDP_DEFAULTS };
+  unicastHopLimit() {
+    return this.#options.unicastHopLimit;
+  }
+  setUnicastHopLimit(v) {
+    if (v === 0) throw "invalid-argument";
+    this.#options.unicastHopLimit = v;
+  }
+  receiveBufferSize() {
+    return this.#options.receiveBufferSize;
+  }
+  setReceiveBufferSize(v) {
+    this.#options.receiveBufferSize = udpBufferSize(v, UDP_MIN_RECEIVE_BUFFER);
+  }
+  sendBufferSize() {
+    return this.#options.sendBufferSize;
+  }
+  setSendBufferSize(v) {
+    this.#options.sendBufferSize = udpBufferSize(v, UDP_MIN_SEND_BUFFER);
+  }
+}
+
+// udpBufferSize gives the value that a UDP buffer size reads after a set of
+// v (fact 7 of package W4.5a).
+function udpBufferSize(v, min) {
+  if (v === 0n) throw "invalid-argument";
+  return v < min ? min : v;
+}
+
+// The points of UDP that the facts of runwasi (package W4.5a) can change.
+// Each one has the expected value of section 8.3.3 and a test in
+// udp.test.mjs that names the fact.
+
+// UDP_CAST_CODE is the error code of a multicast or a broadcast address in
+// start-bind (wasmtime: validate_unicast).
+export const UDP_CAST_CODE = "invalid-argument";
+// UDP_BROADCAST_CODE is the error code of the broadcast address in stream
+// and send (fact 5): runwasi does not set SO_BROADCAST. A multicast address
+// is permitted there (UDP_MULTICAST_REMOTE); the tab node drops the
+// datagram, because it has no receivers.
+export const UDP_BROADCAST_CODE = "access-denied";
+export const UDP_MULTICAST_REMOTE = true;
+// UDP_IPV6_REMOTE_CODE is the error code of an IPv6 remote address in stream
+// and send (fact 5, rule 4): an IPv6 socket has no socket in the UDP table.
+// An IPv6 multicast address is permitted, as on runwasi. The pod worker
+// keeps such a remote address and drops such a datagram itself, without a
+// message: nothing can receive it.
+export const UDP_IPV6_REMOTE_CODE = "remote-unreachable";
+// UDP_SEND_PERMIT is the result of check-send in wasmtime (fact 6): a fixed
+// permit, not a count of bytes. After a send that would block, check-send
+// gives 0 until the pollable of the stream is ready.
+export const UDP_SEND_PERMIT = 16;
+
+// unpermitted gives the result of a send of more datagrams than the last
+// check-send permitted, or of a send without check-send: wasmtime traps
+// (udp.wit). jco makes a trap of a thrown Error.
+function unpermitted(n, permit) {
+  return new Error(`unpermitted: send of ${n} datagrams, check-send permitted ${permit ?? "nothing"}`);
+}
+
+const LOOPBACK4 = Object.freeze({ tag: "ipv4", val: Object.freeze([127, 0, 0, 1]) });
+const sameIP = (a, b) => a.tag === b.tag && a.val.every((g, i) => g === b.val[i]);
+const sameAddress = (a, b) => a.tag === b.tag && a.val.port === b.val.port && sameIP(ipOf(a), ipOf(b));
+
+// udpAddress examines an ip-socket-address of the component for a UDP socket
+// of family (fact 12, rule 4) and gives its ip-address. A remote address (of
+// stream and send) must also have an IP and a port that are not 0. These
+// answers have no message.
+function udpAddress(family, sa, remote) {
+  if (!sa || !FAMILIES.has(sa.tag) || sa.tag !== family) throw "invalid-argument";
+  const ip = ipOf(sa);
+  if (isMapped(ip)) throw "invalid-argument";
+  if (!remote) {
+    if (isMulticast(ip) || isBroadcast(ip)) throw UDP_CAST_CODE;
+    return ip;
+  }
+  if (isUnspecified(ip) || sa.val.port === 0) throw "invalid-argument";
+  if (isBroadcast(ip)) throw UDP_BROADCAST_CODE;
+  if (isMulticast(ip)) {
+    if (!UDP_MULTICAST_REMOTE) throw UDP_CAST_CODE;
+    return ip;
+  }
+  if (ip.tag === "ipv6") throw UDP_IPV6_REMOTE_CODE;
+  return ip;
+}
+
+// Udp is the state of one UDP socket and its streams (section 8.3.3): the
+// socket ID, the queue of received datagrams (UD5) and the credits of
+// datagram bytes (rule 6).
+class Udp {
+  family;
+  state = "unbound"; // unbound, bind-started or bound
+  id = null;
+  answer = null; // the bound message of start-bind
+  bindIP = null;
+  local = null;
+  podIP = null; // from bound (rule 3)
+  remote = null; // the ip-socket-address of stream: the socket is connected
+  queue = []; // {data, ip, port}
+  size = 0;
+  unacked = 0;
+  credit = 0; // datagram bytes that the pod worker can send
+  error = null; // a pending error of rule 7
+  goClosed = null; // closed from the Go side: {error}
+  dropped = false;
+  streams = 0; // the streams of stream that the component did not drop
+  signal = signal();
+  #table;
+  constructor(table, family) {
+    this.#table = table;
+    this.family = family;
+  }
+
+  // The messages of the Go side.
+  handler = {
+    bound: (m) => {
+      if (this.state === "bind-started" && this.answer === null) {
+        this.answer = m;
+        // Rule 6: the credit starts after bound.
+        if (!m.error) this.credit = WINDOW;
+      }
+      this.signal.wake();
+    },
+    datagram: (m) => {
+      const ip = parseIP(m.address);
+      const data = new Uint8Array(m.bytes);
+      // Rule 4: a datagram from another source crossed the connect.
+      if (!ip || (this.remote && !this.#fromRemote(ip, m.port))) this.#ack(data.byteLength, true);
+      else {
+        this.queue.push({ data, ip, port: m.port });
+        this.size += data.byteLength;
+      }
+      this.signal.wake();
+    },
+    credit: (m) => {
+      if (m.kind !== "datagram-bytes") return;
+      this.credit += m.n;
+      this.signal.wake();
+    },
+    // Rule 7: one pending error for the next send. A second error before
+    // that send does not add a second throw.
+    error: (m) => {
+      if (this.error === null) this.error = m.error;
+      this.signal.wake();
+    },
+    closed: (m) => {
+      this.goClosed = { error: m.error ?? null };
+      this.id = null;
+      this.signal.wake();
+    },
+  };
+
+  // shown gives the address that the component sees for a source ip and
+  // port (rule 3): the pod IP shows as 127.0.0.1 for a socket that binds to
+  // 127.0.0.0/8, and as the remote IP for a socket that connects to
+  // 127.0.0.0/8 (127.0.0.1 for the usual connect).
+  shown(ip, port) {
+    let shown = ip;
+    if (this.podIP && sameIP(ip, this.podIP)) {
+      const remoteIP = this.remote && ipOf(this.remote);
+      if (remoteIP && isLoopback(remoteIP)) shown = remoteIP;
+      else if (this.bindIP && isLoopback(this.bindIP)) shown = this.bindIP.tag === "ipv4" ? LOOPBACK4 : this.bindIP;
+    }
+    return socketAddress(shown, port);
+  }
+  #fromRemote(ip, port) {
+    return sameAddress(this.shown(ip, port), this.remote);
+  }
+
+  // newID gives the socket a new ID. An ID of an earlier bind that failed
+  // gets closed first (TCP rule 9).
+  newID() {
+    this.release();
+    this.goClosed = null;
+    this.id = this.#table.newID();
+    this.#table.add(this.id, this.handler);
+    return this.id;
+  }
+  // release sends closed for the ID if the Go side did not close it.
+  release() {
+    const id = this.id;
+    this.id = null;
+    if (id !== null && this.#table.remove(id)) this.#table.send("closed", { socket: id });
+  }
+  send(type, fields, transfer) {
+    this.#table.send(type, { socket: this.id, ...fields }, transfer);
+  }
+
+  // connect sends connect for the remote address ip and port (rule 4). The
+  // address 0.0.0.0 (:: for ipv6) with the port 0 removes the remote address.
+  connect(sa) {
+    // An IPv6 socket can only connect to a multicast address: the pod worker
+    // keeps it without a message (UDP_IPV6_REMOTE_CODE).
+    if (this.family === "ipv6") {
+      this.remote = sa && copyAddress(sa);
+      return;
+    }
+    if (sa === null) {
+      this.remote = null;
+      this.send("connect", { protocol: "udp", address: this.family === "ipv4" ? "0.0.0.0" : "::", port: 0 });
+      return;
+    }
+    this.remote = copyAddress(sa);
+    this.send("connect", { protocol: "udp", address: ipText(ipOf(sa)), port: sa.val.port });
+    // The datagrams of other sources in the queue: wasmtime discards them
+    // at receive. The pod worker discards them now and gives the credit back.
+    const keep = [];
+    let dropped = 0;
+    for (const d of this.queue) {
+      if (this.#fromRemote(d.ip, d.port)) keep.push(d);
+      else dropped += d.data.byteLength;
+    }
+    this.queue = keep;
+    this.size -= dropped;
+    if (dropped) this.#ack(dropped, true);
+  }
+
+  // check throws for a call of a stream after closed from the Go side or
+  // after the drop of the socket.
+  check() {
+    if (this.goClosed) throw this.goClosed.error ?? "connection-aborted";
+    if (this.dropped) throw "invalid-state";
+  }
+  // takeError throws the pending error of rule 7, one time.
+  takeError() {
+    if (this.error === null) return;
+    const code = this.error;
+    this.error = null;
+    throw code;
+  }
+
+  // #ack sends credit for n datagram bytes (rule 6). It collects the credit
+  // up to CREDIT_STEP, or until the queue is empty.
+  #ack(n, now = false) {
+    this.unacked += n;
+    if (!now && this.unacked < CREDIT_STEP && this.size > 0) return;
+    if (this.id === null) {
+      this.unacked = 0;
+      return;
+    }
+    while (this.unacked > 0) {
+      const k = Math.min(this.unacked, LIMITS.credits);
+      this.unacked -= k;
+      this.send("credit", { kind: "datagram-bytes", n: k });
+    }
+  }
+
+  // receive gives up to max datagrams from the queue (rules 3 and 4). As on
+  // runwasi, it never takes the pending error of rule 7.
+  receive(max) {
+    this.check();
+    if (max === 0n) return [];
+    const out = [];
+    let taken = 0;
+    while (BigInt(out.length) < max && this.queue.length) {
+      const d = this.queue.shift();
+      this.size -= d.data.byteLength;
+      taken += d.data.byteLength;
+      out.push({ data: d.data, remoteAddress: this.shown(d.ip, d.port) });
+    }
+    if (taken) this.#ack(taken);
+    return out;
+  }
+
+  // writable tells if a datagram of 65,507 bytes fits into the credit
+  // (rule 6).
+  writable() {
+    return this.credit >= LIMITS.datagram;
+  }
+
+  // sendOne sends one datagram of the component (rules 4 and 5), or throws
+  // its error code.
+  sendOne({ data, remoteAddress }) {
+    const n = data.byteLength;
+    // UD14: the pod worker gives the error code.
+    if (n > LIMITS.datagram) throw "datagram-too-large";
+    let sa;
+    if (remoteAddress === undefined || remoteAddress === null) sa = this.remote;
+    else if (!this.remote || sameAddress(remoteAddress, this.remote)) sa = remoteAddress;
+    if (!sa) throw "invalid-argument";
+    const ip = udpAddress(this.family, sa, true);
+    // Rule 7: a send that takes the pending error sends nothing.
+    this.takeError();
+    // IPv6 multicast: nothing can receive the datagram.
+    if (ip.tag === "ipv6") return true;
+    // Rule 6: without credit, the send would block.
+    if (n > this.credit) return false;
+    const bytes = new Uint8Array(data).buffer;
+    this.send("datagram", { address: ipText(ip), port: sa.val.port, bytes }, [bytes]);
+    this.credit -= n;
+    return true;
+  }
+}
+
+// createUdp gives the UdpSocket, IncomingDatagramStream and
+// OutgoingDatagramStream classes and the function createUdpSocket that use
+// the socket table (section 8.3.3).
+function createUdp({ table, idle }) {
+  const { pollableCreate } = table.io;
+  const make = Symbol("make");
+  const poll = (u, ready) => pollableCreate({ ready, wait: () => (ready() ? Promise.resolve() : u.signal.wait()) });
+
+  class UdpSocket extends UdpOptions {
+    #u;
+    constructor(family) {
+      super();
+      this.#u = new Udp(table, family);
+    }
+    #usable() {
+      if (this.#u.goClosed || this.#u.dropped) throw "invalid-state";
+    }
+
+    startBind(_network, localAddress) {
+      const u = this.#u;
+      this.#usable();
+      const ip = udpAddress(u.family, localAddress, false);
+      if (u.state === "bind-started") throw "concurrency-conflict";
+      if (u.state !== "unbound") throw "invalid-state";
+      u.newID();
+      u.bindIP = ip;
+      u.answer = null;
+      u.state = "bind-started";
+      u.send("bind", { protocol: "udp", family: u.family, address: ipText(ip), port: localAddress.val.port });
+    }
+    finishBind() {
+      const u = this.#u;
+      if (u.state !== "bind-started") throw "not-in-progress";
+      if (u.goClosed) {
+        u.state = "unbound";
+        throw u.goClosed.error ?? "connection-aborted";
+      }
+      if (u.answer === null) throw "would-block";
+      const m = u.answer;
+      u.answer = null;
+      if (m.error) {
+        // The ID stays open until the drop or the next bind (TCP rule 9).
+        u.state = "unbound";
+        u.bindIP = null;
+        throw m.error;
+      }
+      u.state = "bound";
+      u.podIP = parseIP(m.address ?? "");
+      u.local = socketAddress(u.bindIP, m.port ?? 0);
+    }
+
+    // stream (rule 4) does not wait for the Go side. As wasmtime, it traps
+    // when the streams of an earlier call are not dropped, and an address
+    // that is not correct removes the remote address before the error.
+    stream(remoteAddress) {
+      const u = this.#u;
+      if (u.streams > 0) throw new Error("UDP streams not dropped yet");
+      this.#usable();
+      if (u.state !== "bound") throw "invalid-state";
+      if (remoteAddress === undefined || remoteAddress === null) {
+        if (u.remote) u.connect(null);
+      } else {
+        try {
+          udpAddress(u.family, remoteAddress, true);
+        } catch (e) {
+          if (u.remote) u.connect(null);
+          throw e;
+        }
+        u.connect(remoteAddress);
+      }
+      u.streams = 2;
+      return [new IncomingDatagramStream(make, u), new OutgoingDatagramStream(make, u)];
+    }
+
+    // localAddress (rule 3): the IP of bind with the port of bound. As on
+    // runwasi, a connected IPv4 socket on 0.0.0.0 shows the IP of the route:
+    // 127.0.0.1 for a remote address in 127.0.0.0/8, else the pod IP of
+    // bound. The Go side sends no connected for UDP (rule 4).
+    localAddress() {
+      this.#usable();
+      const u = this.#u;
+      if (u.local === null) throw "invalid-state";
+      if (u.remote && u.family === "ipv4" && isUnspecified(u.bindIP) && u.podIP) {
+        const ip = isLoopback(ipOf(u.remote)) ? LOOPBACK4 : u.podIP;
+        return socketAddress(ip, u.local.val.port);
+      }
+      return copyAddress(u.local);
+    }
+    remoteAddress() {
+      this.#usable();
+      if (this.#u.remote === null) throw "invalid-state";
+      return copyAddress(this.#u.remote);
+    }
+    addressFamily() {
+      return this.#u.family;
+    }
+    subscribe() {
+      const u = this.#u;
+      return poll(u, () => u.goClosed !== null || u.dropped || u.state !== "bind-started" || u.answer !== null);
+    }
+    // The drop of the socket (TCP rule 9).
+    [Symbol.dispose]() {
+      const u = this.#u;
+      if (u.dropped) return;
+      u.dropped = true;
+      u.release();
+      u.queue = [];
+      u.size = 0;
+      u.signal.wake();
+    }
+  }
+
+  class IncomingDatagramStream {
+    #u;
+    #dropped = false;
+    constructor(token, u) {
+      if (token !== make) throw new TypeError("IncomingDatagramStream has no constructor");
+      this.#u = u;
+    }
+    receive(maxResults) {
+      return this.#u.receive(BigInt(maxResults));
+    }
+    subscribe() {
+      const u = this.#u;
+      return poll(u, () => u.queue.length > 0 || u.goClosed !== null || u.dropped);
+    }
+    [Symbol.dispose]() {
+      if (this.#dropped) return;
+      this.#dropped = true;
+      this.#u.streams--;
+    }
+  }
+
+  class OutgoingDatagramStream {
+    #u;
+    #dropped = false;
+    #permit = null; // the permit of the last check-send
+    #waiting = false; // the last send would block
+    constructor(token, u) {
+      if (token !== make) throw new TypeError("OutgoingDatagramStream has no constructor");
+      this.#u = u;
+    }
+    // checkSend gives the permit of wasmtime (fact 6): 16, or 0 after a send
+    // that would block until the credit permits a datagram of 65,507 bytes.
+    // A pending error of rule 7 does not change it.
+    checkSend() {
+      const u = this.#u;
+      u.check();
+      if (this.#waiting) {
+        if (!u.writable()) return 0n;
+        this.#waiting = false;
+      }
+      this.#permit ??= UDP_SEND_PERMIT;
+      return BigInt(this.#permit);
+    }
+    // send gives the number of datagrams that went. An error on the first
+    // datagram throws; an error on a later one ends the list (udp.wit).
+    send(datagrams) {
+      const u = this.#u;
+      u.check();
+      if (datagrams.length === 0) return 0n;
+      const permit = this.#permit;
+      this.#permit = null;
+      if (permit === null || datagrams.length > permit) throw unpermitted(datagrams.length, permit);
+      let count = 0;
+      for (const d of datagrams) {
+        let sent;
+        try {
+          sent = u.sendOne(d);
+        } catch (e) {
+          if (count > 0 && typeof e === "string") break;
+          throw e;
+        }
+        if (!sent) {
+          this.#waiting = true;
+          break;
+        }
+        count++;
+      }
+      return BigInt(count);
+    }
+    subscribe() {
+      const u = this.#u;
+      return poll(u, () => !this.#waiting || u.writable() || u.goClosed !== null || u.dropped);
+    }
+    [Symbol.dispose]() {
+      if (this.#dropped) return;
+      this.#dropped = true;
+      this.#u.streams--;
+    }
+  }
+
+  // CO17: finish-bind without an error, receive with datagrams and
+  // check-send with more than 0 give data.
+  for (const n of COUNTED.udp) {
+    UdpSocket.prototype[n] = idle.wrap(UdpSocket.prototype[n], n === "finishBind" ? () => true : () => false);
+  }
+  IncomingDatagramStream.prototype.receive = idle.wrap(IncomingDatagramStream.prototype.receive, (r) => r.length > 0);
+  OutgoingDatagramStream.prototype.checkSend = idle.wrap(OutgoingDatagramStream.prototype.checkSend, (n) => n > 0n);
+  OutgoingDatagramStream.prototype.send = idle.wrap(OutgoingDatagramStream.prototype.send);
+
+  const createUdpSocket = (family) => {
+    if (!FAMILIES.has(family)) throw "not-supported";
+    return new UdpSocket(family);
+  };
+  return { UdpSocket, IncomingDatagramStream, OutgoingDatagramStream, createUdpSocket };
+}
+
 // createSockets gives the object `sockets` for WASIShim: instanceNetwork,
 // network, ipNameLookup, tcp, tcpCreateSocket, udp and udpCreateSocket.
 // idle is the count of createIdle.
 //
 // With table (createSocketTable), TCP and name lookup use the messages of
-// section 8.3.2; io is the io.js of the shim (the table has it too).
+// section 8.3.2 and UDP the messages of section 8.3.3; io is the io.js of
+// the shim (the table has it too).
 // Without table, the result is the stub of the proxy world; pollableCreate
 // (or io.pollableCreate) is the function of the io.js of the shim, so that
 // subscribe gives a pollable of the shim.
@@ -1011,10 +1528,10 @@ export function createSockets({ idle = createIdle(), io = null, table = null, po
     }
   }
 
-  class UdpSocket {
+  class UdpSocket extends UdpOptions {
     #family;
-    #options = { ...UDP_DEFAULTS };
     constructor(family) {
+      super();
       this.#family = family;
     }
     startBind() {
@@ -1034,27 +1551,6 @@ export function createSockets({ idle = createIdle(), io = null, table = null, po
     }
     addressFamily() {
       return this.#family;
-    }
-    unicastHopLimit() {
-      return this.#options.unicastHopLimit;
-    }
-    setUnicastHopLimit(v) {
-      if (v === 0) throw "invalid-argument";
-      this.#options.unicastHopLimit = v;
-    }
-    receiveBufferSize() {
-      return this.#options.receiveBufferSize;
-    }
-    setReceiveBufferSize(v) {
-      if (v === 0n) throw "invalid-argument";
-      this.#options.receiveBufferSize = v;
-    }
-    sendBufferSize() {
-      return this.#options.sendBufferSize;
-    }
-    setSendBufferSize(v) {
-      if (v === 0n) throw "invalid-argument";
-      this.#options.sendBufferSize = v;
     }
     subscribe() {
       return ready();
@@ -1081,13 +1577,15 @@ export function createSockets({ idle = createIdle(), io = null, table = null, po
 
   if (table) {
     const t = createTcp({ table, idle });
+    const u = createUdp({ table, idle });
     return {
       instanceNetwork: { instanceNetwork: () => network },
       network: { Network },
       ipNameLookup: { ResolveAddressStream: t.ResolveAddressStream, resolveAddresses: t.resolveAddresses },
       tcp: { TcpSocket: t.TcpSocket },
       tcpCreateSocket: { createTcpSocket: t.createTcpSocket },
-      ...udp,
+      udp: { UdpSocket: u.UdpSocket, IncomingDatagramStream: u.IncomingDatagramStream, OutgoingDatagramStream: u.OutgoingDatagramStream },
+      udpCreateSocket: { createUdpSocket: u.createUdpSocket },
     };
   }
 

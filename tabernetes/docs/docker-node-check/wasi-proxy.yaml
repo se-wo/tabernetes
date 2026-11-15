@@ -116,10 +116,12 @@ spec:
 # redirect with a compressed body and Connection: close, and writes the
 # request that it receives to its log. The body is "compressed body\n",
 # compressed with gzip -n -9. web/test/e2e/wasi-proxy-cr.test.mjs has the
-# same server. stdin of nc stays open for 1 second after the response: nc
-# then reads and logs the request before it closes the connection. Without
-# the wait, an unread request can make the kernel send a reset
-# (HttpProtocolError in the client).
+# same server. nc runs the handler /tmp/h.sh for each connection (nc -e).
+# The handler reads the request to the empty line and only then answers: a
+# response that arrives before the client sent its request makes the HTTP
+# client of wasmtime fail with HttpProtocolError. The handler writes the
+# request to the log through the stdout of process 1, because nc gives the
+# connection to its stdin and stdout.
 apiVersion: v1
 kind: Pod
 metadata: {name: wasi-proxy-cr, labels: {wasi-check: proxy, app: wasi-proxy-cr}}
@@ -133,11 +135,21 @@ spec:
       command:
         - sh
         - -c
-        - >-
+        - |
+          cat >/tmp/h.sh <<'EOF'
+          #!/bin/sh
+          cr="$(printf '\r')"
+          while IFS= read -r l; do
+            echo "$l" >>/proc/1/fd/1
+            if [ "$l" = "$cr" ] || [ -z "$l" ]; then break; fi
+          done
+          printf 'HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Encoding: gzip\r\nContent-Length: 36\r\nConnection: close\r\n\r\n'
+          echo "$BODY" | base64 -d
+          EOF
+          chmod +x /tmp/h.sh
           while true; do
-          { printf 'HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Encoding: gzip\r\nContent-Length: 36\r\nConnection: close\r\n\r\n';
-          echo "$BODY" | base64 -d; sleep 1; } | nc -l -p 8000;
-          echo '--- end';
+            nc -l -p 8000 -e /tmp/h.sh
+            echo '--- end'
           done
 ---
 apiVersion: v1

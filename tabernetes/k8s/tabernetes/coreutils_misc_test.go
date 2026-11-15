@@ -33,7 +33,7 @@ func TestMisc(t *testing.T) {
 		{"umount /x", "umount: permission denied (are you root?)\n", 32},
 		{"which cat curl kubectl k", "/usr/bin/cat\n/usr/bin/curl\n/usr/bin/kubectl\n/usr/bin/k\n", 0},
 		{"which cat nosuchtool", "/usr/bin/cat\n", 1},
-		{"nc -u host 53", "nc: UDP is not supported\n", 1},
+		{"nc -u host 53", "nc: bad address 'host'\n", 1},
 	} {
 		got, code := sh(t, tc.script)
 		if got != tc.want || code != tc.code {

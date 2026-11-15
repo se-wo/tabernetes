@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"slices"
 	"sort"
@@ -59,6 +60,13 @@ type serviceProxy struct {
 	next      map[string]uint32       // round robin of each service port
 	sticky    map[string]*stickyEP    // sessionAffinity: service port and client IP
 
+	// The UDP Services (UD16, UD17). UDP has no listener: the flow table
+	// (tabnode_flows.go) translates each new datagram with these targets.
+	udpTargets   map[netip.AddrPort]*svcPort // by ClusterIP or node IP and port
+	clusterIPSet map[netip.Addr]bool         // all ClusterIPs, for UD12
+
+	flowTable
+
 	restOnce sync.Once
 	rest     *rest.Config
 	restErr  error
@@ -68,6 +76,7 @@ type serviceProxy struct {
 type svcPort struct {
 	namespace, name string
 	portName        string
+	proto           v1.Protocol   // TCP or UDP; empty is TCP
 	affinity        time.Duration // sessionAffinity ClientIP: how long a client sticks to an endpoint, 0 for none
 	local           bool          // internalTrafficPolicy Local, on cluster IPs only
 }
@@ -124,6 +133,13 @@ func (s *serviceProxy) run(ctx context.Context) {
 		UpdateFunc: func(any, any) { kick() },
 		DeleteFunc: func(any) { kick() },
 	})
+	// FL5: an endpoint that leaves the EndpointSlices of its Service ends
+	// its UDP flows.
+	sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { s.pruneFlows() },
+		UpdateFunc: func(any, any) { s.pruneFlows() },
+		DeleteFunc: func(any) { s.pruneFlows() },
+	})
 	factory.Start(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), svcInformer.Informer().HasSynced, sliceInformer.HasSynced) {
 		return
@@ -146,23 +162,41 @@ func (s *serviceProxy) run(ctx context.Context) {
 	}
 }
 
-// sync opens a listener for every cluster IP and node port and closes the
-// ones of services and ports that are gone.
+// sync opens a listener for every TCP cluster IP and node port and closes
+// the ones of services and ports that are gone. The UDP ports go to the
+// targets of the flow table; the flows of ports and endpoints that are gone
+// end (FL5).
 func (s *serviceProxy) sync() {
+	s.syncPorts()
+	s.pruneFlows()
+}
+
+func (s *serviceProxy) syncPorts() {
 	services, err := s.services.List(labels.Everything())
 	if err != nil {
 		return
 	}
 	want := map[string]svcPort{}
+	wantUDP := map[netip.AddrPort]*svcPort{}
+	cips := map[netip.Addr]bool{}
 	for _, svc := range services {
 		if svc.Spec.Type == v1.ServiceTypeExternalName {
 			continue
 		}
-		for _, p := range svc.Spec.Ports {
-			if p.Protocol != "" && p.Protocol != v1.ProtocolTCP {
-				continue // UDP and SCTP have no place in the in-process network
+		for _, ip := range clusterIPs(svc) {
+			if a, err := netip.ParseAddr(ip); err == nil {
+				cips[a.Unmap()] = true
 			}
-			t := svcPort{namespace: svc.Namespace, name: svc.Name, portName: p.Name}
+		}
+		for _, p := range svc.Spec.Ports {
+			proto := p.Protocol
+			if proto == "" {
+				proto = v1.ProtocolTCP
+			}
+			if proto != v1.ProtocolTCP && proto != v1.ProtocolUDP {
+				continue // SCTP has no place in the tab node
+			}
+			t := svcPort{namespace: svc.Namespace, name: svc.Name, portName: p.Name, proto: proto}
 			if svc.Spec.SessionAffinity == v1.ServiceAffinityClientIP {
 				t.affinity = 10800 * time.Second // the default of kube-proxy
 				if c := svc.Spec.SessionAffinityConfig; c != nil && c.ClientIP != nil && c.ClientIP.TimeoutSeconds != nil {
@@ -171,6 +205,10 @@ func (s *serviceProxy) sync() {
 			}
 			tc := t
 			tc.local = svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == v1.ServiceInternalTrafficPolicyLocal
+			if proto == v1.ProtocolUDP {
+				udpTargetsOf(svc, p, tc, t, wantUDP)
+				continue
+			}
 			for _, ip := range clusterIPs(svc) {
 				want[net.JoinHostPort(ip, strconv.Itoa(int(p.Port)))] = tc
 			}
@@ -187,6 +225,7 @@ func (s *serviceProxy) sync() {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.udpTargets, s.clusterIPSet = wantUDP, cips
 	now := time.Now()
 	for k, st := range s.sticky {
 		if now.Sub(st.last) > 24*time.Hour { // the longest timeout of the API; pick checks the real one
@@ -390,8 +429,9 @@ func (s *serviceProxy) dialEndpoint(ctx context.Context, e endpoint, src *net.TC
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(int(e.port))))
 }
 
-// endpoints lists the ready endpoints of a service port; if there are none,
-// the serving ones that are terminating, as kube-proxy does.
+// endpoints lists the ready endpoints of a service port, with the protocol
+// of the port (TCP or UDP); if there are none, the serving ones that are
+// terminating, as kube-proxy does.
 func (s *serviceProxy) endpoints(t svcPort) []endpoint {
 	if s.slices == nil {
 		return nil
@@ -406,8 +446,16 @@ func (s *serviceProxy) endpoints(t svcPort) []endpoint {
 		}
 		var port int32
 		found := false
+		want := t.proto
+		if want == "" {
+			want = v1.ProtocolTCP
+		}
 		for _, p := range es.Ports {
-			if p.Port != nil && deref(p.Name) == t.portName && (p.Protocol == nil || *p.Protocol == v1.ProtocolTCP) {
+			proto := v1.ProtocolTCP
+			if p.Protocol != nil {
+				proto = *p.Protocol
+			}
+			if p.Port != nil && deref(p.Name) == t.portName && proto == want {
 				port, found = *p.Port, true
 				break
 			}
@@ -623,7 +671,7 @@ func (s *serviceProxy) lookupFQDN(name string, depth int) (dnsAnswer, bool) {
 			}
 			return a, true
 		case svc.Spec.ClusterIP == v1.ClusterIPNone:
-			for _, e := range s.endpoints(svcPort{namespace: svc.Namespace, name: svc.Name, portName: anyPort(svc)}) {
+			for _, e := range s.endpoints(svcPort{namespace: svc.Namespace, name: svc.Name, portName: anyPort(svc), proto: anyProtocol(svc)}) {
 				a.ips = append(a.ips, e.ip)
 			}
 			a.ips = uniqStrings(a.ips)
@@ -653,6 +701,14 @@ func (s *serviceProxy) lookupFQDN(name string, depth int) (dnsAnswer, bool) {
 func anyPort(svc *v1.Service) string {
 	if len(svc.Spec.Ports) > 0 {
 		return svc.Spec.Ports[0].Name
+	}
+	return ""
+}
+
+// anyProtocol is the protocol of the first port of a service.
+func anyProtocol(svc *v1.Service) v1.Protocol {
+	if len(svc.Spec.Ports) > 0 {
+		return svc.Spec.Ports[0].Protocol
 	}
 	return ""
 }

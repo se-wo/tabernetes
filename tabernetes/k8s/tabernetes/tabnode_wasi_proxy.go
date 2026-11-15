@@ -38,8 +38,9 @@ var proxyDefaultAddr = netip.MustParseAddrPort("0.0.0.0:8080")
 // (decision 4, PX18).
 var proxyBodyLimit = wasiLimits["body"]
 
-// The ephemeral ports of Linux (fact 16): port 0 gives one of them (PX32).
-// TODO(W4.1): use the general allocator of ephemeral ports.
+// The ephemeral ports of Linux (fact 16): port 0 gives one of them. The
+// table of the ports in use (reservePort, claimFreePort in tabnode_dial.go)
+// gives them for TCP binds, listeners (PX32) and the UDP table (UD3, UD4).
 const (
 	proxyEphemeralFirst = 32768
 	proxyEphemeralLast  = 60999
@@ -120,14 +121,29 @@ func listenProxy(ctx context.Context, addr netip.AddrPort, podIP string) (net.Li
 		return ln, ""
 	}
 	// PX32: the in-process network gives port 0 a counter from 1 for all
-	// IPs (fact 11). So try the ephemeral ports of Linux in sequence.
-	for port := proxyEphemeralFirst; port <= proxyEphemeralLast; port++ {
+	// IPs (fact 11). So the table of the ports in use gives the first free
+	// ephemeral port of the pod IP. The reservation keeps the port until
+	// the listener has it. A port that the in-process network has without
+	// a row (a listener of the terminal) keeps its reservation until the
+	// end, so the next reservation gives the next port.
+	var releases []func()
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+	for ctx.Err() == nil {
+		port, release, err := reservePort("tcp", podIP, 0)
+		if err != nil {
+			break
+		}
+		releases = append(releases, release)
 		ln, err := listenPod(ctx, net.JoinHostPort(host, strconv.Itoa(port)))
 		if err == nil {
 			return ln, ""
 		}
-		if ctx.Err() != nil {
-			break
+		if why := proxyListenText(err); why != proxyAddrInUse {
+			return nil, why
 		}
 	}
 	return nil, proxyAddrInUse

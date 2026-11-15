@@ -213,13 +213,15 @@ func (k *tcpSock) sendError(code string) {
 }
 
 func init() {
-	wasiHandle("bind", timed(tcpBind))
+	// One socket ID has one protocol. The routers of tabnode_wasi_udp.go
+	// give UDP sockets to the UDP handlers (section 8.3.3, rule 1).
+	wasiHandle("bind", timed(byProtocol(tcpBind, wasiUDPBind)))
 	wasiHandle("listen", timed(tcpListen))
-	wasiHandle("connect", timed(tcpConnect))
+	wasiHandle("connect", timed(byProtocol(tcpConnect, wasiUDPConnect)))
 	wasiHandle("data", timed(tcpData))
-	wasiHandle("credit", timed(tcpCredit))
+	wasiHandle("credit", timed(byUDPID(tcpCredit, wasiUDPCredit)))
 	wasiHandle("shutdown", timed(tcpShutdown))
-	wasiHandle("closed", timed(tcpClosed))
+	wasiHandle("closed", timed(byUDPID(tcpClosed, wasiUDPClosed)))
 	wasiHandle("lookup", tcpLookup)
 	// MS6 and the stop of the container (rule 10, TC14): close at once.
 	wasiOnClose("socket", func(p *wasiPeer, id uint32) {
@@ -287,11 +289,6 @@ func tcpBind(p *wasiPeer, m wasiMsg) {
 	id := m.Uint("socket")
 	set := tcpOf(p)
 	bound := func(fields map[string]any) { fields["socket"] = id; p.send("bound", fields) }
-	if m.Str("protocol") != "tcp" {
-		// UDP is phase 4 (section 9).
-		bound(map[string]any{"error": "not-supported"})
-		return
-	}
 	if set.get(id) != nil {
 		bound(map[string]any{"error": "invalid-state"})
 		return
@@ -475,10 +472,6 @@ func tcpConnect(p *wasiPeer, m wasiMsg) {
 	id := m.Uint("socket")
 	set := tcpOf(p)
 	connected := func(code string) { p.send("connected", map[string]any{"socket": id, "error": code}) }
-	if m.Str("protocol") != "tcp" {
-		connected("not-supported")
-		return
-	}
 	k := set.get(id)
 	if k == nil {
 		k = newTCPSock(set, id)
@@ -722,7 +715,11 @@ func tcpData(p *wasiPeer, m wasiMsg) {
 	id := m.Uint("socket")
 	b := m.Bytes("bytes")
 	if len(b) == 0 {
-		// Rule 7: the pod worker uses "shutdown". Ignore it.
+		// Rule 7: the pod worker uses "shutdown". Ignore it. A UDP socket
+		// has no "data" (section 8.3.3, rule 1): MS6.
+		if udpOf(p).get(id) != nil {
+			p.Fail("socket", id, "data: a UDP socket")
+		}
 		return
 	}
 	k := connOf(p, id, "data")
@@ -746,7 +743,7 @@ func tcpData(p *wasiPeer, m wasiMsg) {
 func tcpCredit(p *wasiPeer, m wasiMsg) {
 	k := tcpOf(p).get(m.Uint("socket"))
 	if k == nil {
-		// A UDP socket of a later phase.
+		// bind or connect with an error code.
 		return
 	}
 	n := m.Int("n")
