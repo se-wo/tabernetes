@@ -498,6 +498,9 @@ func (n *tabNode) releaseIP(ip string) {
 	n.ipMu.Lock()
 	delete(n.usedIPs, ip)
 	n.ipMu.Unlock()
+	if n.net != nil {
+		n.net.removeFlowsOf(ip) // FL13
+	}
 }
 
 // isTabPodIP reports whether ip belongs to a pod of this node.

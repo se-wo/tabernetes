@@ -1613,9 +1613,14 @@ The other programs of the tab node use the UDP table:
 
 ### 8.8 UDP flows
 
-The flow table is in `tabnode_flows.go` (new), next to the service proxy of
-`tabnode_net.go`. It sets the hook `udpRoute` of section 8.7. A flow has
-these items:
+The flow table is in `tabnode_flows.go`, next to the service proxy of
+`tabnode_net.go`. It sets the hook `udpRoute` of section 8.7 in an `init`
+function. The UDP ports of the Services have no listener: `sync` keeps them
+by ClusterIP and port, next to the TCP listeners, so one ClusterIP can have
+the same port for TCP and UDP (UD17). `svcPort` has the protocol of its
+port, and `endpoints` uses the port of the EndpointSlice with the same
+protocol. Inside the tab node, the node IP and the node port of a UDP
+Service also get the translation. A flow has these items:
 
 - the tuple before the Service translation and the tuple after it
 - the endpoint that the service proxy selected
@@ -1624,31 +1629,52 @@ these items:
 - the time of the last datagram in each direction
 
 The service proxy, NetworkPolicy and the node agent use the same timeouts
-(FL2 to FL4). The tab node removes flows in these conditions:
+(FL2 to FL4). A flow with an answer becomes a "stream" at a datagram 2
+seconds or more after its first datagram, as in `nf_conntrack`. A datagram
+that finds a closed flow removes it. A timer removes the other closed flows.
+The tests use the clock `flowNow`. The tab node removes flows in these
+conditions:
 
-- An endpoint is not in the EndpointSlices (FL5). An event of the
-  EndpointSlices starts this examination.
+- An endpoint is not in the EndpointSlices, or the Service port is gone
+  (FL5). An event of the EndpointSlices or of the Services starts this
+  examination.
 - A policy changes (FL8, FL9).
 - A pod stops (FL13). `releaseIP` (`tabnode.go`) removes the flows of the
   pod IP, before a new pod can get it.
 
 A denied datagram makes no flow (FL12). The hook `udpPolicy` of the flow
 table gives the NetworkPolicy examination of the first datagram of a flow
-(`tabnode_netpol.go`).
+(`tabnode_netpol.go`). It gets the tuple after the Service translation. Only
+new flows go to `udpPolicy`: the next datagrams of an open flow, in the two
+directions, use the flow (FL7). `recheckFlows` examines all open flows again
+for the strict mode and removes the flows that the policy denies now (FL8,
+FL9). The work of the translation and of `udpPolicy` is in `udpRoute`, so
+the UDP table charges it to the sender (AC1).
 
 For a new datagram to a ClusterIP and a port of a UDP Service, the flow
 table does these steps:
 
-- A Service without endpoints: "refuse" (UD10, UD11, fact 17).
+- A Service without endpoints: "refuse" (UD10, UD11, fact 17). The table
+  makes no flow.
 - Until phase 5, the Service translation selects only endpoints on this tab
   node. A Service with only endpoints on other nodes: "drop", without an
-  error.
+  error, and no flow. Package W5.1 sends these datagrams at this step.
+- Else `pick` selects one of the endpoints on this tab node, with
+  `sessionAffinity` and `internalTrafficPolicy` as for TCP (FL10, FL11).
 - A ClusterIP without a UDP Service on this port: "drop" (UD12).
 
 Two flows can have the same tuple after the translation, for example when
-one client socket sends to two ClusterIPs with the same endpoint. Then the
-newest flow stays, and the older flow ends, as conntrack does for a clash.
-Package W4.5a examines this on Linux if it can.
+one client socket sends to two ClusterIPs with the same endpoint. The
+original destinations of the two flows are different, so the two flows stay
+apart (FL1), as on Linux (fact 11 of package W4.5a). The answers of the
+endpoint must then have different tuples. Thus the second flow gets another
+source port on the IP of the client, as the source NAT of Linux does at a
+clash. The endpoint sees this port. The flow changes the answers to this
+port back to the client socket, with the ClusterIP and the port of the
+flow as the source. Each answer thus comes from its own ClusterIP. The new
+port is the first port from 32768 that no flow to the endpoint and no
+socket of the UDP table uses. The newest flow wins only at a real clash:
+the same tuple after the translation and the same original destination.
 
 ### 8.9 UDP between nodes
 

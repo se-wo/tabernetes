@@ -29,7 +29,7 @@ var loopbackIPs struct {
 func nextLoopbackIP() string {
 	loopbackIPs.Lock()
 	defer loopbackIPs.Unlock()
-	loopbackIPs.n++
+	loopbackIPs.n = loopbackIPs.n%254 + 1 // 10.244.88.1 to .254, then again: go test -count
 	return "10.244.88." + strconv.Itoa(loopbackIPs.n)
 }
 
