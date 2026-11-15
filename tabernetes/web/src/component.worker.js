@@ -14,11 +14,16 @@ import * as io from "@bytecodealliance/preview2-shim/io";
 import { createPeer } from "./wasi_messages.js";
 import { runComponent, ERROR_EXIT } from "./component.js";
 import { createMeter, meterSuspending } from "./cpu.js";
+import { createGrants } from "./memory.js";
 
 const peer = createPeer({
   post: (msg, transfer) => postMessage(msg, transfer),
   onDrop: (why) => console.warn(`pod worker: dropped a message from the tab node: ${why}`),
 });
+
+// The broker of the page (memory.js, section 8.6): grants for the instances
+// 2 to 16 of a proxy container, and collect.
+const grants = createGrants(peer);
 
 let started = false;
 peer.on("start", (msg) => {
@@ -29,7 +34,7 @@ peer.on("start", (msg) => {
   const meter = createMeter({ send: (ms) => peer.send("cpu", { ms }) });
   meterSuspending(meter);
   const timer = setInterval(() => meter.tick(), 1000);
-  runComponent(msg, { peer, WASIShim, io: { ...io }, Memory, meter }).finally(() => {
+  runComponent(msg, { peer, WASIShim, io: { ...io }, Memory, meter, grants }).finally(() => {
     clearInterval(timer);
     meter.flush();
   }).then(

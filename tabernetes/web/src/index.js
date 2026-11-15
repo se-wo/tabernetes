@@ -6,6 +6,7 @@ import { installWasi } from "./wasi.js";
 import { nodeBuiltins } from "./nodes.js";
 import { installGPU } from "./gpu.js";
 import { vncBuiltins } from "./vnc.js";
+import { createBroker } from "./memory.js";
 
 const el = document.getElementById("tabernetes");
 // The panel of "proxy" goes next to the terminal: both share a row.
@@ -23,7 +24,13 @@ const wasi = {
   workerURL: url(el.dataset.wasiWorker, "wasi.worker.js"),
   mirror: el.dataset.oci === "" ? "" : url(el.dataset.oci, "oci/"),
 };
-installWasi(wasi);
+// The broker of the Wasm memories of the tab (memory.js, section 8.6). The Go
+// binary of the page counts 2 (section 14).
+const memory = createBroker();
+memory.client({ base: 2, name: "the Go binary of the page" });
+// For the DevTools console and the end-to-end tests.
+globalThis.tabernetesWasmMemories = memory;
+installWasi({ ...wasi, memory });
 // helm downloads chart repositories without CORS headers from copies in
 // charts/ (k8s/tabernetes/helm.go).
 globalThis.tabernetesCharts = url(el.dataset.charts, "charts/");
@@ -49,7 +56,7 @@ startTerminal(el, {
       status: status && nodes,
       connections,
     }),
-    ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, status: status && workerNodes, connections }),
+    ...nodeBuiltins({ workerURL: url(el.dataset.nodeWorker, "node.worker.js"), wasi, memory, status: status && workerNodes, connections }),
     ...proxyBuiltins({ status: status && ports, terminal: el }),
     // The VNC screen covers the terminal, the panel of "proxy" and the status line.
     ...vncBuiltins({ box: el.closest(".tabernetes-wrap") || el.parentElement }),

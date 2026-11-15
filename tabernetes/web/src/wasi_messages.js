@@ -61,6 +61,13 @@ export const MESSAGES = Object.freeze({
   "fetch": "w fetch:fetch+ method:method url:url headers:headers body:body",
   "fetched": "g fetch:fetch- status?:status headers?:headers body?:body error?:errcode",
   "fetch-cancel": "w fetch:fetch-",
+  // The Wasm memories of the tab (section 8.6). wasi.js gives these messages
+  // to the broker of the page (memory.js), not to the Go side.
+  "memory-ask": "w",
+  "memory-grant": "g",
+  "memory-free": "w",
+  "memory-full": "w",
+  "collect": "g",
 });
 
 // The limits of the fields (section 8.4). The Go side has the same numbers.

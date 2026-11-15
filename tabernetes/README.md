@@ -215,9 +215,11 @@ A container is not a process:
   with its `REQUEST_ID`, a maximum of 16 at the same time for each container,
   more requests wait in a queue (`k8s/tabernetes/tabnode_wasi_proxy.go`,
   `web/src/http.js`). All pods and nodes of one browser tab share
-  approximately 125 Wasm memories; when they are used, requests to proxy
-  components wait and other WebAssembly pods exit with a status
-  (`docs/wasi-sockets.md`, section 14). The client requests of a proxy
+  approximately 125 Wasm memories. A broker in the page (`web/src/memory.js`)
+  counts them and keeps some for new pods; when they are used, requests to
+  proxy components wait, other WebAssembly pods exit with a status and a new
+  node worker shows "no Wasm memory" (`docs/wasi-sockets.md`, sections 8.6
+  and 14). The client requests of a proxy
   component (`wasi:http/outgoing-handler`) reach Services, pods and ClusterIPs
   of the cluster with the same NetworkPolicy as other pods. They do not follow
   redirects, add no headers other than `Host` and do not decompress the body,

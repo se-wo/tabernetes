@@ -3,6 +3,7 @@
 // stdin, poll_oneoff and the imports are done here, so a module can sleep
 // and wait for stdin without spinning. wasi.js starts it.
 import { WASI, WASIProcExit, Fd, Inode, File, Directory, PreopenDirectory, ConsoleStdout, wasi } from "@bjorn3/browser_wasi_shim";
+import { isMemoryError, NO_MEMORY } from "./memory.js";
 
 // JavaScript Promise Integration lets an import wait for a promise: the
 // worker keeps receiving messages (stdin) while the module waits.
@@ -216,7 +217,15 @@ async function run({ module, args, env, preopens, stdin: withStdin, gpu }) {
       ns[imp.name] = () => { throw new Error(`${imp.module}.${imp.name} is not available in the browser`); };
     }
   }
-  const instance = await WebAssembly.instantiate(module, imports);
+  let instance;
+  try {
+    instance = await WebAssembly.instantiate(module, imports);
+  } catch (e) {
+    // A full tab (section 8.6): the module exits with 128, and its log names
+    // the full tab and the text of the browser.
+    if (isMemoryError(e)) throw new Error(`the module cannot instantiate: ${NO_MEMORY} (${e?.message ?? e})`);
+    throw e;
+  }
   if (!instance.exports.memory) throw new Error("the module exports no memory");
   if (typeof instance.exports._start !== "function") throw new Error("the module has no _start: it is a library (reactor), not a command");
   w.inst = instance;

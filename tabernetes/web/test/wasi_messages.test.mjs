@@ -33,7 +33,7 @@ test("the Go table has the same limits", () => {
 test("each message of section 8.3 and each CLI message is in the table", () => {
   for (const t of ["bind", "bound", "listen", "listening", "accepted", "connect", "connected", "data", "datagram", "credit", "error",
     "shutdown", "closed", "lookup", "addresses", "request", "response", "cancel", "fetch", "fetched", "fetch-cancel", "cpu",
-    "start", "ready", "exit", "stdout", "stderr", "stdin", "mem"]) {
+    "start", "ready", "exit", "stdout", "stderr", "stdin", "mem", "memory-ask", "memory-grant", "memory-free", "memory-full", "collect"]) {
     assert.ok(SPECS[t], t);
   }
 });
@@ -46,6 +46,9 @@ test("ip accepts IPv4 and IPv6 addresses only", () => {
 test("examine accepts correct messages", () => {
   const ok = [
     [{ type: "ready" }, "w"],
+    [{ type: "memory-ask" }, "w"],
+    [{ type: "memory-grant" }, "g"],
+    [{ type: "collect" }, "g"],
     [{ type: "stdout", bytes: new ArrayBuffer(3) }, "w"],
     [{ type: "exit", code: 1 }, "w"],
     [{ type: "exit", code: 137, error: "killed" }, "w"],
@@ -67,6 +70,7 @@ test("examine rejects the type, the direction, the fields and the sizes", () => 
     [{ type: "toString" }, "unknown message type"],
     [{ type: "start", component: { js: "", modules: {} }, args: [], env: [], cwd: "/" }, "does not go"],
     [{ type: "exit" }, "code is missing"],
+    [{ type: "memory-ask", n: 2 }, "unknown field"],
     [{ type: "exit", code: 1, more: 1 }, "unknown field"],
     [{ type: "exit", code: 256 }, "not a correct code"],
     [{ type: "stdout", bytes: new Uint8Array(1) }, "not a correct chunk"],

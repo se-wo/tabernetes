@@ -75,6 +75,14 @@ var wasiMessages = map[string]string{
 	"fetch":        "w fetch:fetch+ method:method url:url headers:headers body:body",
 	"fetched":      "g fetch:fetch- status?:status headers?:headers body?:body error?:errcode",
 	"fetch-cancel": "w fetch:fetch-",
+	// The Wasm memories of the tab (section 8.6). wasi.js gives these
+	// messages to the broker of the page (memory.js). They do not come to
+	// the Go side, and the Go side has no handler for them.
+	"memory-ask":   "w",
+	"memory-grant": "g",
+	"memory-free":  "w",
+	"memory-full":  "w",
+	"collect":      "g",
 }
 
 // wasiLimits are the limits of the fields (section 8.4), the same numbers as
