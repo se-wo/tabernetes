@@ -83,6 +83,9 @@ func TestLoopbackTable(t *testing.T) {
 		t.Fatal("refused without a row")
 	}
 	release := addLoopback("tcp", ip, 7000)
+	udpDst := tcpAddr(ip + ":7002")
+	releaseUDP := addLoopback("udp", ip, 7002)
+	defer releaseUDP()
 	for _, c := range []struct {
 		proto string
 		src   net.IP
@@ -95,7 +98,11 @@ func TestLoopbackTable(t *testing.T) {
 		{"tcp", net.ParseIP(ip), dst, false},
 		{"tcp", net.ParseIP("::ffff:" + ip), dst, false},
 		{"tcp", nil, tcpAddr(ip + ":7001"), false},
-		{"udp", nil, dst, false}, // W4.1
+		{"udp", nil, dst, false}, // a TCP row does not refuse UDP (UD1)
+		{"udp", nil, udpDst, true},
+		{"udp", net.ParseIP("10.244.88.250"), udpDst, true},
+		{"udp", net.ParseIP(ip), udpDst, false},
+		{"tcp", nil, udpDst, false},
 	} {
 		if got := loopbackRefused(c.proto, c.src, c.dst); got != c.want {
 			t.Errorf("%s %v -> %v: %v, want %v", c.proto, c.src, c.dst, got, c.want)

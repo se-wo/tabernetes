@@ -1556,10 +1556,18 @@ It gives the same functions to all code of the tab node:
 - `listenPodUDP(ctx, addr)` gives a socket (`udpConn`, a `net.PacketConn`)
   on the pod IP. The hosts `0.0.0.0`, `::`, `127.0.0.0/8`, `localhost` and
   `::1` give the pod IP. A loopback host also adds a row with the protocol
-  `udp` to the loopback table (UD20). Outside a pod and in a `hostNetwork`
-  pod, the IP is the node IP.
+  `udp` to the loopback table (UD20). Another IP gives `EADDRNOTAVAIL`.
+  Port 0 gives the first free UDP port of the IP from 32768 (UD3, UD4). An
+  address in use gives `errPortInUse`. Outside a pod and in a `hostNetwork`
+  pod, the IP is the node IP. The socket closes at the end of the context
+  of the container.
 - `dialClusterUDP(ctx, addr)` gives a connected socket with an ephemeral
-  port.
+  port. The host resolves as for `dialCluster`.
+- `Connect` sets the remote address of a socket. The zero address, and
+  `0.0.0.0` with the port 0, remove it. A connected socket receives only
+  from its remote address.
+- `WriteTo` and `Write` never wait. `ReadFrom` and `Read` wait for a
+  datagram, a deadline, `Close` or the end of the context.
 
 The UDP table does not use the in-process network of Go. Its ports are in
 the table of the ports in use of `tabnode_dial.go`, with the protocol `udp`.
@@ -1569,20 +1577,25 @@ The UDP table does these steps for each datagram:
 
 1. More than 65,507 bytes give `EMSGSIZE` (UD14).
 2. A destination in `127.0.0.0/8` becomes the IP of the socket.
-3. The hook `udpRoute` gives the Service translation and the flows of
-   section 8.8. Its result is "deliver", "drop" or "refuse". Without
-   section 8.8, it delivers with no change.
+3. The hook `udpRoute(ctx, src, dst)` gives the Service translation and
+   the flows of section 8.8. `src` is the address of the socket that sends.
+   `dst` is the destination after step 2. The hook gives the source for the
+   receiver, the destination socket and the result "deliver", "drop" or
+   "refuse". Without section 8.8, it delivers with no change.
 4. A destination without a socket: for a pod IP or the node IP of this tab
    node, "refuse" (UD8). For another IP, "drop" without an error. Section 8.9
    (phase 5) sends these datagrams on the `udp` channel.
 5. A socket with a row in the loopback table receives only from its own pod
-   IP. Else "refuse" (UD21).
-6. A full queue of the receiver drops the datagram (UD6).
+   IP. Else "refuse" (UD21). The examination uses the real sender, not the
+   source that `udpRoute` gives.
+6. A connected receiver drops a datagram from another source. A full queue
+   of the receiver drops the datagram (UD6).
 
 For "refuse", a connected sender gets one pending `ECONNREFUSED`, if the
 destination is its remote address (UD9, UD11). Exactly one call takes it:
-the next receive or the next send. A send that takes it does not send its
-datagram, as on Linux.
+the next send. A receive does not take it, as on runwasi (package W4.5a).
+The send that takes it does not send its datagram. Two refused datagrams
+before the next send give one error.
 
 The other programs of the tab node use the UDP table:
 
