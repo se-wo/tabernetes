@@ -30,7 +30,6 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 	v1 "k8s.io/api/core/v1"
-	discoveryv1 "k8s.io/api/discovery/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -645,21 +644,8 @@ func (s *serviceProxy) localUDPEndpoint(namespace, name, portName string) bool {
 	if theTabNode == nil {
 		return false
 	}
-	objs, _ := s.slices.ByIndex(sliceIndex, namespace+"/"+name)
-	for _, obj := range objs {
-		es := obj.(*discoveryv1.EndpointSlice)
-		if es.AddressType != discoveryv1.AddressTypeIPv4 || !slices.ContainsFunc(es.Ports, func(p discoveryv1.EndpointPort) bool {
-			return p.Port != nil && deref(p.Name) == portName && p.Protocol != nil && *p.Protocol == v1.ProtocolUDP
-		}) {
-			continue
-		}
-		for _, ep := range es.Endpoints {
-			if len(ep.Addresses) > 0 && (ep.Conditions.Ready == nil || *ep.Conditions.Ready) && theTabNode.isTabPodIP(ep.Addresses[0]) {
-				return true
-			}
-		}
-	}
-	return false
+	return slices.ContainsFunc(s.endpoints(svcPort{namespace: namespace, name: name, portName: portName, proto: v1.ProtocolUDP}),
+		func(e endpoint) bool { return theTabNode.isTabPodIP(e.ip) })
 }
 
 // --- the image ---
