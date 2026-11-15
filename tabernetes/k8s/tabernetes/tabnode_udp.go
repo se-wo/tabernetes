@@ -65,7 +65,7 @@ type udpVerdict int
 
 const (
 	udpDeliver udpVerdict = iota // deliver to the destination of udpRoute
-	udpDrop                      // drop; the sender gets no error (UD12, NetworkPolicy, phase 5)
+	udpDrop                      // drop; the sender gets no error (UD12, NetworkPolicy)
 	udpRefuse                    // drop; a connected sender gets connection-refused (UD10, UD11)
 )
 
@@ -228,9 +228,8 @@ func udpBind(ctx context.Context, ip netip.Addr, port int, loopback bool) (*udpC
 }
 
 // udpLocalIP reports whether a datagram to ip and a port without a socket is
-// refused (UD8): ip is a pod IP of this tab node or the node IP. For other
-// IPs, WriteTo drops the datagram without an error. W5.1 (section 8.9)
-// sends these datagrams on the udp channel at this point.
+// refused (UD8): ip is a pod IP of this tab node or the node IP. WriteTo
+// gives the datagrams to other IPs to udpToNode (section 8.9.1, rule 5).
 func udpLocalIP(ip netip.Addr) bool {
 	s := ip.String()
 	return s == tabNodeIP || (theTabNode != nil && theTabNode.isTabPodIP(s))
@@ -406,7 +405,13 @@ func (c *udpConn) send(b []byte, dst netip.AddrPort) {
 		c.refused(dst) // UD8
 		return
 	case r == nil:
-		return // another node: phase 5 (W5.1)
+		// Another node (section 8.9.1, rule 5): udpToNode sends a datagram
+		// to a pod CIDR or the node IP of another node and drops the
+		// others. A nil hook drops. No refusal comes back (rule 7).
+		if h := udpToNode; h != nil {
+			h(netip.AddrPortFrom(from.Addr().Unmap(), from.Port()), to, b)
+		}
+		return
 	case loopbackRefused("udp", src.Addr().AsSlice(), net.TCPAddrFromAddrPort(to)):
 		c.refused(dst) // UD21: the real sender, not from of udpRoute
 		return
@@ -552,4 +557,38 @@ func (c *udpConn) charge(d time.Duration) {
 	go func() {
 		acctFrom(c.ctx).ChargeCPU(time.Duration(c.cpu.Swap(0)))
 	}()
+}
+
+func init() {
+	udpFromNode = udpNodeReceive
+}
+
+// udpNodeReceive is udpFromNode: steps 3 to 6 of section 8.7 for a datagram
+// from src on another node to dst on this tab node. udpRoute examines the
+// ingress of a new flow (ND9) and gives the answers of a flow their
+// original source (UD15). A drop, a refusal of udpRoute, a destination
+// without a socket (also on another node) and a refusal of the loopback
+// table (UD21) lose the datagram without an answer (section 8.9.1, rule 7).
+// The datagram never goes back to udpToNode. The time goes to the
+// container of the receiving socket (AC1).
+func udpNodeReceive(src, dst netip.AddrPort, b []byte) {
+	start := time.Now()
+	if len(b) > udpMaxDatagram {
+		return
+	}
+	src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
+	dst = netip.AddrPortFrom(dst.Addr().Unmap(), dst.Port())
+	from, to, v := udpRoute(context.Background(), src, dst)
+	if v != udpDeliver {
+		return
+	}
+	to = netip.AddrPortFrom(to.Addr().Unmap(), to.Port())
+	udpMu.Lock()
+	r := udpSockets[to]
+	udpMu.Unlock()
+	if r == nil || loopbackRefused("udp", src.Addr().AsSlice(), net.TCPAddrFromAddrPort(to)) {
+		return
+	}
+	r.deliver(from, b)
+	r.charge(time.Since(start))
 }

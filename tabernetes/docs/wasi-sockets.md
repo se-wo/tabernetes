@@ -1645,8 +1645,11 @@ The UDP table does these steps for each datagram:
    receiver, the destination socket and the result "deliver", "drop" or
    "refuse". Without section 8.8, it delivers with no change.
 4. A destination without a socket: for a pod IP or the node IP of this tab
-   node, "refuse" (UD8). For another IP, "drop" without an error. Section 8.9
-   (phase 5) sends these datagrams on the `udp` channel.
+   node, "refuse" (UD8). For another IP, the UDP table gives the datagram to
+   the hook `udpToNode` with the source and the destination of `udpRoute`.
+   The hook sends a datagram for a pod CIDR or a node IP of another node on
+   the `udp` channel and drops the others (section 8.9.1, rule 5). The
+   sender gets no error (rule 7).
 5. A socket with a row in the loopback table receives only from its own pod
    IP. Else "refuse" (UD21). The examination uses the real sender, not the
    source that `udpRoute` gives.
@@ -1740,11 +1743,15 @@ table does these steps:
 
 - A Service without endpoints: "refuse" (UD10, UD11, fact 17). The table
   makes no flow.
-- Until phase 5, the Service translation selects only endpoints on this tab
-  node. A Service with only endpoints on other nodes: "drop", without an
-  error, and no flow. Package W5.1b sends these datagrams at this step.
-- Else `pick` selects one of the endpoints on this tab node, with
+- Else `pick` selects one of all ready endpoints, also on other nodes, with
   `sessionAffinity` and `internalTrafficPolicy` as for TCP (FL10, FL11).
+  With `internalTrafficPolicy: Local`, it selects only endpoints on this
+  tab node. The flow keeps an endpoint on another node, and step 4 of
+  section 8.7 gives the datagram to `udpToNode`. The answers through
+  `udpFromNode` get the ClusterIP and port as their source (UD15). An
+  endpoint on the node IP of a tab node or a node worker (a `hostNetwork`
+  pod) receives the datagram. An endpoint on the node IP of a Docker node
+  does not (section 11).
 - A ClusterIP without a UDP Service on this port: "drop" (UD12).
 
 Two flows can have the same tuple after the translation, for example when
@@ -2373,7 +2380,7 @@ These differences stay after this design. `README.md` must show them.
 | A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod | The answers come from the pod IP | The answers come from `127.0.0.1` |
 | A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | The `send` gives `remote-unreachable`, and nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
 | A `send` of a connected UDP socket at once after a datagram that no socket can receive | The `send` works: the `error` message of the Go side comes later, and a later `send` gets `connection-refused` (rule 7 of section 8.3.3) | The `send` gets `connection-refused`: the kernel has the ICMP error already |
-| UDP to pods on other nodes, and to Services with only such endpoints, until phase 5 | The tab node drops the datagram | It arrives |
+| UDP from a tab pod to a Service endpoint on the node IP of a Docker node (a `hostNetwork` pod) | The datagram is lost: the node agent drops destinations outside its pod CIDR | It arrives |
 | A socket of a `hostNetwork` pod on `127.0.0.1` | It listens on the node IP without a row in the loopback table. Other pods can connect. | Only the host of the node can connect |
 | The addresses of a connection that a socket on `0.0.0.0` accepts from a client of the same pod that used `127.0.0.1` | The pod IP | `127.0.0.1` |
 | ICMP | Only on one tab node, each echo request examined | Between all nodes, only the first echo request examined |
