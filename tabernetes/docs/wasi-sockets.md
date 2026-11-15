@@ -1748,6 +1748,35 @@ drops a datagram when the queue is full. Each tab address that has flows
 has one socket on the Docker node. The agent closes this socket after the
 last flow of the address closed.
 
+The kernel part of the agent is in `node/agent/udplink_net.go`. The route
+of the pod network sends a datagram from a Docker pod to a tab address
+into the veth pair of the pod channel (`tabpods0`, `tabpods1`).
+`podLinkRules` has the same two rules for UDP as for TCP, before the drop
+rule of `tabpods1`:
+
+- The `tproxy` rule sends the datagram to the TPROXY socket of the agent
+  on `0.0.0.0:15001` (ND13). This socket has `IP_TRANSPARENT` and
+  `IP_RECVORIGDSTADDR`. The agent reads the original destination from the
+  control message `IP_ORIGDSTADDR` (ND14).
+- The rule `socket transparent 1` needs `nft_socket` in the kernel. It
+  sends a datagram to a tab address that has a socket to this socket.
+  `tproxy` finds only connected UDP sockets, and the socket of a tab
+  address is not connected. Thus without `nft_socket`, all datagrams
+  arrive at the TPROXY socket.
+
+The socket of a tab address has `IP_TRANSPARENT` and the address and port
+of the tab side (ND16). A thread with the file system uid 65534 makes it
+(ND17). It is not connected: two Docker pods can share it. The answers of
+the tab side leave from this socket, so the Docker pod sees the tab
+address as the source (ND15). Both sockets give each datagram of a pod to
+the same flow table, with the tab address as the destination (ND18). The
+node IP of a tab node in a Web Worker is not in `10.244.0.0/16`. Only the
+rule `socket transparent 1` brings the answers to this address back to the
+agent. Without `nft_socket`, the agent writes this in the log. An error of
+the kernel on a socket, for example from ICMP, sends nothing to the page
+(channel rule 7). The agent writes the first error of each kind in the
+log. The agent uses IPv4 only.
+
 #### 8.9.1 The udp channel
 
 These rules are the contract between the page and a node worker
