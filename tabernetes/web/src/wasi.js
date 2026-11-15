@@ -9,13 +9,18 @@
 // The pod worker of a component (component.worker.js) starts from a data:
 // URL, so it has an opaque origin (decision 13). This side moves its messages
 // (wasi_messages.js) to the Go side and back, and does not interpret them:
-// the Go side examines them (tabnode_wasi_msg.go).
+// the Go side examines them (tabnode_wasi_msg.go). Only the messages of the
+// broker (memory-ask, memory-free, memory-full) go to the broker of the page
+// (memory.js) and not to the Go side.
 import { ASYNC_IMPORTS, ASYNC_EXPORTS, JCO_VERSION } from "./async_lists.js";
 import { isLabel } from "./transpile.js";
+import { createBroker, isMemoryError, TO_BROKER } from "./memory.js";
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 
-export function installWasi({ workerURL, mirror, transpileURL, componentWorkerURL } = {}) {
+// memory is the broker of the page (createBroker of memory.js), or in a node
+// worker its remoteBroker.
+export function installWasi({ workerURL, mirror, transpileURL, componentWorkerURL, memory } = {}) {
   workerURL = new URL(workerURL || "wasi.worker.js", workerURL ? location.href : import.meta.url).href;
   mirror = mirror === "" ? "" : new URL(mirror || "oci/", mirror ? location.href : import.meta.url).href;
   // The transpile worker is in transpile/ next to wasi.worker.js, so that
@@ -23,21 +28,22 @@ export function installWasi({ workerURL, mirror, transpileURL, componentWorkerUR
   transpileURL = new URL(transpileURL || "transpile/transpile.worker.js", transpileURL ? location.href : workerURL).href;
   // The pod worker of components is next to wasi.worker.js.
   componentWorkerURL = new URL(componentWorkerURL || "component.worker.js", componentWorkerURL ? location.href : workerURL).href;
-  globalThis.tabernetesWasi = createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL });
+  globalThis.tabernetesWasi = createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL, memory });
 }
 
 // createRuntime gives the object of globalThis.tabernetesWasi. The tests
-// give it their own Worker and fetch.
-export function createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL, Worker: W = globalThis.Worker, fetch: f = globalThis.fetch }) {
+// give it their own Worker and fetch. Without a broker (memory), the runtime
+// has a broker of its own.
+export function createRuntime({ workerURL, mirror, transpileURL, componentWorkerURL, memory = createBroker(), Worker: W = globalThis.Worker, fetch: f = globalThis.fetch }) {
   // Compiled modules (and the bytes of components) by layer digests and
   // path: restarts and other pods of the same image start without a
   // download.
   const modules = new Map();
   // Transpile results by the key of decision 2.
   const components = new Map();
-  const transpiler = newTranspiler(transpileURL, W);
+  const transpiler = newTranspiler(transpileURL, W, memory);
   const fetchLayer = (l, headers) => fetchLayerWith(f, l, headers);
-  const podWorkers = newPodWorkers(componentWorkerURL, W, f);
+  const podWorkers = newPodWorkers(componentWorkerURL, W, f, memory);
   return {
     mirror,
     // load({layers: [{url, digest, kind}], headers, path, components})
@@ -93,7 +99,7 @@ export function createRuntime({ workerURL, mirror, transpileURL, componentWorker
     //   close()                stops the pod worker without a message
     //
     // If the pod worker fails, fn gets {type: "exit", code: 128, error}.
-    start: (opts) => (opts.component ? podWorkers.start(opts) : start(workerURL, opts)),
+    start: (opts) => (opts.component ? podWorkers.start(opts) : start(workerURL, opts, W, memory)),
     // stats gives the count of transpiler runs, for tests (CO8).
     stats: () => ({ transpiles: transpiler.runs, transpileWorker: transpiler.started }),
   };
@@ -128,8 +134,9 @@ export function createRuntime({ workerURL, mirror, transpileURL, componentWorker
 // starts with the first component; a Go thread without components does not
 // load jco (section 8.2). If the worker fails, the next run starts a new
 // one.
-function newTranspiler(url, W) {
-  let worker = null, nextID = 0;
+// The worker counts 1 Wasm memory at the broker (section 14).
+function newTranspiler(url, W, memory) {
+  let worker = null, nextID = 0, counted = null;
   const pending = new Map();
   const t = {
     runs: 0,
@@ -138,6 +145,7 @@ function newTranspiler(url, W) {
       if (!worker) {
         worker = new W(url, { type: "module", name: "transpile" });
         t.started = true;
+        counted = memory.client({ base: 1, name: "transpile" });
         worker.onmessage = ({ data }) => {
           const p = pending.get(data.id);
           if (!p) return;
@@ -147,6 +155,8 @@ function newTranspiler(url, W) {
         const fail = (msg) => {
           worker?.terminate?.();
           worker = null;
+          counted?.end();
+          counted = null;
           for (const p of pending.values()) p.reject(new Error(msg));
           pending.clear();
         };
@@ -173,7 +183,12 @@ function newTranspiler(url, W) {
 // start in this browser, the next pod workers start from a Blob URL on the
 // origin of the page. The JavaScript of a component never goes into these
 // URLs: it goes to the pod worker in a message (CO14).
-function newPodWorkers(url, W, f) {
+//
+// Each pod worker counts 1 Wasm memory at the broker. The transport gives
+// the messages of the broker (TO_BROKER) to the broker and sends its grants
+// and collect to the pod worker. The end of the pod worker frees its
+// memories and grants.
+function newPodWorkers(url, W, f, memory) {
   let text = null;
   let blobURL = null;
   const p = {
@@ -187,9 +202,16 @@ function newPodWorkers(url, W, f) {
       let fn = null, worker = null, ready = false, ended = false;
       const early = [], queue = [];
       const deliver = (msg) => (fn ? fn(msg) : early.push(msg));
+      const toWorker = (msg) => {
+        if (ended) return;
+        if (ready) worker.postMessage(msg);
+        else queue.push([msg, []]);
+      };
+      const counted = memory.client({ base: 1, send: toWorker, name: name ? `pod worker ${name}` : "pod worker" });
       const end = (msg) => {
         if (ended) return;
         ended = true;
+        counted.end();
         worker?.terminate();
         queue.length = 0;
         if (msg) deliver(msg);
@@ -214,6 +236,8 @@ function newPodWorkers(url, W, f) {
             for (const [m, t] of queue.splice(0)) w.postMessage(m, t);
             return;
           }
+          // The messages of the broker do not go to the Go side.
+          if (TO_BROKER.includes(data?.type)) return counted.message(data);
           deliver(data);
         };
         w.onerror = (e) => {
@@ -334,8 +358,13 @@ function untar(tar, path) {
 // the first events: those wait for them.
 // gpu is the WebGPU device the kubelet prepared for the container
 // (tabnode_gpu.go), or null.
-function start(workerURL, { module, args, env, preopens, stdin, name, gpu }) {
-  const worker = new Worker(workerURL, { name: name ? `wasm ${name}` : "wasm" });
+//
+// A module counts 2 Wasm memories at the broker: its memory and the shared
+// memory of its sleeps (section 14).
+function start(workerURL, { module, args, env, preopens, stdin, name, gpu }, W = globalThis.Worker, memory = createBroker()) {
+  const worker = new W(workerURL, { name: name ? `wasm ${name}` : "wasm" });
+  // The module worker has no messages of the broker: collect goes nowhere.
+  const counted = memory.client({ base: 2, send: () => {}, name: name ? `module ${name}` : "module" });
   const handlers = {}, queued = { stdout: [], stderr: [], exit: [], mem: [] };
   let exited = false;
   const emit = (type, ...a) => (handlers[type] ? handlers[type](...a) : queued[type].push(a));
@@ -343,6 +372,8 @@ function start(workerURL, { module, args, env, preopens, stdin, name, gpu }) {
     if (exited) return;
     exited = true;
     worker.terminate();
+    if (code === 128 && isMemoryError(msg)) counted.message({ type: "memory-full" });
+    counted.end();
     emit("exit", code, msg);
   };
   const on = (type) => (fn) => { handlers[type] = fn; for (const a of queued[type].splice(0)) fn(...a); };

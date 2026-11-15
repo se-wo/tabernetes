@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -884,11 +885,18 @@ func ncUDP(ctx context.Context, hc interp.HandlerContext, o map[string]string, r
 	return ncUDPCopy(ctx, hc, c, wait)
 }
 
-// ncUDPCopy sends each read of stdin as one datagram and writes each
-// datagram that arrives to stdout. At the end of stdin, it waits wait for
-// more datagrams (each datagram starts the wait again) and then ends; with
-// wait 0 it reads until ctx ends. A refused datagram ends it with
-// ncUDPRefusedText and ncUDPRefusedCode.
+// ncUDPGather is how long ncUDPCopy collects the writes to stdin before it
+// sends them as one datagram. The shell writes "echo udp" in two writes
+// ("udp" and "\n"); a Linux pipe gives busybox nc both in one read.
+const ncUDPGather = 5 * time.Millisecond
+
+// ncUDPCopy sends the bytes of stdin as datagrams and writes each datagram
+// that arrives to stdout. The bytes that are written to stdin at one time
+// (within ncUDPGather) are one datagram of at most ncUDPBuf bytes, as one
+// read of a pipe in busybox. At the end of stdin, it waits wait for more
+// datagrams (each datagram starts the wait again) and then ends; with wait 0
+// it reads until ctx ends. A refused datagram ends it with ncUDPRefusedText
+// and ncUDPRefusedCode.
 func ncUDPCopy(ctx context.Context, hc interp.HandlerContext, c *udpConn, wait time.Duration) error {
 	var eof, refused atomic.Bool
 	if hc.Stdin == nil {
@@ -897,26 +905,56 @@ func ncUDPCopy(ctx context.Context, hc interp.HandlerContext, c *udpConn, wait t
 			c.SetReadDeadline(time.Now().Add(wait))
 		}
 	} else {
+		var mu sync.Mutex
+		var pending []byte
+		ended := false
+		more := make(chan struct{}, 1)
 		// A read of stdin that never returns stays behind, as in pipeConn.
 		go func() {
 			buf := make([]byte, ncUDPBuf)
 			for {
 				n, err := hc.Stdin.Read(buf)
-				if n > 0 {
-					if _, werr := c.Write(buf[:n]); werr != nil {
-						if errors.Is(werr, syscall.ECONNREFUSED) {
-							refused.Store(true)
-						}
-						c.Close()
-						return
-					}
+				mu.Lock()
+				pending = append(pending, buf[:n]...)
+				ended = err != nil
+				mu.Unlock()
+				select {
+				case more <- struct{}{}:
+				default:
 				}
 				if err != nil {
-					eof.Store(true)
-					if wait > 0 {
-						c.SetReadDeadline(time.Now().Add(wait))
-					}
 					return
+				}
+			}
+		}()
+		go func() {
+			for range more {
+				time.Sleep(ncUDPGather)
+				for {
+					mu.Lock()
+					d := pending[:min(len(pending), ncUDPBuf)]
+					pending = pending[len(d):]
+					done := ended && len(pending) == 0
+					mu.Unlock()
+					if len(d) > 0 {
+						if _, werr := c.Write(d); werr != nil {
+							if errors.Is(werr, syscall.ECONNREFUSED) {
+								refused.Store(true)
+							}
+							c.Close()
+							return
+						}
+					}
+					if done {
+						eof.Store(true)
+						if wait > 0 {
+							c.SetReadDeadline(time.Now().Add(wait))
+						}
+						return
+					}
+					if len(d) < ncUDPBuf {
+						break
+					}
 				}
 			}
 		}()

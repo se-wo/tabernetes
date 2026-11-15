@@ -14,6 +14,7 @@ import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { transpile } from "../src/transpile.js";
 import { runComponent, createScope, clocksFor, isMemoryError, cannotInstantiate, MAX_INSTANCES, ERROR_EXIT } from "../src/component.js";
 import { createPeer } from "../src/wasi_messages.js";
+import { createBroker, createGrants, TO_BROKER } from "../src/memory.js";
 import { proxyComponent } from "./proxy_fixtures.mjs";
 // The io.js of the browser shim, which the bundle of the pod worker uses.
 import * as io from "../node_modules/@bytecodealliance/preview2-shim/dist/browser/io.js";
@@ -43,11 +44,25 @@ async function compiled(mode, opts = {}) {
 
 // serve starts the proxy path with a fake Go side. It records the messages
 // of the pod worker and the configuration of each WASIShim.
-function serve(component, { env = ["PATH=/bin", "HOSTNAME=p"], shim = WASIShim, ...extra } = {}) {
+// broker (memory.js) connects the pod worker to a broker of the test, as
+// wasi.js does: the instances 2 to 16 then ask for grants. waitMs is the
+// limit of the wait for a grant.
+function serve(component, { env = ["PATH=/bin", "HOSTNAME=p"], shim = WASIShim, broker = null, waitMs = 2000, ...extra } = {}) {
   const sent = [];
   const drops = [];
   const configs = [];
-  const peer = createPeer({ post: (m) => sent.push(m), onDrop: (why) => drops.push(why) });
+  let client = null;
+  const peer = createPeer({
+    post: (m) => {
+      sent.push(m);
+      if (client && TO_BROKER.includes(m.type)) client.message(m);
+    },
+    onDrop: (why) => drops.push(why),
+  });
+  if (broker) {
+    client = broker.client({ base: 1, send: (m) => queueMicrotask(() => peer.dispatch(m)) });
+    extra.grants = createGrants(peer, { waitMs });
+  }
   class Recording extends shim {
     constructor(config) {
       super(config);
@@ -405,6 +420,106 @@ test("PX25, CO7: the memory of each instance goes after its response", async () 
     await go.until(() => go.mem().at(-1) === 0, "release");
   }
   assert.deepEqual(go.mem(), [3 * 65536, 0, 3 * 65536, 0, 3 * 65536, 0, 3 * 65536, 0]);
+});
+
+test("W2.4: the instances 2 to 16 ask the broker for a grant; the link check and the first instance do not wait", async () => {
+  const broker = createBroker({ limit: 100, reserve: 0 });
+  const go = serve(await compiled("wait", { ms: 50 }), { broker });
+  await go.until(() => go.mem().length > 0, "the link check");
+  const count = (type) => go.sent.filter((m) => m.type === type).length;
+  // After the link check, one ask without a wait: the grant counts the
+  // memory of the link check or of the first instance (section 14).
+  await go.until(() => count("memory-ask") === 1 && broker.stats().used === 2, "the grant of the link check");
+  // One request alone: no ask.
+  const a = go.request();
+  await go.until(() => go.response(a), "response a");
+  assert.equal(count("memory-ask"), 1);
+  // 4 at the same time: 3 asks, and 3 grants back at the end.
+  const ids = [go.request(), go.request(), go.request(), go.request()];
+  await go.until(() => ids.every((id) => go.response(id)), "4 responses");
+  assert.equal(count("memory-ask"), 4);
+  assert.equal(count("memory-free"), 3);
+  assert.equal(broker.stats().used, 2);
+  assert.ok(go.responses().every((m) => m.status === 201));
+  assert.doesNotMatch(stderr(go), /PX34/);
+});
+
+test("W2.4: with free memories, PX8 to PX10 do not wait for the time limit of a grant", async () => {
+  const broker = createBroker();
+  const go = serve(await compiled("wait", { ms: 150 }), { broker, waitMs: 5000 });
+  await go.until(() => go.mem().length > 0 && broker.stats().used === 2, "the link check");
+  const start = Date.now();
+  // Two rounds: when an instance ends, the next request uses its memory.
+  const ids = Array.from({ length: 40 }, () => go.request());
+  await go.until(() => ids.every((id) => go.response(id)), "40 responses");
+  const ms = Date.now() - start;
+  assert.ok(ms < 2000, `40 requests took ${ms} ms`);
+  assert.doesNotMatch(stderr(go), /PX34/);
+  assert.equal(broker.stats().used, 2);
+});
+
+test("W2.4: a grant that does not come in time does not stop the instance; the request writes the line of PX34", async () => {
+  // The tab is full by the count of the broker after the grant of the link
+  // check: no more grants.
+  const broker = createBroker({ limit: 10, reserve: 8 });
+  const go = serve(await compiled("wait", { ms: 20 }), { broker, waitMs: 60 });
+  await go.until(() => go.mem().length > 0, "the link check");
+  const start = Date.now();
+  const ids = [go.request(), go.request(), go.request()];
+  await go.until(() => ids.every((id) => go.response(id)), "3 responses");
+  assert.ok(Date.now() - start >= 60, "the instances 2 and 3 waited for a grant");
+  assert.ok(go.responses().every((m) => m.status === 201));
+  assert.match(stderr(go), /^tabernetes: the browser tab has no Wasm memory left for a new instance; \d+ requests? of this container waits? \(PX34\)$/m);
+  assert.match(stderr(go), /^tabernetes: a new instance got its Wasm memory after \d+\.\d s$/m);
+});
+
+test("W2.4: a cancel during the wait for a grant ends the request, and a late grant goes back", async () => {
+  const broker = createBroker({ limit: 10, reserve: 8 });
+  const go = serve(await compiled("wait", { ms: 50 }), { broker, waitMs: 1000 });
+  await go.until(() => go.mem().length > 0, "the link check");
+  const a = go.request();
+  const b = go.request();
+  await go.until(() => go.sent.filter((m) => m.type === "memory-ask").length === 2, "the ask of b");
+  go.peer.dispatch({ type: "cancel", request: b });
+  assert.equal(go.response(b).error, "cancelled");
+  await go.until(() => go.response(a), "response a");
+  // The ask of b still waits at the broker. When it gets its grant, the pod
+  // worker gives it back.
+  assert.equal(broker.stats().waiting, 1);
+  go.peer.dispatch({ type: "memory-grant" });
+  await go.until(() => go.sent.at(-1).type === "memory-free", "the grant goes back");
+});
+
+test("W2.4: an instantiation that the browser refuses sends memory-full to the broker", async () => {
+  let failures = 0;
+  const broker = createBroker({ limit: 100 });
+  const go = serve(await compiled("ok"), { broker, load: failing(() => failures > 0 && failures-- > 0), retryMs: 20 });
+  await go.until(() => go.mem().length >= 2, "the link check");
+  failures = 1;
+  const a = go.request();
+  await go.until(() => go.response(a), "response");
+  assert.equal(go.sent.filter((m) => m.type === "memory-full").length, 1);
+  // The broker learned the count as the limit: the pod worker and the grant
+  // of the link check.
+  assert.equal(broker.stats().limit, 2);
+});
+
+test("W2.4: PX34 failures and waits for grants keep the asks of a pod worker in the limit of the broker", async () => {
+  let failures = 0;
+  const drops = [];
+  const broker = createBroker({ limit: 14, reserve: 0, onDrop: (why) => drops.push(why) });
+  const go = serve(await compiled("wait", { ms: 30 }), { broker, waitMs: 40, load: failing(() => failures > 0 && failures-- > 0), retryMs: 20 });
+  await go.until(() => go.mem().length >= 2, "the link check");
+  failures = 40;
+  const ids = Array.from({ length: 40 }, () => go.request());
+  await go.until(() => ids.every((id) => go.response(id)), "40 responses", 20_000);
+  assert.ok(go.responses().every((m) => m.status === 201));
+  assert.deepEqual(drops, []);
+  // The grants go back. Asks that waited too long can still wait at the
+  // broker (the learned limit of memory-full); their grants go back when
+  // they come.
+  await go.until(() => broker.stats().used === 2, "the grants go back");
+  assert.ok(broker.stats().waiting <= MAX_INSTANCES);
 });
 
 // failing gives a load function whose instantiation fails with the error of

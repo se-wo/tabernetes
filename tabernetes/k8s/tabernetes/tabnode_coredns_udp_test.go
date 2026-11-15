@@ -423,6 +423,13 @@ func TestNcUDP(t *testing.T) {
 	if code != 0 || out != "hello\n" {
 		t.Errorf("echo: %q (exit %d)", out, code)
 	}
+	// The two writes of echo ("hello" and "\n") are one datagram, as one
+	// read of a pipe in busybox (W4.5b).
+	sink := udpListen(t, podCtx(t, ip), ":8")
+	sh(t, "echo hello | nc -u -w 0.1 "+ip+" 8")
+	if b, _ := udpRecv(t, sink); string(b) != "hello\n" {
+		t.Errorf("echo hello: datagram %q, want one datagram", b)
+	}
 	// Without stdin, -w ends it.
 	out, code = sh(t, "nc -u -w 0.2 "+ip+" 7 </dev/null")
 	if code != 0 || out != "" {
@@ -473,7 +480,7 @@ func TestNcUDPListen(t *testing.T) {
 	}
 	c := udpListen(t, podCtx(t, nextLoopbackIP()), ":0")
 	c.WriteTo([]byte("ping\n"), net.UDPAddrFromAddrPort(addr))
-	// Each read of stdin is one datagram: "pong\n" can come in two.
+	// The writes of echo are one datagram (ncUDPGather).
 	var got string
 	for len(got) < len("pong\n") {
 		b, from := udpRecv(t, c)

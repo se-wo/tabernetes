@@ -3,14 +3,17 @@
 // without the control plane, on a thread of its own. It talks to the
 // apiserver like a Docker node, over MessageChannels instead of WebRTC.
 import { portChannel, openChannel } from "./channel.js";
+import { createBroker, serveRemote, NO_MEMORY } from "./memory.js";
 
 const MAX_WORKERS = 8; // every worker is a whole Go runtime: 100 MB and more
 
 // nodeBuiltins returns the commands. status is an element for the state of
 // the worker nodes under the terminal. connections are the connections of
-// join.js, name -> {remove(write)}: rmnode removes them, too.
-export function nodeBuiltins({ workerURL, wasi, status, connections = new Map() }) {
-  const workers = new Map(); // name -> {worker, state}
+// join.js, name -> {remove(write)}: rmnode removes them, too. memory is the
+// broker of the page (memory.js): the Go binary of each node worker counts 1
+// Wasm memory, and the messages of its pod workers go to the broker.
+export function nodeBuiltins({ workerURL, wasi, memory = createBroker(), status, connections = new Map() }) {
+  const workers = new Map(); // name -> {worker, state, stop}
 
   const render = () => {
     if (!status) return;
@@ -20,6 +23,7 @@ export function nodeBuiltins({ workerURL, wasi, status, connections = new Map() 
       const dot = document.createElement("span");
       dot.textContent = "● ";
       dot.style.color = state === "running" ? "#3fb950" : state === "starting" ? "#d29922" : "#f85149";
+      // The states: starting, running, stopped, no Wasm memory.
       el.append(dot, `${name} ${state === "running" ? "in a worker" : state}`);
       return el;
     }));
@@ -30,11 +34,25 @@ export function nodeBuiltins({ workerURL, wasi, status, connections = new Map() 
     if (!module) throw new Error("the WebAssembly module is not loaded yet");
     const worker = new Worker(workerURL);
     const config = await globalThis.tabernetes.prepareWorkerNode((label) => Promise.resolve(openChannel(worker, label)), gpu);
-    const entry = { worker, state: "starting" };
+    const counted = memory.client({ base: 1, name: `the Go binary of ${config.name}` });
+    const remote = serveRemote(memory, (m) => worker.postMessage(m));
+    const entry = { worker, state: "starting", stop: () => { remote.end(); counted.end(); } };
     workers.set(config.name, entry);
     const set = (state) => { entry.state = state; render(); };
     worker.onmessage = (e) => {
       const m = e.data;
+      if (m.type === "memory") return remote.handle(m);
+      if (m.type === "no-memory") {
+        // The Go binary of the node gets no Wasm memory (a full tab, section
+        // 8.6): the status line and the terminal show it, and the page frees
+        // the prepared node. No Node object exists yet.
+        worker.terminate();
+        entry.stop();
+        set("no Wasm memory");
+        write(`${config.name}: the node does not start: ${NO_MEMORY} (${m.error}). Delete pods to free memories, then rmnode ${config.name} and addnode.\n`);
+        Promise.resolve(globalThis.tabernetes.removeNode(config.name)).catch(() => {});
+        return;
+      }
       // The page names the node a channel comes from (pod channels trust it).
       if (m.type === "channel") globalThis.tabernetes.attachChannel(portChannel(m.port, m.label), config.name);
       else if (m.type === "ready") set("running");
@@ -107,9 +125,11 @@ export function nodeBuiltins({ workerURL, wasi, status, connections = new Map() 
           }
         }
         entry.worker.terminate();
+        entry.stop();
         workers.delete(name);
         render();
-        await globalThis.tabernetes.removeNode(name);
+        // A node without Wasm memory is already free.
+        if (entry.state !== "no Wasm memory") await globalThis.tabernetes.removeNode(name);
         write(`${name} stopped and deleted, its pods move to other nodes\n`);
       }
       return code;

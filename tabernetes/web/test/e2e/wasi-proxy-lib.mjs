@@ -59,11 +59,13 @@ export function busyboxPod(name, node, script = "sleep 86400", env = []) {
   };
 }
 
-export const service = (name, port) => ({
+// service is a Service with the selector app=name and one port. protocol is
+// "TCP" (the default) or "UDP". spec adds fields to the spec.
+export const service = (name, port, protocol, spec = {}) => ({
   apiVersion: "v1",
   kind: "Service",
   metadata: { name },
-  spec: { selector: { app: name }, ports: [{ port }] },
+  spec: { selector: { app: name }, ports: [{ port, ...(protocol ? { protocol } : {}) }], ...spec },
 });
 
 // inPod runs a shell command line in the first container of a pod with

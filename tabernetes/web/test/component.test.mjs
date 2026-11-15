@@ -12,6 +12,7 @@ import { transpile } from "../src/transpile.js";
 import { runComponent, runExport, importObject, missingText, environment, sink, createStdin, createMemory, pollWithTask, camel, kebab, ERROR_EXIT } from "../src/component.js";
 import { createIdle } from "../src/sockets.js";
 import { createPeer } from "../src/wasi_messages.js";
+import { createGrants } from "../src/memory.js";
 // The io.js of the browser shim, which the bundle of the pod worker uses.
 import * as io from "../node_modules/@bytecodealliance/preview2-shim/dist/browser/io.js";
 
@@ -109,6 +110,19 @@ test("CO1, CO18: a command component exits with 0 or 1", async () => {
     assert.equal(got, code, `${mode}: ${text(sent, "stderr")}`);
     assert.equal(text(sent, "stderr"), "");
   }
+});
+
+test("W2.4: a command component does not ask the broker; a refused memory sends memory-full and gives 137", async () => {
+  const { sent, peer: p } = peer();
+  const grants = createGrants(p);
+  assert.equal(await runComponent({ component: await command("ok"), args: [], env: [], cwd: "/" }, deps(p, { grants })), 0);
+  assert.deepEqual(sent.filter((m) => m.type.startsWith("memory")), []);
+  const full = peer();
+  const refuse = async () => ({ instantiate: async () => { throw new RangeError("WebAssembly.Instance(): Out of memory: Cannot allocate Wasm memory for new instance"); } });
+  const code = await runComponent({ component: await command("ok"), args: [], env: [], cwd: "/" }, deps(full.peer, { grants: createGrants(full.peer), load: refuse }));
+  assert.equal(code, ERROR_EXIT);
+  assert.deepEqual(full.sent.filter((m) => m.type.startsWith("memory")).map((m) => m.type), ["memory-full"]);
+  assert.match(text(full.sent, "stderr"), /^the component cannot instantiate: the browser tab has no Wasm memory left for a new instance \(WebAssembly/);
 });
 
 test("a trap and an error result of run give 137 and a text on stderr", async () => {

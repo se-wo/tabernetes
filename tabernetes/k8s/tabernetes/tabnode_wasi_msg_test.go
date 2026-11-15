@@ -336,6 +336,31 @@ func TestWasiCLIMessages(t *testing.T) {
 	}
 }
 
+// The messages of the broker of the page (section 8.6, memory.js) are in the
+// table, but wasi.js does not give them to the Go side: no handler of the
+// registry handles them, and the Go side never sends them.
+func TestWasiMemoryMessages(t *testing.T) {
+	for typ, dir := range map[string]byte{"memory-ask": 'w', "memory-grant": 'g', "memory-free": 'w', "memory-full": 'w', "collect": 'g'} {
+		s := wasiSpecs[typ]
+		if s == nil {
+			t.Errorf("message %s is not in the table", typ)
+			continue
+		}
+		if s.dir != dir || len(s.fields) != 0 {
+			t.Errorf("%s: direction %c, %d fields", typ, s.dir, len(s.fields))
+		}
+		if wasiHandlers[typ] != nil {
+			t.Errorf("%s has a handler on the Go side", typ)
+		}
+	}
+	// A pod worker that sends one to the Go side gets no drop and no answer.
+	p, posted := testPeer(t, nil, nil)
+	p.dispatch(msg(map[string]any{"type": "memory-ask"}))
+	if p.Drops() != 0 || len(*posted) != 0 {
+		t.Fatalf("drops %d, posted %d", p.Drops(), len(*posted))
+	}
+}
+
 // The statuses of runwasi for a command component and for the function of
 // an entrypoint (CO3, CO4, CO11, CO12, CR6): the imports first, then the
 // function. The world comes from component_world.js.

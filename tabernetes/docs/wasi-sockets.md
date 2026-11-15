@@ -904,6 +904,23 @@ CLI messages of a component:
 | `mem` | worker to Go | the size of the memory of the instances (CO6) |
 | `exit` | worker to Go | exit code, and a text for stderr or none |
 
+Messages of the broker of the Wasm memories (section 8.6, package W2.4):
+
+| Type | Direction | Contents |
+| --- | --- | --- |
+| `memory-ask` | worker to Go | none. An instance 2 to 16 of a proxy container asks for a grant. |
+| `memory-grant` | Go to worker | none. One grant. |
+| `memory-free` | worker to Go | none. The pod worker gives one grant back. |
+| `memory-full` | worker to Go | none. The browser refused a Wasm memory. |
+| `collect` | Go to worker | none. The pod worker makes one Wasm memory and drops it. |
+
+These messages are in the two contract files, but they do not go to the Go
+side. `wasi.js` takes them out of the transport, as it does with `ready`,
+and gives them to the broker of the page (`web/src/memory.js`). The broker
+examines them with `wasi_messages.js` and sends `memory-grant` and `collect`.
+The Go dispatcher has no handler for them. On a node worker, they go through
+`node.worker.js` and `nodes.js` to the broker of the page.
+
 #### 8.3.1 Format of the messages
 
 `web/src/wasi_messages.js` and `k8s/tabernetes/tabnode_wasi_msg.go` contain
@@ -1543,15 +1560,52 @@ The Wasm memories of a tab (open question 2) obey these rules:
   component cannot instantiate: the browser tab has no Wasm memory left for a
   new instance", and the text of the browser.
 - A module (WASI preview 1) that cannot get its memory exits with 128. Its
-  log contains the text of the browser: "Out of memory: Cannot allocate Wasm
-  memory for new instance". `wasi.worker.js` gives this status, not
-  `component.js`.
+  log contains "the module cannot instantiate: the browser tab has no Wasm
+  memory left for a new instance", and the text of the browser: "Out of
+  memory: Cannot allocate Wasm memory for new instance". `wasi.worker.js`
+  gives this status, not `component.js`.
 - With `restartPolicy: Always`, kubelet starts these containers again with
   its back-off. So a full tab gives a status and a restart, not a pod that
   waits without a trace.
-- Package W2.4 of `wasi-sockets-plan.md` adds a limit for the tab, the
-  release of the memory of ended instances and a status for a node worker
-  that cannot start.
+- The broker of the page (`web/src/memory.js`, package W2.4) counts the
+  Wasm memories of the tab with the numbers of section 14: the Go binary of
+  the page 2, each node worker 1, each transpile worker 1, the pod worker of
+  each component 1, each module 2, and 1 for each grant.
+- The broker uses the limit 125 of section 14. No interface of the browser
+  gives the limit. When the browser refuses a memory (`memory-full`) while
+  the count is lower, the broker uses the count as the limit for 10 seconds.
+  The garbage of pod workers also causes refusals, so this limit does not
+  stay.
+- A start never waits for the broker. The pod worker of a component, a
+  module, a node worker and one instance of a proxy container start without
+  a grant: the count of the pod worker is for the instance that starts while
+  no other instance uses it. They fail as the rules above say if the browser refuses the memory.
+- After the link check, the pod worker asks for one grant without a wait.
+  It counts the memory of the link check until the end of the pod worker
+  (section 14).
+- An instance 2 to 16 of a proxy container (PX9) sends `memory-ask`. The
+  broker gives a grant while more than 8 memories (the reserve for starts)
+  are free. Else the ask waits in one queue for all containers, in the
+  sequence of the asks (FIFO). So one container cannot take all memories. The
+  pod worker gives the grant back at the end of the instance.
+- A wait for a grant has the limit of 2 seconds. After it, the request
+  writes the line of PX34, and the pod worker tries to instantiate without a
+  grant. PX34 handles a failure. So a broker that counts too high never stops
+  a container. A grant that comes too late goes back at once.
+- The broker counts the memory of an instance only until the end of the
+  instance, not until the garbage collection of its pod worker. A
+  `FinalizationRegistry` in the pod worker reports a memory only after the
+  garbage collection, and Chrome runs it late in an idle worker (section 14).
+- While asks wait, and after `memory-full`, the broker sends `collect` to all
+  pod workers, a maximum of one time in 1 second. The pod worker makes one
+  Wasm memory and drops it. On a full tab this fails, and Chrome collects the
+  garbage of that worker first: the memories of its ended instances go.
+- The end of a pod worker (`end` in `newPodWorkers`, or the exit of a module)
+  frees all its memories and grants.
+- A node worker whose Go binary gets no memory shows the state "no Wasm
+  memory" in the status line, and the terminal shows the cause. The page
+  then frees the prepared node (`removeNode`). No Node object exists at this
+  time, so the node has no status in the API.
 
 `web/test/e2e/wasi-memory.test.mjs` measures the numbers of section 14 and
 tests these rules on a full tab.
@@ -2271,7 +2325,7 @@ The column "Nodes" gives the nodes for the test:
 | TC13 | The client closes its send direction. The server reads the end of the stream and sends its answer. | tab, Docker |
 | TC14 | After `kubectl delete pod --grace-period=0 --force` of the server, the client gets the end of its connection. The unit test of the Go side is `TestWasiTCPStop`. At the stop, the Go side closes each connection at once. It does not write the bytes of `data` that it did not write yet. After `closed` from the pod worker, it writes them first (`TestWasiTCPClosedDrains`). | tab |
 | TC18, TC19, TC20, TC21 | The component does a second bind, a bind to a foreign IP, an IPv6 connect to an IPv4 address and a backlog of 0. On runwasi, a second bind without a listener gives no error. With a listener, it gives `address-in-use` (rule 3 of section 8.3.2). The other calls give the error codes of fact 12. | tab, Docker |
-| TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Until phase 4, `bind` and `connect` with the protocol `udp` give `not-supported`. | tab |
+| TC18, TC19 (Go side) | `TestWasiTCPAddressInUse` and `TestWasiTCPNotBindable`. `listen` on a socket that is not bound, a second `bind` and a second `connect` give `invalid-state`. Since phase 4, `bind` and `connect` with the protocol `udp` make a UDP socket (rule 1 of section 8.3.3, `TestWasiUDPEcho`, `TestWasiUDPConnect`). | tab |
 | TC22 | The component sets and reads each socket option. On a tab node, the values agree. On a Docker node, all options other than the buffer sizes agree (section 11). The defaults of runwasi: keep-alive off, 7,200 s, 75 s, count 9, hop limit 64, buffers 65,536 and 8,192 bytes. An idle time of 1.5 s gives 2 s. The value 0 gives `invalid-argument`. | tab, Docker |
 | NL1, NL2 | A component finds a Service by its short name. On runwasi, the name `localhost` gives `::1` and then `127.0.0.1` (section 8.3.2, rule 11). The unit test of the Go side is `TestWasiTCPLookup`. It also makes sure that the hostname of the pod gives the pod IP. | tab, worker, Docker |
 | NL3 | The name `example.com` fails with `name-unresolvable`. The end-to-end test uses the mode `client` of the echo image, which writes the name of the error code. A name with characters outside ASCII gives `invalid-argument` (section 11). The unit test of the Go side is `TestWasiTCPLookup`. | tab |
@@ -2285,30 +2339,31 @@ The column "Nodes" gives the nodes for the test:
 | NL1, NL2, NL3 (pod worker) | A unit test (`web/test/lookup.test.mjs`): an IP literal gives its address without a message. A correct name has 1 to 253 characters and labels of 1 to 63 ASCII letters, digits, `-` or `_`. A dot at the end is permitted. Another name gives `invalid-argument` without a message. A correct name sends `lookup`. | tab |
 | NL3 (pod worker) | A unit test: the error code of `addresses` comes from `resolve-next-address` one time. Then the stream is empty. `addresses` for a dropped stream is discarded. | tab |
 | CO17 (pod worker) | A unit test: 1,000 TCP reads without bytes, 1,000 calls of `check-write` that give 0, or 1,000 calls of `resolve-next-address` that give `would-block`, give a pause. A read with bytes, a `check-write` with credit, and `finish-connect`, `finish-bind`, `finish-listen` or `accept` without an error reset the count. | tab |
-| UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. | tab |
-| UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. | tab |
-| AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. | tab |
-| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. The answers have the correct source address. On runwasi, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. | tab, worker, Docker |
-| UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. | tab |
-| UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. | tab |
-| UD8, UD9 | A connected client sends to a port without a socket. The next receive gives `connection-refused`. On runwasi (wasmtime 36), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
-| UD10, UD11 | A connected client sends to a Service without endpoints. The next receive gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
+| UD1, UD16, UD17, UD18 | The Service `kube-dns` has 53/UDP and 53/TCP. `nslookup` over UDP and over TCP get answers from CoreDNS on the tab node. Unit tests: `TestUDPAndTCPSamePort`, `TestWasiUDPAddressInUse`, `TestUDPServiceTCPAndUDP`, `TestDNSOverUDP`. End-to-end test: `wasi-udp.test.mjs`. | tab |
+| UD22 | A query over UDP for a name with 40 addresses gets an answer with the TC bit. The name is a Service without a selector, with an EndpointSlice of 40 addresses. The test does not change the Corefile. Unit tests: `TestDNSTruncated`, `TestNslookupTCP`. End-to-end test: `wasi-udp.test.mjs`. `nc -u` sends the query. | tab |
+| AC3 | A unit test sends one query over UDP. `chargeDNS` charges one time. The unit test is `TestCoreDNSChargeUDP`. | tab |
+| UD2, UD7, UD15 | The UDP echo pod gives answers through a Service. On runwasi and on the tab node, the answers come from the ClusterIP and the port of the Service, for a connected socket and for a socket without `stream` to an address. Unit tests: `TestWasiUDPEcho`, `TestUDPServiceTCPAndUDP`. End-to-end test: `wasi-udp.test.mjs`. | tab, worker, Docker |
+| UD3, UD4 | Two pods bind to port 0 at the same time. Each pod gets port 32768. Unit tests: `TestUDPEphemeralPorts`, `TestWasiUDPEphemeralPort`. End-to-end test: `wasi-udp.test.mjs`. | tab |
+| UD5, UD6 | A client sends 1,000 datagrams of 1,024 bytes to a server that does not read. The sender gets no error. The server then reads 256 datagrams. Unit tests: `TestUDPQueueFull`, `TestWasiUDPNoCredit`. End-to-end test: `wasi-udp.test.mjs`. runwasi keeps 455 (section 11). | tab |
+| UD8, UD9 | A connected client sends to a port without a socket. On runwasi (wasmtime 36) and on the tab node (rule 7 of section 8.3.3), only the next `send` gives `connection-refused`, one time. This `send` sends nothing. `receive` does not give the error, also when it waits on its pollable. A socket without `stream` to an address gets no error. | tab, Docker |
+| UD10, UD11 | A connected client sends to a Service without endpoints. The next `send` gives `connection-refused`. On a Docker node, the result depends on the host, as for UD12: kube-proxy has the rule `REJECT --reject-with icmp-port-unreachable` (fact 17), but on the GitHub runner the client gets no error and no answer. The Docker step accepts the two and records the result. | tab, Docker |
 | UD12 | A client sends to a ClusterIP port without a Service. The client gets no error and no answer. On a Docker node, the result depends on the host, as for CR7 (section 9.2): no answer or `connection-refused`. The Docker step accepts the two and records the result. On the GitHub runner, the client gets no answer and no error. | tab, Docker |
-| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. | tab, Docker |
-| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. | tab, Docker |
-| UD19 | `nc -u` sends a line to the UDP echo pod and receives it. | tab |
-| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`, and the client in another pod gets the error on its second `send`. | tab, Docker |
-| FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. | tab |
-| FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. | tab |
-| FL2 | A flow without answers is not in the flow table after 31 seconds. | tab |
-| FL3 | A flow with answers for 5 seconds is in the flow table after 100 seconds without datagrams. | tab |
-| FL4 | One query and one answer: the flow is not in the flow table after 31 seconds. | tab |
-| FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. | tab |
-| FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. | tab |
-| FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. | tab |
-| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.1b. | tab, worker (phase 5) |
-| FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. | tab |
-| FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. | tab |
+| UD8 to UD12 (tests) | Unit tests: `TestUDPFact3Refused`, `TestWasiUDPRefused`, `TestWasiUDPRefusedOnWrite` (UD8, UD9), `TestUDPServiceNoEndpoints`, `TestUDPRouteRefuse` (UD10, UD11), `TestUDPServiceNoPort` (UD12). End-to-end test: `wasi-udp.test.mjs`, with the results of runwasi on the tab node. | tab |
+| UD13 | The UDP echo pod sends to its own Service and gets its answer. On runwasi, the answer comes from the ClusterIP and the port of the Service. The unit test is `TestUDPServiceOwnPod`. End-to-end test: `wasi-udp.test.mjs`. | tab, Docker |
+| UD14 | A datagram of 65,508 bytes fails with `datagram-too-large`. On runwasi, the `send` of this datagram gives the error. A datagram of 65,507 bytes arrives, and the next `send` works. The unit test is `TestUDPFact2DatagramSize`. End-to-end test: `wasi-udp.test.mjs`. Its lines of rules 2 to 7 are the lines of runwasi, with the differences of section 11. | tab, Docker |
+| UD19 | `nc -u` sends a line to the UDP echo pod and receives it. Unit tests: `TestNslookup*`, `TestNcUDP*`. End-to-end test: `wasi-udp.test.mjs`. Also on a node worker. | tab |
+| UD20, UD21 | A UDP server on `127.0.0.1` receives from its own pod. A connected client in another pod gets `connection-refused`. On runwasi, the answer comes from `127.0.0.1:7`; on the tab node, from the pod IP (section 11). On both, the client in another pod gets the error on its second `send`. Tests: `TestUDPLoopback`, `TestWasiUDPLoopback`, `wasi-udp.test.mjs`. | tab, Docker |
+| FL1 | A unit test sends from one client to two ClusterIPs with the same endpoint. The flow table has two flows. The unit test is `TestUDPFlowTuples`. | tab |
+| FL6, FL7 | A unit test counts the calls of the NetworkPolicy engine. 10 datagrams and 10 answers of one flow cause one call. Unit tests: `TestUDPPolicyIngress`, `TestUDPPolicyProtocol`, `TestUDPPolicyOneDecision`. | tab |
+| FL2 | A flow without answers is not in the flow table after 31 seconds. The unit test is `TestUDPFlowTimeoutNoAnswer`, with the clock `flowNow` (plan rule 5). | tab |
+| FL3 | A flow with answers for 5 seconds is in the flow table after 100 seconds without datagrams. The unit test is `TestUDPFlowTimeoutStream`, with the clock `flowNow`. | tab |
+| FL4 | One query and one answer: the flow is not in the flow table after 31 seconds. The unit test is `TestUDPFlowTimeoutAnswer`, with the clock `flowNow`. | tab |
+| FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. The unit test is `TestUDPFlowEndpointGone`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. The unit test is `TestUDPPolicyStrictMode`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. The unit test is `TestUDPFlowAffinity`. End-to-end test: `wasi-udp-flows.test.mjs`. 10 `nc -u` at the same time give the 10 sockets. | tab |
+| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. Until phase 5, the Service translation selects only endpoints on the same node (section 8.8), so `Local` gives the same result as the default. The part on a node worker moves to package W5.3. The unit test is `TestUDPFlowLocalPolicy`. | tab, worker (phase 5) |
+| FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. Unit tests: `TestUDPFlowPolicyDeny`, `TestUDPPolicyDeniedNoFlow`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
+| FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. The unit test is `TestUDPFlowReleaseIP`. | tab |
 | ND1 | The tests with "worker" or "Docker" in this table. | worker, Docker |
 | ND2 | UDP between pods on the page node and on a node worker. | tab, worker |
 | ND3 | A unit test of the page and a unit test of the agent read the settings of the channel `udp`. | tab, Docker |
@@ -2328,7 +2383,8 @@ The column "Nodes" gives the nodes for the test:
 | IC7, IC8 | `README.md` contains the two texts. | none |
 | MS1 to MS6 | A unit test sends messages with a foreign socket ID, a size above the limit, `data` above the credit or a URL outside the cluster. The Go side drops each message and closes the socket or the request. A `bind` with a foreign IP gets `bound` with `address-not-bindable`, and the socket stays open (section 8.3.2). | tab |
 | MS2 to MS4 (TCP) | The unit tests are `TestWasiTCPForeignID` (MS2), `TestWasiTCPNotBindable` (MS3) and `TestWasiTCPDataAboveCredit` (MS4). A `data` or a `shutdown` for a socket without a connection, and a `data` after `shutdown` of the send direction, also fail the examination (MS6). | tab |
-| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. The TCP part is `TestWasiTCPChargesCPU`. | tab |
+| MS2 to MS4 (UDP) | The unit tests are `TestWasiUDPForeignID` (MS2), `TestWasiUDPNotBindable` (MS3) and `TestWasiUDPDatagramAboveCredit` (MS4). `data` and `shutdown` for a UDP socket also fail the examination (MS6, rule 1 of section 8.3.3). | tab |
+| AC1 | A unit test sends 10 MB through a UDP Service and a TCP Service. The CPU of the container increases. The CPU of the control plane pods does not increase. The TCP part is `TestWasiTCPChargesCPU`. The UDP part is `TestWasiUDPServiceChargesCPU`: 10 MB through a UDP Service, and the answers back. | tab |
 | AC2 | If the pod worker sends `cpu`, a component in a loop of CPU work shows CPU in `kubectl top pod`. | tab |
 
 ## 11 Differences from a Docker node
@@ -2338,7 +2394,7 @@ These differences stay after this design. `README.md` must show them.
 | Item | Tab node | Docker node with runwasi |
 | --- | --- | --- |
 | Instances of a proxy component at the same time | A maximum of 16 | No maximum |
-| Memory for new instances and pods | All pods and nodes of one browser tab share approximately 125 Wasm memories (section 14). When the tab is full, requests to proxy components wait with a line in the log, and other WebAssembly pods exit with 137 (components) or 128 (modules). | The memory of the host |
+| Memory for new instances and pods | All pods and nodes of one browser tab share approximately 125 Wasm memories (section 14). A broker keeps 8 for new pods; proxy instances 2 to 16 wait up to 2 seconds for a grant (section 8.6). On a full tab, proxy requests wait with a log line, other pods exit with 137 or 128, a node worker shows "no Wasm memory". | The memory of the host |
 | Instances of a proxy component on threads | One thread. An instance in a loop of CPU work stops the other instances and `cancel`. | Parallel tasks of tokio |
 | A component in a loop of CPU work | It receives no messages. Only a stop of the container ends it. | The kernel stops it at the end of its time |
 | Bodies of HTTP requests and responses | Complete blocks, a maximum of 16 MiB | Streams, no maximum |
@@ -2353,7 +2409,8 @@ These differences stay after this design. `README.md` must show them.
 | A bind to `127.0.0.1:P` and a bind to the pod IP with the same port P, TCP or UDP | `address-in-use`: the two IPs are one IP of the table of the ports in use | The two binds work, for TCP and for UDP (runwasi) |
 | The datagrams that a UDP socket keeps before a receive | 256 KiB of payload (UD5) | `SO_RCVBUF` with the overhead of the kernel for each datagram. On the GitHub runner (`receive-buffer-size` 524,288), a server keeps 455 of 1,000 datagrams of 1,024 bytes. |
 | A UDP socket on `0.0.0.0` that sends to `127.0.0.1` of its own pod | The answers come from the pod IP | The answers come from `127.0.0.1` |
-| A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | Nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
+| A UDP socket of the family `ipv6` on `::1` that sends to `::1` of its own pod | The `send` gives `remote-unreachable`, and nothing arrives: an IPv6 socket has no socket in the UDP table | The datagram arrives |
+| A `send` of a connected UDP socket at once after a datagram that no socket can receive | The `send` works: the `error` message of the Go side comes later, and a later `send` gets `connection-refused` (rule 7 of section 8.3.3) | The `send` gets `connection-refused`: the kernel has the ICMP error already |
 | UDP to pods on other nodes, and to Services with only such endpoints, until phase 5 | The tab node drops the datagram | It arrives |
 | A socket of a `hostNetwork` pod on `127.0.0.1` | It listens on the node IP without a row in the loopback table. Other pods can connect. | Only the host of the node can connect |
 | The addresses of a connection that a socket on `0.0.0.0` accepts from a client of the same pod that used `127.0.0.1` | The pod IP | `127.0.0.1` |
@@ -2378,10 +2435,10 @@ These differences stay after this design. `README.md` must show them.
 | The `poll` of the shim continues a ready pollable after `setTimeout(0)` (fact 9, fact 21). | A component that polls ready sockets does approximately 250 rounds each second. | Phase 1 measures it with the CO17 test. A later change can give the pod worker its own `poll`. |
 | Go cannot compile components (fact 7). | The current test images in Go cannot use sockets. | The new test images are in Rust. `mise.toml` and CI get Rust. |
 | Each request makes a new instance with a new memory. | The browser frees the memory only at garbage collection. Many requests can use too much memory. | PX9, CO7. Phase 0, items 6 and 15. |
-| Chrome 153 gives one renderer process 125 Wasm memories. The page, the node workers and their pod workers share them (section 14). | 8 proxy containers with 16 requests each make the tab full. New components exit with 137, new modules with 128. A new node worker does not start. | PX34, section 8.6. A suspended instance must continue with an exception (section 8.6). Package W2.4. |
-| The memory of an instance that ended stays until the garbage collection of its pod worker. An idle pod worker collects its garbage late. | After a load, the tab stays full or almost full. New pods fail (section 14). | Chrome collects the garbage of a pod worker that cannot make a memory. A deletion of pods frees their memories. Package W2.4. |
+| Chrome 153 gives one renderer process 125 Wasm memories. The page, the node workers and their pod workers share them (section 14). | 8 proxy containers with 16 requests each make the tab full. New components exit with 137, new modules with 128. A new node worker does not start. | PX34, section 8.6. A suspended instance continues with an exception. W2.4: 8 memories stay for starts for 2 s. |
+| The memory of an instance that ended stays until the garbage collection of its pod worker. An idle pod worker collects its garbage late. | After a load, the tab stays full or almost full. New pods fail (section 14). | Chrome collects the garbage of a pod worker that cannot make a memory. A deletion of pods frees their memories. W2.4: `collect` on a full tab. |
 | The Go thread moves the data of all sockets of pods. | Much network traffic of pods makes the control plane slower. This is the same reason as for the rejection of a TCP/IP stack in section 13, but only for traffic of pods. | The credits of section 8.4 set a limit to the memory. AC1 shows the time in the container. A later design can move bytes between workers with shared memory. |
-| The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | The item is not complete in `docs/networking-policy.md`. Phase 5 cannot end before it (decision 16). |
+| The tests of NetworkPolicy on a Docker node must have nfqueue in a rootless node. | Deferred tests cannot run. | Closed (W5.0). The step `netpol` of the Docker check shows nfqueue on the GitHub runner: a NetworkPolicy denies a connection on node-1 in 2 seconds. Without `nft_queue`: SKIP. Deferred tests can be PASS or FAIL lines. |
 | A Docker node without a proxy has no internet (section 4.4). | The Docker check cannot pull the Rust test images. | Phase 0, item 18. |
 | The host network namespace of a Docker node does not reach tab pods (issue #61). | NodePort and hostPort for UDP cannot work with an endpoint on `tab`. | Out of scope. Section 11. |
 | WASI 0.3 is near. jco-transpile already uses `preview3-shim`. | New components do not run on a tab node. | CO11 and CO12 give a clear text. A later design can add WASI 0.3. |
@@ -2468,6 +2525,41 @@ These differences stay after this design. `README.md` must show them.
      change. Package W2.4 of `wasi-sockets-plan.md` does it.
    - A smaller maximum for each container does not prevent a full tab: 16
      containers with 8 instances also make it full.
+
+   Answer of package W2.4. The broker of the page (`web/src/memory.js`) has
+   the rules of section 8.6. The numbers come from
+   `web/test/e2e/wasi-memory.test.mjs` and from tests with workers in a page,
+   in headless Chromium 153 of Playwright 1.63:
+
+   | Measurement | Result |
+   | --- | --- |
+   | A worker with 10 to 60 memories of ended instances makes one new memory, on a full tab | All its memories are free after 2 to 4 ms |
+   | The same, on a tab with free memories | No memory is free after 3 seconds |
+   | A `FinalizationRegistry` for the memories of ended instances, without a garbage collection | No callback after 5 seconds. The callbacks come with the garbage collection |
+   | 60 requests in a sequence to one container, then `collect` without a full tab | 120 free before, 89 after the requests, 88 after `collect` |
+   | The same, then `collect` on a full tab | 121 free after 1.5 seconds |
+   | The full tab of W2.3b (8 proxy containers with 16 parked requests): the request of a new container after the end of the hold | Served after 0.6 to 3.7 seconds (without the broker: 12.7 and 13.7 seconds) |
+   | The same, free memories 5 and 30 seconds after the end of the parked requests | 0 to 94, and 118 to 121 (without the broker: 0 to 23, and 23 to 38) |
+   | 8 proxy containers, 16 clients each, 10 requests of 1 second each | Asks wait after 1.1 to 1.2 seconds, at a count of 117 of 125. A command component that started during the load ended with 0 after 3.0 to 3.4 seconds (3 runs). All 1,280 requests got their responses in 21 to 25 seconds |
+
+   - `collect` frees the memories of ended instances only on a full tab. The
+     refusal of the new memory starts the garbage collection of the worker
+     (section 12). On a tab with free memories, nothing starts it. So 160
+     requests in a sequence (one instance at a time, no asks) still free
+     their memories only after approximately 30 seconds. The broker sends
+     `collect` after `memory-full` and while asks wait, so it helps when the
+     tab is full. The request stays in the code.
+   - A `FinalizationRegistry` gives no earlier information than the garbage
+     collection. The broker therefore counts an instance until its end, not
+     until its garbage collection, and does not count the memories of ended
+     instances.
+   - The reserve of 8 memories keeps memories for starts while the asks wait
+     less than 2 seconds. A longer overload, and the memories of ended
+     instances, still make the tab full. Then the rules of section 8.6 apply:
+     PX34, exit codes 137 and 128, and "no Wasm memory" for a node worker.
+   - Decision: 16 stays the maximum of each container (PX9). The broker adds
+     no wait to a start and no new failure. A command component does not ask
+     the broker.
 3. After phase 5, Docker pods can get UDP answers from CoreDNS on a tab
    node. Can CoreDNS then stay on the tab node? A later design must decide.
 
