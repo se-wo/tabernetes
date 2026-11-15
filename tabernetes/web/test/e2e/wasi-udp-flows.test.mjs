@@ -18,7 +18,7 @@
 //               translation selects only endpoints on the same node, so
 //               internalTrafficPolicy: Local gives the same result as the
 //               default on the tab node. The test on a node worker is in
-//               package W5.3.
+//               package W5.1b.
 //   FL13        TestUDPFlowReleaseIP (W4.2a).
 //
 // The tests run one after the other in one namespace. FL10 runs before FL5,

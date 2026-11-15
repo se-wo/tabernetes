@@ -26,7 +26,7 @@
 //               web/test/udp.test.mjs (W4.4b). The pod worker part of UD14:
 //               web/test/udp.test.mjs.
 //
-// UDP between nodes is phase 5 (W5.3): no test has a client on the tab and a
+// UDP between nodes is phase 5 (W5.1b, wasi-udp-nodes.test.mjs): no test has a client on the tab and a
 // server on the node worker. Each running command component uses one Wasm
 // memory of the tab (section 14): the pods share one namespace, the clients
 // are containers that exit, and the namespace is deleted after the last
