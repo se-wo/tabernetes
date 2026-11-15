@@ -177,7 +177,7 @@ test("rule 4: stream with an address sends connect and does not wait", () => {
   assert.deepEqual(g.take(), [{ type: "connect", socket: id, protocol: "udp", address: "10.96.0.10", port: 53 }]);
   // No connected: the remote address is there at once.
   assert.deepEqual(sock.remoteAddress(), v4(10, 96, 0, 10, 53));
-  assert.deepEqual(sock.localAddress(), v4(0, 0, 0, 0, 32768));
+  assert.deepEqual(sock.localAddress(), v4(10, 244, 0, 5, 32768));
   // A send without an address goes to the remote address (rule 5).
   assert.equal(sendTo(output, [{ data: bytes(3, 7) }]), 1n);
   const [d] = g.take();
@@ -320,6 +320,23 @@ test("rule 3 and UD20: a socket on 127.0.0.1 shows 127.0.0.1:<port> and the sour
   const [d] = input.receive(5n);
   assert.deepEqual(d.remoteAddress, v4(127, 0, 0, 1, 41000));
   assert.deepEqual([...d.data], [9, 9, 9, 9]);
+});
+
+test("rule 3 and W4.5a: after stream with an address, a socket on 0.0.0.0 shows the IP of the route", () => {
+  const g = fakeGo();
+  const { sock } = bound(g);
+  assert.deepEqual(sock.localAddress(), v4(0, 0, 0, 0, 32768));
+  sock.stream(v4(10, 96, 0, 10, 53)).forEach((x) => x[Symbol.dispose]());
+  assert.deepEqual(sock.localAddress(), v4(10, 244, 0, 5, 32768));
+  sock.stream(v4(127, 0, 0, 1, 53)).forEach((x) => x[Symbol.dispose]());
+  assert.deepEqual(sock.localAddress(), v4(127, 0, 0, 1, 32768));
+  // After the disconnect, 0.0.0.0 again.
+  sock.stream(undefined).forEach((x) => x[Symbol.dispose]());
+  assert.deepEqual(sock.localAddress(), v4(0, 0, 0, 0, 32768));
+  // A socket on 127.0.0.1 keeps the IP of bind.
+  const lo = bound(g, [127, 0, 0, 1], 0, 40000).sock;
+  lo.stream(v4(127, 0, 0, 1, 53));
+  assert.deepEqual(lo.localAddress(), v4(127, 0, 0, 1, 40000));
 });
 
 test("rule 3 and UD15: a socket on 0.0.0.0 shows the address of the message", () => {

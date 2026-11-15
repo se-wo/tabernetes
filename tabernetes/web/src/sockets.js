@@ -1301,10 +1301,19 @@ function createUdp({ table, idle }) {
       return [new IncomingDatagramStream(make, u), new OutgoingDatagramStream(make, u)];
     }
 
+    // localAddress (rule 3): the IP of bind with the port of bound. As on
+    // runwasi, a connected IPv4 socket on 0.0.0.0 shows the IP of the route:
+    // 127.0.0.1 for a remote address in 127.0.0.0/8, else the pod IP of
+    // bound. The Go side sends no connected for UDP (rule 4).
     localAddress() {
       this.#usable();
-      if (this.#u.local === null) throw "invalid-state";
-      return copyAddress(this.#u.local);
+      const u = this.#u;
+      if (u.local === null) throw "invalid-state";
+      if (u.remote && u.family === "ipv4" && isUnspecified(u.bindIP) && u.podIP) {
+        const ip = isLoopback(ipOf(u.remote)) ? LOOPBACK4 : u.podIP;
+        return socketAddress(ip, u.local.val.port);
+      }
+      return copyAddress(u.local);
     }
     remoteAddress() {
       this.#usable();
