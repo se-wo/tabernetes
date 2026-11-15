@@ -1793,6 +1793,35 @@ A node worker sends a credit after it takes datagrams from the channel
 Only the channel to a node worker has credits. A WebRTC channel has
 `bufferedAmount`.
 
+The Go side of the page and of a node worker is in
+`k8s/tabernetes/podlink_udp.go`:
+
+- `attachChannel` (`tunnel.go`) gives a channel with the label `udp` to
+  `udpLinkAttach`. The page reads `ordered` and `maxRetransmits` only for a
+  Docker node. The field `worker` of `joinedNode` marks a node worker. The
+  page closes a `udp` channel of a node that is not in `nodes`.
+  `forgetNode` closes the `udp` channel of the node, because a terminated
+  worker sends no `null` on its ports.
+- A node worker opens its `udp` channel one time, after `startTabNode`.
+- The page and the node worker find the node of an IP in a parsed table
+  of the pod CIDRs and the node IPs. They make the table again at most
+  one time each second. The examination of the source (ND7, ND8) uses
+  the same table.
+- The callback of a node worker also counts a message that it drops (a
+  full queue, more than 65,521 bytes) for the credit. Else the count of
+  the page does not become 0 again.
+- A send that is not possible is a counted drop. The reasons in the log
+  line are `short`, `version`, `type`, `size`, `port`, `credit`, `queue`,
+  `source`, `destination`, `no channel`, `table`, `address`, `state`,
+  `buffered`, `send` and `closed`. The log line is
+  `udp channel: dropped N messages (reason=count ...)`. A channel with
+  wrong settings gives the line
+  `udp channel of NODE: ordered=X maxRetransmits=Y, want false and 0: closed`.
+- In JavaScript, `RTCDataChannel.send` does not wait. When the buffer of
+  the browser is full, it throws. The page catches the exception and counts
+  a drop (`send`). The page relays datagrams between other nodes as work
+  of the control plane. No pod pays for this CPU time.
+
 #### 8.9.1 The udp channel
 
 These rules are the contract between the page and a node worker
