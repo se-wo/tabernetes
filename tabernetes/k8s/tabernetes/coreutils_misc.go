@@ -814,12 +814,11 @@ func ncCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ inter
 }
 
 // The result of busybox nc -u when its connected socket gets
-// connection-refused (UD9): the next send after a refused datagram fails.
-// W4.5a records the text and the exit code on runwasi; these are the values
-// until then.
+// connection-refused (UD9): no text and exit 0, as for no answer (W4.5a,
+// busybox of the node image on runwasi).
 const (
 	ncUDPRefusedText = ""
-	ncUDPRefusedCode = 1
+	ncUDPRefusedCode = 0
 )
 
 // ncUDPBuf is the largest read of stdin, one datagram (busybox: BIGSIZ).
@@ -878,6 +877,10 @@ func ncUDP(ctx context.Context, hc interp.HandlerContext, o map[string]string, r
 		return fail(hc, 1, "nc: %s", connError(err))
 	}
 	defer c.Close()
+	if has(o, "v") {
+		// busybox writes this line for UDP also when nothing listens.
+		fmt.Fprintf(hc.Stderr, "%s (%s) open\n", ip, net.JoinHostPort(ip, strconv.Itoa(port)))
+	}
 	return ncUDPCopy(ctx, hc, c, wait)
 }
 
@@ -934,6 +937,9 @@ func ncUDPCopy(ctx context.Context, hc interp.HandlerContext, c *udpConn, wait t
 		if refused.Load() {
 			if ncUDPRefusedText != "" {
 				fmt.Fprintln(hc.Stderr, ncUDPRefusedText)
+			}
+			if ncUDPRefusedCode == 0 {
+				return nil
 			}
 			return interp.ExitStatus(ncUDPRefusedCode)
 		}

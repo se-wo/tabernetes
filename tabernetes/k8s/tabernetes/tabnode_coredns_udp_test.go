@@ -436,6 +436,16 @@ func TestNcUDP(t *testing.T) {
 	if code != ncUDPRefusedCode || out != ncUDPRefusedText+strings.Repeat("\n", min(len(ncUDPRefusedText), 1)) {
 		t.Errorf("refused: %q (exit %d)", out, code)
 	}
+	// W4.5a: a second datagram that takes the error, and -v.
+	out, code = sh(t, "{ echo x; sleep 0.2; echo y; } | nc -u -v -w 1 "+ip+" 9")
+	if code != 0 || out != ip+" ("+ip+":9) open\n" {
+		t.Errorf("refused, -v: %q (exit %d)", out, code)
+	}
+	// One read of stdin is one datagram.
+	out, code = sh(t, "printf 'a\\nb\\n' | nc -u -w 0.3 "+ip+" 7")
+	if code != 0 || out != "a\nb\n" {
+		t.Errorf("two lines: %q (exit %d)", out, code)
+	}
 	if _, code = sh(t, "nc -u -w 1 nope.invalid 7"); code != 1 {
 		t.Errorf("bad address: exit %d", code)
 	}
