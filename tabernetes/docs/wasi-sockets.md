@@ -1739,6 +1739,15 @@ A node worker sends a credit after it takes datagrams from the channel
 Only the channel to a node worker has credits. A WebRTC channel has
 `bufferedAmount`.
 
+In pion, a write on a detached data channel can wait when
+`EnableDataChannelBlockWrite` is set: SCTP waits until the queue of the
+association (all channels of the peer connection) has space. Thus the node
+agent (`node/agent/udplink.go`) writes to the `udp` channel from one
+goroutine. A queue of 64 messages is in front of this goroutine. The agent
+drops a datagram when the queue is full. Each tab address that has flows
+has one socket on the Docker node. The agent closes this socket after the
+last flow of the address closed.
+
 #### 8.9.1 The udp channel
 
 These rules are the contract between the page and a node worker
