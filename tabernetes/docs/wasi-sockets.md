@@ -679,7 +679,7 @@ not a requirement.
 | --- | --- | --- |
 | IC1 | The `ping` built-in command must get an echo reply from a pod IP on the same tab node. NetworkPolicy must allow the echo request. | IC4 and IC5 give the examination. |
 | IC2 | The `ping` built-in command must get an echo reply from the node IP of the tab node. | |
-| IC3 | For an IP on another node, `ping` must give no echo reply and must show that ICMP between nodes is not available. | Out of scope. |
+| IC3 | For an IP on another node, `ping` must give no echo reply and must show that ICMP between nodes is not available. | Out of scope. The text is `ping: <ip> is on node <name>: ICMP between nodes is not available`. `ping` then exits with 1 at once and sends no echo request. An IP is on another node if it is the node IP of that node or is in its pod CIDR (`nodeOf`, `nodeOwns`). |
 | IC4 | The tab node must examine each echo request with the engine of kube-network-policies, with no protocol and with port 0. | Fact 15. |
 | IC5 | The tab node must examine the egress policy of the source and the ingress policy of the destination. | |
 | IC6 | A ClusterIP must give no echo reply. | The iptables mode of kube-proxy has the same result. The Docker nodes use it. |
@@ -2347,11 +2347,11 @@ The column "Nodes" gives the nodes for the test:
 | ND16, ND18 | A tab pod sends to a Docker pod and gets an answer. | tab, Docker |
 | ND17 | A policy on the Docker node denies a second tab pod. | tab, Docker (deferred) |
 | ND19 | A unit test of the agent makes sure that a flow without answers closes after 30 seconds. | Docker |
-| IC1, IC4, IC5 | `ping` to a pod IP gets echo replies. A policy without ICMP for the pod prevents them. | tab |
-| IC2 | `ping` to the node IP gets echo replies. | tab |
-| IC3 | `ping` to a pod on a Docker node shows that ICMP between nodes is not available. | tab, Docker |
-| IC6 | `ping` to a ClusterIP gets no echo reply. | tab |
-| IC7, IC8 | `README.md` contains the two texts. | none |
+| IC1, IC4, IC5 | `ping` to a pod IP gets echo replies. A policy without ICMP for the pod prevents them. Unit tests: `TestICMPPolicyEgressIngress`, `TestICMPPolicyPorts`. End-to-end test: `icmp.test.mjs`, also on a node worker. | tab, worker |
+| IC2 | `ping` to the node IP gets echo replies. A pod with a default-deny egress policy gets no echo reply. The unit test is `TestICMPNodeIP`. End-to-end test: `icmp.test.mjs`, also on a node worker. | tab, worker |
+| IC3 | `ping` to a pod on a Docker node shows that ICMP between nodes is not available. The unit test is `TestICMPOtherNode`: a pod IP and the node IP of a node worker, and a pod IP of a Docker node. End-to-end test: `icmp.test.mjs`, from the tab node to the node worker. The Docker step of W5.3 has the part on a Docker node. | tab, Docker |
+| IC6 | `ping` to a ClusterIP gets no echo reply. A pod IP of another node is not a pod of the tab node. The unit test is `TestICMPNoReply`. End-to-end test: `icmp.test.mjs`, also on a node worker. | tab, worker |
+| IC7, IC8 | `README.md` contains the two texts. The test is in `icmp.test.mjs`. The unit tests `TestICMPPolicyPorts` (IC7) and `TestICMPEachRequest` (IC8) examine the behavior. | none |
 | MS1 to MS6 | A unit test sends messages with a foreign socket ID, a size above the limit, `data` above the credit or a URL outside the cluster. The Go side drops each message and closes the socket or the request. A `bind` with a foreign IP gets `bound` with `address-not-bindable`, and the socket stays open (section 8.3.2). | tab |
 | MS2 to MS4 (TCP) | The unit tests are `TestWasiTCPForeignID` (MS2), `TestWasiTCPNotBindable` (MS3) and `TestWasiTCPDataAboveCredit` (MS4). A `data` or a `shutdown` for a socket without a connection, and a `data` after `shutdown` of the send direction, also fail the examination (MS6). | tab |
 | MS2 to MS4 (UDP) | The unit tests are `TestWasiUDPForeignID` (MS2), `TestWasiUDPNotBindable` (MS3) and `TestWasiUDPDatagramAboveCredit` (MS4). `data` and `shutdown` for a UDP socket also fail the examination (MS6, rule 1 of section 8.3.3). | tab |
