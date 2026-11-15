@@ -40,7 +40,8 @@ const clusterIP = async (name) => (await getJSON(`svc -n ${ns} ${name}`)).spec.c
 
 const udpClient = (target, env = {}) => ({ MODE: "udp-client", CONNECT: target, ...env });
 
-// nc sends text + "\n" from a busybox pod with nc -u and gives its output.
+// nc sends text + "\n" from a busybox pod with nc -u and gives its output:
+// "echo <text>\n" from the echo pod, then the exit code.
 const nc = async (bb, ip, port, text) => (await inPod(ns, bb, `echo ${text} | nc -u -w 2 ${ip} ${port}; echo rc=$?`)).out;
 
 // received counts the datagrams of n bytes that an echo pod got from ip.
@@ -120,7 +121,7 @@ forEachNode(["tab", "worker"], (kind) => {
     // The echo pod sees the pod IP of the client.
     assert.equal(await received(o.echo, 3, IP[p.client]), 2);
     // busybox nc -u too.
-    assert.equal(await nc(p.bb, IP[o.echo], 7, "busybox"), "busybox\nrc=0\n");
+    assert.equal(await nc(p.bb, IP[o.echo], 7, "busybox"), "echo busybox\nrc=0\n");
   });
 
   test(`UD7, UD15: a Service with its only endpoint on the other node answers from the ClusterIP on ${kind}`, async () => {
@@ -144,8 +145,11 @@ forEachNode(["tab", "worker"], (kind) => {
     const ip = IP[p.bb];
     const ask = async (svc, text) => {
       const cip = await clusterIP(svc);
-      const r = await inPod(ns, p.bb, `for i in 1 2 3 4; do echo ${text} | nc -u -w 2 ${cip} 7; done`);
-      assert.equal(r.out, `${text}\n`.repeat(4), `${svc}: ${r.out}`);
+      // The four nc run at the same time: a later nc would get the same
+      // first free port (UD3) and use the open flow of the one before (FL1).
+      const r = await inPod(ns, p.bb, `for i in 1 2 3 4; do echo ${text} | nc -u -w 2 ${cip} 7 & done; wait`);
+      // The shell can also print a line for each job.
+      assert.equal(r.out.split("\n").filter((l) => l === `echo ${text}`).length, 4, `${svc}: ${r.out}`);
     };
     // "fl11-local\n" has 11 bytes, "fl11-cluster\n" 13. Each nc is a new
     // flow, and round robin selects the endpoints in turn.
@@ -168,7 +172,7 @@ forEachNode(["tab", "worker"], (kind) => {
 
 test("Host traffic: nc -u in the terminal of the tab node gets the answer of the echo pod on the worker, from the node IP", async () => {
   const r = await run(`echo host | nc -u -w 2 ${IP[POD.worker.echo]} 7`);
-  assert.equal(r.out, "host\n");
+  assert.equal(r.out, "echo host\n");
   const node = await getJSON(`node ${TAB_NODE}`);
   const nodeIP = node.status.addresses.find((a) => a.type === "InternalIP").address;
   assert.ok(await received(POD.worker.echo, 5, nodeIP) >= 1, `no datagram from the node IP ${nodeIP}`);
@@ -188,7 +192,7 @@ test("nslookup in a pod on the worker asks the pod IP of CoreDNS on the tab node
 // The last test: the policy changes the flows of the echo pods.
 test("ND9: an ingress policy of the echo pods stops the datagrams from the other node, on tab and worker", async () => {
   const pairs = ["tab", "worker"].filter((k) => POD[k].node).map((k) => [POD[k].bb, POD[other[k]].echo]);
-  for (const [bb, echo] of pairs) assert.equal(await nc(bb, IP[echo], 7, "before"), "before\nrc=0\n", `${bb} to ${echo}`);
+  for (const [bb, echo] of pairs) assert.equal(await nc(bb, IP[echo], 7, "before"), "echo before\nrc=0\n", `${bb} to ${echo}`);
   await apply({
     apiVersion: "networking.k8s.io/v1",
     kind: "NetworkPolicy",
@@ -205,7 +209,7 @@ test("ND9: an ingress policy of the echo pods stops the datagrams from the other
   }
   await kubectl(`delete networkpolicy -n ${ns} ingress-deny`);
   for (const [bb, echo] of pairs) {
-    await waitFor(async () => (await nc(bb, IP[echo], 7, "after")) === "after\nrc=0\n",
+    await waitFor(async () => (await nc(bb, IP[echo], 7, "after")) === "echo after\nrc=0\n",
       { timeout: 20, interval: 1, what: `an answer of ${echo} to ${bb} after the policy` });
   }
 });
