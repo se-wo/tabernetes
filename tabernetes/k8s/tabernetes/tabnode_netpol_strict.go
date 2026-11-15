@@ -5,11 +5,14 @@ package main
 // real node the dataplane flushes their conntrack entries and the next packet
 // is decided again. Here every connection that the policy allowed is tracked,
 // and each change of policies, pods or namespaces decides them again; a
-// connection that is denied now is closed.
+// connection that is denied now is closed. The UDP flows of the service
+// proxy (tabnode_flows.go) are decided again in the same recheck; a flow
+// that is denied now is removed.
 
 import (
 	"context"
 	"net"
+	"net/netip"
 	"time"
 
 	"k8s.io/client-go/tools/cache"
@@ -59,8 +62,13 @@ func (p *netPolicy) watchChanges(ctx context.Context, informers ...cache.SharedI
 	}()
 }
 
-// recheck closes the open connections that the policy denies now.
+// recheck closes the open connections that the policy denies now, and
+// removes the UDP flows that it denies now (FL8, FL9). The next datagram of
+// a removed flow is a new flow and gets a new decision.
 func (p *netPolicy) recheck(ctx context.Context) {
+	if n := theTabNode; n != nil && n.net != nil && n.policy == p {
+		n.net.recheckFlows(func(src, dst netip.AddrPort) bool { return p.allowedUDP(ctx, src, dst) })
+	}
 	p.liveMu.Lock()
 	conns := make([]*liveConn, 0, len(p.live))
 	for lc := range p.live {

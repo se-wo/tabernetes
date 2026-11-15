@@ -1653,6 +1653,28 @@ for the strict mode and removes the flows that the policy denies now (FL8,
 FL9). The work of the translation and of `udpPolicy` is in `udpRoute`, so
 the UDP table charges it to the sender (AC1).
 
+The `init()` of `tabnode_netpol.go` sets `udpPolicy` to `allowedUDP` of the
+policy of the tab node. Without a tab node or a policy engine, it allows.
+`allowedUDP` gives the engine of kube-network-policies a packet with the
+protocol UDP, the client as the source and the endpoint as the destination.
+Thus a rule for a Service port uses the port of the endpoint, as for TCP. A
+port of the protocol TCP in a policy does not allow UDP, and a port of the
+protocol UDP does not allow TCP. The engine examines the egress of the
+client and the ingress of the endpoint in one call. Until the informers of
+the engine have synced, `allowedUDP` allows all datagrams, as for TCP. As
+`admitIngress` does for TCP, `allowedUDP` does not examine the host of the
+node: a source in 127.0.0.0/8, the node IP, and a datagram of a pod to its
+own pod IP.
+
+The strict mode (`tabnode_netpol_strict.go`) calls `recheckFlows` in the
+same recheck as the TCP connections. Each change of a pod, a namespace, a
+NetworkPolicy or a ClusterNetworkPolicy starts the recheck after
+`recheckDelay` (200 milliseconds). Thus a flow that a new policy denies is
+gone approximately 200 milliseconds after the informer gets the change. The
+next datagram of that flow is a new flow and gets a new examination. A
+denied datagram makes no flow, so the first datagram after a policy that
+allows it arrives (FL12).
+
 For a new datagram to a ClusterIP and a port of a UDP Service, the flow
 table does these steps:
 

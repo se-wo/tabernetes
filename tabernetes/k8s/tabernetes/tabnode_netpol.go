@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -122,25 +124,60 @@ func newNetPolicy(ctx context.Context, client kubernetes.Interface, npa npaclien
 // the informers have synced it allows everything, like the fail-open default
 // of kube-network-policies.
 func (p *netPolicy) allowed(ctx context.Context, src, dst *net.TCPAddr) bool {
+	return p.decide(ctx, v1.ProtocolTCP, src.IP, src.Port, dst.IP, dst.Port)
+}
+
+// allowedUDP reports whether the first datagram of a new UDP flow from src
+// to dst may pass (FL6). src is the client, dst the endpoint after the
+// Service translation. As for TCP (admitIngress), the host of the node is
+// not examined: a source in 127.0.0.0/8, the node IP, and a datagram of a
+// pod to its own pod IP. The engine evaluates the egress of the source and
+// the ingress of the destination in one call.
+func (p *netPolicy) allowedUDP(ctx context.Context, src, dst netip.AddrPort) bool {
+	s, d := src.Addr().Unmap(), dst.Addr().Unmap()
+	if s.IsLoopback() || s == d || s.String() == tabNodeIP {
+		return true
+	}
+	return p.decide(ctx, v1.ProtocolUDP, net.IP(s.AsSlice()), int(src.Port()), net.IP(d.AsSlice()), int(dst.Port()))
+}
+
+// decide asks the engine about the first packet of a connection or a flow
+// of the protocol proto. Until the informers have synced it allows
+// everything.
+func (p *netPolicy) decide(ctx context.Context, proto v1.Protocol, srcIP net.IP, srcPort int, dstIP net.IP, dstPort int) bool {
 	if p == nil || !p.engine.Ready() {
 		return true
 	}
 	family := v1.IPv4Protocol
-	if dst.IP.To4() == nil {
+	if dstIP.To4() == nil {
 		family = v1.IPv6Protocol
 	}
 	ok, err := p.engine.EvaluatePacket(ctx, &network.Packet{
 		Family:  family,
-		SrcIP:   src.IP,
-		DstIP:   dst.IP,
-		Proto:   v1.ProtocolTCP,
-		SrcPort: src.Port,
-		DstPort: dst.Port,
+		SrcIP:   srcIP,
+		DstIP:   dstIP,
+		Proto:   proto,
+		SrcPort: srcPort,
+		DstPort: dstPort,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "network policy: %s -> %s: %v\n", src, dst, err)
+		fmt.Fprintf(os.Stderr, "network policy: %s %s -> %s: %v\n", proto,
+			net.JoinHostPort(srcIP.String(), strconv.Itoa(srcPort)), net.JoinHostPort(dstIP.String(), strconv.Itoa(dstPort)), err)
 	}
 	return ok
+}
+
+// The hook of the flow table (tabnode_flows.go): the first datagram of each
+// new UDP flow asks the policy of this tab node. Without a tab node or a
+// policy engine, it allows.
+func init() {
+	udpPolicy = func(ctx context.Context, src, dst netip.AddrPort) bool {
+		n := theTabNode
+		if n == nil {
+			return true
+		}
+		return n.policy.allowedUDP(ctx, src, dst)
+	}
 }
 
 // podByIP is the pod with the IP ip, from the informers of the engine.
