@@ -198,7 +198,8 @@ func main() {
 			}
 		}
 	}
-	t := &tunnel{pc: pc}
+	// The node opens the udp channel; the page never does (udplink.go).
+	t := &tunnel{pc: pc, udp: openUDPLink(ctx, pc)}
 	for _, addr := range []string{"127.0.0.1:6443", apiserverIP + ":6443"} {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -298,7 +299,8 @@ func answerOffer(ctx context.Context, pc *webrtc.PeerConnection, sdp string) (st
 }
 
 type tunnel struct {
-	pc *webrtc.PeerConnection
+	pc  *webrtc.PeerConnection
+	udp *udpLink // the udp channel (udplink.go)
 }
 
 // serve forwards local TCP connections (kubelet, kube-proxy, pods) to the

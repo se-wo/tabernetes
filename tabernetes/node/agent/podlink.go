@@ -197,6 +197,7 @@ func (t *tunnel) servePodLinks(ctx context.Context) {
 		log.Printf("pod channel: pods of this node cannot reach tab pods: %v", err)
 		return
 	}
+	startUDPLinkNet(ctx, t.udp)
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error { return setTransparent(c) }}
 	l, err := lc.Listen(ctx, "tcp4", fmt.Sprintf("0.0.0.0:%d", tproxyPort))
 	if err != nil {
