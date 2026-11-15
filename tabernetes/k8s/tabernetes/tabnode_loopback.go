@@ -13,10 +13,11 @@ import (
 // pod IP and the port of such a listener. Each path that dials a pod IP
 // examines the table before it connects: only the pod itself may connect, as
 // on Linux. Each Go thread is its own tab node, so the table is a global of
-// the package. W4.1 adds UDP rows (UD20, UD21).
+// the package. The UDP table (tabnode_udp.go) adds rows with the protocol
+// "udp" (UD20, UD21).
 
 // loopbackKey is a row of the loopback table and of the table of the ports
-// in use (tabnode_dial.go): "tcp" (later "udp"), the pod IP and the port.
+// in use (tabnode_dial.go): "tcp" or "udp", the pod IP and the port.
 type loopbackKey struct {
 	proto string
 	ip    string
@@ -41,7 +42,7 @@ var (
 // port-forward: they dial without a local address (section 4.3).
 var loopbackIP = net.IPv4(127, 0, 0, 1)
 
-// addLoopback adds a row (proto "tcp", the pod IP, the port) to the loopback
+// addLoopback adds a row (proto "tcp" or "udp", the pod IP, the port) to the loopback
 // table of this tab node (section 8.11). release removes it; a second call
 // does nothing.
 func addLoopback(proto, ip string, port int) (release func()) {
