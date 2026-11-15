@@ -4,12 +4,14 @@
 # the CKAD checks of issue #56 on it. See ../docker-node-check.md.
 #
 # Steps, in this order when none are given:
-#   images join kubectl apply coredns storage metrics ingress sanity
+#   images join kubectl apply coredns storage metrics ingress sanity netpol
 #   wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave
 # Each step prints PASS, FAIL or SKIP with the reason, and writes what it ran
 # and saw to $OUT/<step>.txt. browser.mjs must already run. "leave" removes
 # the node, so it comes last. The steps wasi-* are in wasi-*.sh, with their
-# objects in wasi-*.yaml (../wasi-sockets.md, section 10.2).
+# objects in wasi-*.yaml (../wasi-sockets.md, section 10.2). The step netpol
+# (nfqueue on the node, phase 0 of ../networking-policy.md) is in netpol.sh,
+# with its objects in netpol.yaml.
 #
 # Env:
 #   IMAGE       the node image (default ghcr.io/se-wo/tabernetes:latest)
@@ -372,14 +374,14 @@ step_leave() {
 	docker rm -f "$N" >/dev/null 2>&1
 }
 
-for f in "$here"/wasi-*.sh; do
+for f in "$here"/netpol.sh "$here"/wasi-*.sh; do
 	# shellcheck source=/dev/null
 	. "$f"
 done
 
 steps=("$@")
 [ ${#steps[@]} -gt 0 ] || steps=(images join kubectl apply coredns storage metrics ingress sanity
-	wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave)
+	netpol wasi-images wasi-command wasi-proxy wasi-sockets wasi-udp leave)
 for step in "${steps[@]}"; do
 	: >"$OUT/$step.txt"
 	"step_${step//-/_}"

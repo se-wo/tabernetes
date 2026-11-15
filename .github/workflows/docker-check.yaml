@@ -2,8 +2,8 @@ name: Docker check
 
 # The Docker check of tabernetes/docs/docker-node-check.md on a GitHub runner:
 # a Docker node with the node image of this commit joins the page in headless
-# Chromium, a real kubectl reaches the page through "join --kubectl", then the
-# steps wasi-* run the tests of section 10.2 of
+# Chromium, a real kubectl reaches the page through "join --kubectl", the step
+# netpol tries kube-network-policies (nfqueue) on the node, then the steps wasi-* run the tests of section 10.2 of
 # tabernetes/docs/wasi-sockets.md on runwasi, and the node leaves with a bye.
 # The job fails when a step prints FAIL. On main, the job also pushes the test
 # images of tabernetes/wasm-images/images.txt (kind "component") to ghcr.io.
@@ -136,6 +136,13 @@ jobs:
           docs/docker-node-check/check.sh images join kubectl
           ! grep -q '^FAIL' "${OUT}/summary.txt"
 
+      # Phase 0 of tabernetes/docs/networking-policy.md: nfqueue on the node.
+      - name: NetworkPolicy
+        working-directory: tabernetes
+        run: |
+          docs/docker-node-check/check.sh netpol
+          ! grep -q '^FAIL' "${OUT}/summary.txt"
+
       - name: WASI steps
         working-directory: tabernetes
         run: |
@@ -157,7 +164,7 @@ jobs:
             echo '```text'
             cat "${OUT}/summary.txt" 2>/dev/null || echo "no summary"
             echo '```'
-            for f in "${OUT}"/kubectl.txt "${OUT}"/wasi-*.txt "${OUT}"/leave.txt; do
+            for f in "${OUT}"/kubectl.txt "${OUT}"/netpol.txt "${OUT}"/wasi-*.txt "${OUT}"/leave.txt; do
               [ -e "${f}" ] || continue
               echo "<details><summary>$(basename "${f}")</summary>"
               echo

@@ -141,7 +141,8 @@ func TestMiscNet(t *testing.T) {
 	if code != 1 || out != "nc: connect to 127.0.0.1 port 9999 (tcp) failed: Connection refused\n" {
 		t.Errorf("nc refused: %q %d", out, code)
 	}
-	out, code = sh(t, "ping -c 1 10.96.0.50")
+	// A lost echo request waits -W seconds for its reply (IC6).
+	out, code = sh(t, "ping -c 1 -W 0.05 10.96.0.50")
 	if code != 1 || !strings.Contains(out, "1 packets transmitted, 0 packets received, 100% packet loss") {
 		t.Errorf("ping service ip: %q %d", out, code)
 	}

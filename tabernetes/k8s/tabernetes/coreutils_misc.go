@@ -20,6 +20,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -1017,10 +1018,15 @@ func telnetCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ i
 	return nil
 }
 
-// ping has no ICMP to use in the wasm network, so it knocks with TCP: a host
-// is alive when a connection to port 80 is accepted, or refused by a host that
-// exists (a pod, the node, loopback). Cluster IPs of services never answer,
-// as on a real cluster where kube-proxy has no ICMP for them.
+// ping sends ICMP echo requests in the tab node (docs/wasi-sockets.md,
+// section 7.9). The tab node gets no IP packets, so the echo reply is a
+// function of the tab node (decision 11), and NetworkPolicy decides each
+// echo request (IC4, IC5, IC8). The source is the pod IP of the pod of ctx,
+// or the node IP for the terminal and hostNetwork pods. Replies come from
+// 127.0.0.0/8, the own pod IP (IC1), the node IP (IC2) and the pod IPs of
+// running pods on this tab node (IC1). A ClusterIP gives no reply, as with
+// the iptables mode of kube-proxy (IC6). An IP of another node gives no reply
+// and the text of IC3. Other IPs give no reply.
 // -c count, -W secs, -i secs, -q; it runs until ctx is done without -c.
 func pingCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	o, rest, err := opts("ping", args, "c:W:w:i:s:qvn46", nil)
@@ -1048,8 +1054,18 @@ func pingCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ int
 	if !ok {
 		return fail(hc, 1, "ping: bad address '%s'", host)
 	}
-	_, svc, _ := net.ParseCIDR(serviceCIDR)
-	parsed := net.ParseIP(ip)
+	dst := net.ParseIP(ip)
+	src := net.ParseIP(tabNodeIP)
+	if pe := procOf(ctx); pe != nil && pe.ip != "" {
+		src = net.ParseIP(pe.ip)
+	}
+	answers, node := echoTarget(src, dst)
+	if node != "" { // IC3
+		return fail(hc, 1, "ping: %s is on node %s: ICMP between nodes is not available", ip, node)
+	}
+	// 127.0.0.0/8 and the own pod IP always reply: a pod to itself is
+	// never blocked.
+	self := dst.IsLoopback() || dst.Equal(src)
 	fmt.Fprintf(hc.Stdout, "PING %s (%s): 56 data bytes\n", host, ip)
 	sent, got := 0, 0
 	var minRTT, maxRTT, sum time.Duration
@@ -1065,25 +1081,24 @@ func pingCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ int
 		}
 		sent++
 		start := time.Now()
-		if !svc.Contains(parsed) {
-			dctx, cancel := context.WithTimeout(ctx, wait)
-			c, err := dialCluster(dctx, "tcp", net.JoinHostPort(ip, "80"))
-			cancel()
-			if err == nil {
-				c.Close()
+		// IC8: one decision for each echo request, so a new policy
+		// applies to the next one.
+		if !answers || !self && !icmpPolicy(ctx, src, dst) {
+			select { // a lost echo request: wait for the reply as ping does
+			case <-ctx.Done():
+			case <-time.After(wait):
 			}
-			if err == nil || (refused(err) && hostExists(parsed)) {
-				rtt := time.Since(start)
-				got++
-				sum += rtt
-				if got == 1 || rtt < minRTT {
-					minRTT = rtt
-				}
-				maxRTT = max(maxRTT, rtt)
-				if !has(o, "q") {
-					fmt.Fprintf(hc.Stdout, "64 bytes from %s: seq=%d ttl=64 time=%.3f ms\n", ip, seq, float64(rtt)/1e6)
-				}
-			}
+			continue
+		}
+		rtt := time.Since(start)
+		got++
+		sum += rtt
+		if got == 1 || rtt < minRTT {
+			minRTT = rtt
+		}
+		maxRTT = max(maxRTT, rtt)
+		if !has(o, "q") {
+			fmt.Fprintf(hc.Stdout, "64 bytes from %s: seq=%d ttl=64 time=%.3f ms\n", ip, seq, float64(rtt)/1e6)
 		}
 	}
 	fmt.Fprintf(hc.Stdout, "\n--- %s ping statistics ---\n%d packets transmitted, %d packets received, %d%% packet loss\n", host, sent, got, 100-100*got/max(sent, 1))
@@ -1095,13 +1110,48 @@ func pingCmd(ctx context.Context, hc interp.HandlerContext, args []string, _ int
 	return interp.ExitStatus(1)
 }
 
-// hostExists tells a refused connection of a host from the refusal the
-// in-process network gives for an address nobody has.
+// echoTarget tells how an echo request from src to dst ends. answers is
+// true if a host on this tab node can give the echo reply (hostExists):
+// NetworkPolicy then decides each request. node is the name of another node
+// that has dst as its node IP or in its pod CIDR (IC3). A ClusterIP has no
+// reply (IC6).
+func echoTarget(src, dst net.IP) (answers bool, node string) {
+	if dst.IsLoopback() || dst.Equal(src) || hostExists(dst) {
+		return true, ""
+	}
+	if _, svc, _ := net.ParseCIDR(serviceCIDR); svc.Contains(dst) {
+		return false, ""
+	}
+	if n := theTabNode; n != nil && n.policy != nil {
+		if name := n.policy.nodeOf(dst); name != "" && name != tabNodeName {
+			return false, name
+		}
+		if list, err := n.policy.nodes.List(labels.Everything()); err == nil {
+			for _, nd := range list {
+				if nd.Name != tabNodeName && n.policy.nodeOwns(nd.Name, dst) {
+					return false, nd.Name
+				}
+			}
+		}
+	}
+	return false, ""
+}
+
+// hostExists reports whether ip is a host on this tab node that gives echo
+// replies: 127.0.0.0/8, the node IP, or the pod IP of a running pod of this
+// tab node (isTabPodIP and an allocated IP). The informers of the policy
+// engine also know the pods of other nodes, so podByIP is not used.
 func hostExists(ip net.IP) bool {
 	if ip.IsLoopback() || ip.String() == tabNodeIP {
 		return true
 	}
-	return theTabNode != nil && theTabNode.policy.podByIP(ip.String()) != nil
+	n := theTabNode
+	if n == nil || !n.isTabPodIP(ip.String()) {
+		return false
+	}
+	n.ipMu.Lock()
+	defer n.ipMu.Unlock()
+	return n.usedIPs[ip.String()]
 }
 
 // ---- which ----
