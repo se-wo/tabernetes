@@ -77,6 +77,20 @@ udp_module() {
 	docker exec "$N" sh -c 'grep -q "^$1 " /proc/modules || grep -q "/$1\.ko" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null || [ -d "/sys/module/$1" ]' sh "$1"
 }
 
+# udp_diagnose <tab pod IP>: records what the page, the agent and the kernel
+# of the node show for UDP from node-1 to a tab pod (after a FAIL of ND13).
+udp_diagnose() {
+	local f="${CONSOLE_LOG:-browser-console.log}" out ns
+	out="$(udp_exec "echo diag | nc -u -w 2 $1 7; echo rc=\$?")"
+	udp_fact "diagnose: busybox nc -u from node-1 to $1:7: $(udp_lines "$out")"
+	udp_fact "diagnose: page console: $(udp_lines "$(grep -ai 'udp' "$f" 2>/dev/null | tail -8)")"
+	udp_fact "diagnose: agent: $(udp_lines "$(docker logs "$N" 2>&1 | grep -aiE 'udp|pod channel' | tail -8)")"
+	# shellcheck disable=SC2016,SC2086 # for the shell in the node; crictl_ns is a list of flags
+	for ns in "" "nsenter $crictl_ns"; do
+		udp_fact "diagnose: node ${ns:-container}: $(udp_lines "$(docker exec "$N" $ns sh -c 'nft list table inet tabernetes_podlink 2>&1 | grep -E "udp|drop|notrack"; ip route get '"$1"' 2>&1; ip -br link 2>&1 | grep tabpods; (ss -uanp 2>/dev/null || cat /proc/net/udp) | grep -iE "15001|3A97|'"$1"'" | head -5; conntrack -L -p udp 2>/dev/null | grep '"$1"' | head -3' 2>&1)")"
+	done
+}
+
 # udp_nodes: phase 5, UDP between the tab node and node-1 (package W5.3).
 # One PASS, FAIL or SKIP line for each row of section 10.3 with "Docker":
 #
@@ -184,6 +198,7 @@ EOF"
 	grep -q '^error ' <<<"$a$b" && ok=1
 	grep -q "^udp 4 bytes from $dc:" <<<"$s" || ok=1
 	check "ND13, ND14, ND15" "$ok" "the pod $dc on node-1 to the tab pod $tabip:7: $(udp_lines "$(grep -E '^(answer|no answer|error)' <<<"$a")"); to its Service $tsvc:7: $(udp_lines "$(grep -E '^(answer|no answer|error)' <<<"$b")") (want the answers from $tabip:7 and $tsvc:7); the tab pod sees '$(grep "bytes from $dc:" <<<"$s" | head -1)'"
+	[ "$ok" = 0 ] || udp_diagnose "$tabip"
 
 	# ND16, ND18: the tab pod to the pod on node-1 and to its Service; busybox
 	# nc -u too.
