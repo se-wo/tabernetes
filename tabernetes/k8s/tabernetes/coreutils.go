@@ -1808,10 +1808,10 @@ const nslookupNoServer = ";; connection timed out; no servers could be reached"
 
 // nslookup answers like the nslookup of busybox. It sends DNS queries to
 // the server of the second argument over UDP, or to the default server, the
-// ClusterIP of kube-dns: over UDP with a ready endpoint of kube-dns on this
-// tab node, else over TCP until phase 5 (UD19, kubeDNSProto). An answer with
-// the TC bit makes it ask again over TCP (UD22); -vc uses TCP at once.
-// Without any endpoint of kube-dns, it answers from the service proxy
+// ClusterIP of kube-dns: over UDP with a ready endpoint of kube-dns on any
+// node (UD19, kubeDNSProto). An answer with the TC bit makes it ask again
+// over TCP (UD22); -vc uses TCP at once. Without a ready endpoint of
+// kube-dns for 53/UDP, it answers from the service proxy
 // (tabnode_net.go), as CoreDNS of the tab node does.
 func nslookup(ctx context.Context, hc interp.HandlerContext, args []string, _ interp.ExecHandlerFunc) error {
 	var names []string

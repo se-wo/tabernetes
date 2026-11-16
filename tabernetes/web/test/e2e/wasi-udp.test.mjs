@@ -26,8 +26,8 @@
 //               web/test/udp.test.mjs (W4.4b). The pod worker part of UD14:
 //               web/test/udp.test.mjs.
 //
-// UDP between nodes is phase 5 (W5.1b, wasi-udp-nodes.test.mjs): no test has a client on the tab and a
-// server on the node worker. Each running command component uses one Wasm
+// UDP between nodes (phase 5) is in wasi-udp-nodes.test.mjs: no test of
+// this file has a client on the tab and a server on the node worker. Each running command component uses one Wasm
 // memory of the tab (section 14): the pods share one namespace, the clients
 // are containers that exit, and the namespace is deleted after the last
 // test.
@@ -147,10 +147,14 @@ const TAB = {
     "rule7 connected to pod-ip:7224 with a socket on 127.0.0.1:7224: send ok, send connection-refused":
       "rule7 connected to pod-ip:7224 with a socket on 127.0.0.1:7224: send ok, send ok",
     // "A send of a connected UDP socket at once after a send that the tab
-    // node refuses": the error message of the Go side comes after the
-    // second send, so a later send gets the error.
-    "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, connection-refused, empty":
+    // node refuses": the error message of the Go side usually comes after
+    // the second send, so a later send gets the error. If it comes before,
+    // the tab node gives the value of runwasi. An array lists each value
+    // that passes.
+    "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, connection-refused, empty": [
       "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, ok, empty",
+      "rule7 connected send, receive, receive, send, send, send, receive: ok, empty, empty, connection-refused, ok, connection-refused, empty",
+    ],
     // "A UDP socket on 0.0.0.0 that sends to 127.0.0.1 of its own pod": the
     // answers come from the pod IP. The server on 0.0.0.0 sees the pod IP too.
     "addr 0.0.0.0:0 sends to 127.0.0.1:7240 (server on 0.0.0.0:7240): ok, the server sees 127.0.0.1:ephemeral, the answer comes from 127.0.0.1:7240":
@@ -296,8 +300,8 @@ test("UD1, UD16, UD17, UD18: kube-dns has 53/UDP and 53/TCP, nslookup gets answe
   const dns = await getJSON("svc -n kube-system kube-dns");
   const ports = dns.spec.ports.filter((p) => p.port === 53).map((p) => p.protocol ?? "TCP").sort();
   assert.deepEqual(ports, ["TCP", "UDP"]);
-  // CoreDNS runs on the tab node: else nslookup uses TCP (section 11) and
-  // the datagrams to kube-dns go to another node (phase 5).
+  // CoreDNS runs on the tab node: else the datagrams to kube-dns go to
+  // another node (phase 5), and this test is about the tab node.
   const cd = (await getJSON("pods -n kube-system -l k8s-app=kube-dns")).items;
   assert.ok(cd.some((p) => p.spec.nodeName === TAB_NODE && podReady(p)), `CoreDNS pods: ${cd.map((p) => p.spec.nodeName).join(", ")}`);
   const k8s = await clusterIP("default", "kubernetes");
@@ -408,8 +412,8 @@ test("UD14, rules 2 to 7: the facts of udp-errors are the values of runwasi on t
     .map((l) => l.replaceAll(`${ip}:ephemeral`, "pod-ip:ephemeral").replaceAll(`${ip}:`, "pod-ip:"));
   const missing = [];
   for (const l of RUNWASI.errors) {
-    const want = TAB.errors[l] ?? l;
-    if (!out.includes(want)) missing.push(want);
+    const want = [TAB.errors[l] ?? l].flat();
+    if (!want.some((w) => out.includes(w))) missing.push(want.join("\n  or "));
     if (TAB.errors[l]) t.diagnostic(`section 11: runwasi "${l}"`);
   }
   assert.deepEqual(missing, [], `the lines of the tab node:\n${out.join("\n")}`);

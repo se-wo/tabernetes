@@ -15,6 +15,12 @@ on:
       - tabernetes/k8s/tabernetes/tabnode_wasi*.go
       - tabernetes/k8s/tabernetes/kubectlaccess.go
       - tabernetes/k8s/tabernetes/tunnel.go
+      - tabernetes/k8s/tabernetes/podlink*.go
+      - tabernetes/k8s/tabernetes/udplink_hooks.go
+      - tabernetes/k8s/tabernetes/tabnode_udp*.go
+      - tabernetes/k8s/tabernetes/tabnode_flows.go
+      - tabernetes/k8s/tabernetes/tabnode_coredns.go
+      - tabernetes/k8s/tabernetes/coreutils.go
       - tabernetes/web/src/join.js
       - tabernetes/web/src/wasi*.js
       - tabernetes/web/src/sockets.js

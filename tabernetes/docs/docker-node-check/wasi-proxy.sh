@@ -29,7 +29,9 @@
 #   PX30            the status codes 204, 304 and 599
 #   PX31            the header names of a response, HTTP/1.1 and HTTP/1.0
 #   CR1             a client request to a Service by its name
-#   CR1, CR8        SKIP: NetworkPolicy on a Docker node (deferred)
+#   CR1, CR8        a NetworkPolicy on node-1 denies the client request
+#                   (deferred test; SKIP with a host kernel without
+#                   nft_queue); the last check of the step
 #   CR3, CR4, CR5   no redirects, no added headers, no decompression
 #   CR6             a command component with an import of wasi:http
 #
@@ -254,8 +256,6 @@ step_wasi_proxy() {
 	out="$(px_get 'wget -qO- -T 30 wasi-proxy:8080/fetch/wasi-proxy-cr:8000/cr1')"
 	check CR1 "$(grep -q '^status 302 ' <<<"$out" && echo 0 || echo 1)" "a client request to wasi-proxy-cr:8000 gives '$out' (want status 302)"
 
-	result SKIP "CR1, CR8: NetworkPolicy on a Docker node is a deferred test (nfqueue, decision 16)"
-
 	# CR3, CR4, CR5
 	out="$(px_get 'wget -qO- -T 30 wasi-proxy:8080/fetchfull/wasi-proxy-cr:8000/cr345')"
 	a="$(tab run 'kubectl logs wasi-proxy-cr' 2>&1 | tr -d '\r')"
@@ -274,6 +274,40 @@ step_wasi_proxy() {
 	s="$(pod_state_proxy wasi-cmdhttp)"
 	k logs wasi-cmdhttp
 	check CR6 "$([ "$s" = "Failed 0 137 Error" ] && echo 0 || echo 1)" "a command component with wasi:http gives '$s' (want Failed 0 137 Error)"
+
+	# CR1, CR8 (deferred test, decision 16): a NetworkPolicy that denies the
+	# ingress of wasi-proxy-cr. kube-network-policies on node-1 drops the SYN
+	# of the client request (nfqueue). Phase 0 gives connection-refused after
+	# 134 seconds; the step waits at most 10 seconds for the deny and does
+	# not wait for the error (wasi-sockets-plan.md, rule 5). Last in the
+	# step: CR3 to CR5 use wasi-proxy-cr.
+	if ! udp_module nft_queue || ! udp_module nfnetlink_queue; then
+		result SKIP "CR1, CR8: host kernel without nft_queue"
+	else
+		run tab run "kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wasi-proxy-cr-deny}
+spec:
+  podSelector: {matchLabels: {app: wasi-proxy-cr}}
+  policyTypes: [Ingress]
+EOF"
+		local start=$SECONDS t=""
+		while ((SECONDS - start < 10)); do
+			out="$(px_get 'wget -qO- -T 3 wasi-proxy:8080/fetch/wasi-proxy-cr:8000/cr8 2>&1')"
+			if ! grep -q '^status ' <<<"$out"; then
+				t=$((SECONDS - start))
+				break
+			fi
+			sleep 1
+		done
+		a="$(px_get 'wget -qO- -T 3 wasi-proxy:8080/fetch/wasi-proxy-cr:8000/cr8 2>&1')"
+		ok=0
+		[ -n "$t" ] || ok=1
+		grep -q '^status ' <<<"$a" && ok=1
+		check "CR1, CR8" "$ok" "a client request to wasi-proxy-cr:8000 after the NetworkPolicy wasi-proxy-cr-deny: no response after ${t:-more than 10} s, then '$(tr '\n' ' ' <<<"$a")' (want no status within 3 s; runwasi gives connection-refused after 134 s, phase 0)"
+		k delete networkpolicy wasi-proxy-cr-deny
+	fi
 
 	k get pods -l wasi-check=proxy -o wide
 	k delete pods -l wasi-check=proxy --wait=false

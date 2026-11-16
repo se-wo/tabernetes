@@ -234,7 +234,10 @@ A container is not a process:
   timeouts of conntrack (`tabnode_flows.go`), with `sessionAffinity`,
   `internalTrafficPolicy` and the NetworkPolicy of the pod; the strict mode
   removes the flows that a new policy denies. A socket on `127.0.0.1`
-  accepts only its own pod. UDP to other nodes comes in phase 5. The browser
+  accepts only its own pod. UDP goes between all nodes (phase 5): the page
+  relays each datagram on a channel `udp` of each node worker and Docker
+  node, and on a Docker node the agent sends it with a transparent socket
+  of the tab pod address (`podlink_udp.go`, `node/agent/udplink*.go`). The browser
   cannot pull from ghcr.io or Docker Hub (no CORS headers), so the page ships
   an OCI mirror (`wasm-images/`, `images.txt`) next to it; other registries
   are tried over HTTPS. On a Docker node the same manifest runs with runwasi.
@@ -387,14 +390,14 @@ directly (`k8s/patch.go`), so its service and pod proxy work, too.
 TCP on port 53 of `kube-dns` from the same service proxy. An answer over UDP
 of more than 512 bytes gets the TC bit without records, and the client asks
 again over TCP. `nslookup` (`-vc` for TCP) and `nc -u` in pods and in the
-terminal use the UDP table of the tab node. Until phase 5, `nslookup` to the
-default server uses TCP when `kube-dns` has no ready endpoint on this tab
-node, and the service proxy answers on a cluster without CoreDNS. `hosts` entries and
+terminal use the UDP table of the tab node. `nslookup` to the default server
+uses UDP to CoreDNS on any node, also on a Docker node; on a cluster without
+a ready CoreDNS the service proxy answers (busybox would time out). `hosts` entries and
 `rewrite name` rules of `kubectl edit cm coredns -n kube-system` apply to the
 names of the tab at once. `forward` and the other plugins are ignored: the
-browser has no DNS. Pods on a Docker node need UDP to CoreDNS, and they
-cannot reach a tab pod over UDP until phase 5, so once a Docker node is
-Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
+browser has no DNS. Pods on a Docker node can reach the CoreDNS of a tab
+node over UDP (phase 5), but the real CoreDNS is closer to them: once a
+Docker node is Ready, each tab node evicts its CoreDNS pods (the Eviction API, at most every
 two minutes) and the real CoreDNS runs there.
 
 ### Persistent volumes
@@ -696,8 +699,10 @@ k exec client -- /agnhost connect web:80 --timeout=2s   # TIMEOUT
 
 UDP of tab pods works like on a real node: the engine decides the first
 datagram of a flow, a denied datagram makes no flow, and the strict mode
-removes the open flows that a new policy denies. Not covered: NetworkPolicy
-for UDP of components on Docker nodes (not tested yet), rules on domain names
+removes the open flows that a new policy denies. Between nodes, the source
+node decides the egress and the destination node the ingress; on a Docker
+node kube-network-policies decides, also for the datagrams of tab pods (the
+Docker check tests it on the GitHub runner). Not covered: rules on domain names
 (egress to the internet goes through `fetch()`, without an IP), and an exact
 `except` of `ipBlock` for internet egress.
 
@@ -927,17 +932,14 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 - `kubectl exec`, `logs` and `port-forward` go through the WebRTC tunnel to
   the kubelet of a Docker node. The apiserver cannot reach pod IPs of a
   Docker node, so service proxy URLs work only for pods on the tab node.
-- Pods on Docker nodes reach pods on the tab nodes over TCP only, through
-  the agent (TPROXY). If the tab node denies such a connection, the pod sees
-  it open and then end, not a timeout.
+- Pods on Docker nodes reach pods on the tab nodes over TCP and UDP, through
+  the agent (TPROXY). If the tab node denies such a TCP connection, the pod
+  sees it open and then end, not a timeout.
 - The tab node is not a sandbox: all its containers share the tab, its
   memory and its in-memory file system. Native containers only look like
   their images; nothing of a real image runs. The TTY of a tab node container
   has canonical mode only: full screen programs in a container (vi, top)
-  see lines, not keys. UDP goes only between the pods of one tab node until
-  phase 5: the tab node drops datagrams to pods on other nodes, also to
-  Services with only such endpoints, and Docker pods cannot reach the CoreDNS
-  of a tab node over UDP. A shell loop
+  see lines, not keys. A shell loop
   without any command (`for ((;;)); do x=1; done`) still freezes the tab.
 - WASI preview 2 components need JavaScript Promise Integration (Chrome and
   Edge 137, Firefox 153, Safari 27 or newer); without it the pod gets
@@ -979,15 +981,17 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
   - ICMP (phase 6): `ping` gets echo replies only on one tab node, and the
     tab node examines each echo request. On a Docker node, ICMP goes between
     all nodes, and only the first echo request of a flow is examined.
-  - Until phase 5, the tab node drops datagrams to pods on other nodes and
-    to Services with only such endpoints, without `connection-refused`.
-    NetworkPolicy for UDP of components is not tested on a Docker node yet.
+  - UDP between nodes has no `connection-refused`: a datagram to a port
+    without a socket on another node is only lost. UDP from a tab pod to a
+    Service endpoint on the node IP of a Docker node (a `hostNetwork` pod)
+    is lost: the agent drops destinations outside its pod CIDR. On runwasi
+    both work.
   - A listener that does not accept keeps its backlog and up to 128 more
     connections (the queue of the in-process network) before a client
     waits; Linux keeps the backlog plus one.
   - A NetworkPolicy that denies a connection gives `timeout` after 127
-    seconds. NetworkPolicy for TCP of components is not tested on a Docker
-    node yet.
+    seconds. On a Docker node, the Docker check tests that such a
+    connection gets no answer within 10 seconds.
   - A proxy component runs a maximum of 16 instances at the same time for
     each container (runwasi has no maximum), all on one thread: an instance
     in a loop of CPU work stops the other instances. Request and response

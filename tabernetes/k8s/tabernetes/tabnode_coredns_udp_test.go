@@ -342,8 +342,8 @@ func TestNslookupNoServer(t *testing.T) {
 }
 
 // UD19, section 8.7: the default server (the ClusterIP of kube-dns) uses UDP
-// with a ready endpoint of kube-dns on this tab node, else TCP to the same
-// ClusterIP, and without any endpoint the answer of the service proxy.
+// with a ready endpoint of kube-dns on any node (phase 5: also on a Docker
+// node), and without a ready endpoint the answer of the service proxy.
 func TestNslookupDefaultServer(t *testing.T) {
 	w := newDNSWorld(t, kubeDNSService())
 	clusterIP := netip.MustParseAddrPort("10.96.0.10:53")
@@ -377,7 +377,8 @@ func TestNslookupDefaultServer(t *testing.T) {
 		{"no endpoint", nil, "", 0, 0},
 		{"a local endpoint", dnsSlice("kube-system", "kube-dns", tabNodeName, true, []string{"dns/UDP", "dns-tcp/TCP"}, w.ip), "udp", 1, 0},
 		{"a local endpoint that is not ready", dnsSlice("kube-system", "kube-dns", tabNodeName, false, []string{"dns/UDP", "dns-tcp/TCP"}, w.ip), "", 0, 0},
-		{"an endpoint on a Docker node", dnsSlice("kube-system", "kube-dns", "node-1", true, []string{"dns/UDP", "dns-tcp/TCP"}, "10.245.0.7"), "tcp", 0, 1},
+		{"an endpoint on a Docker node", dnsSlice("kube-system", "kube-dns", "node-1", true, []string{"dns/UDP", "dns-tcp/TCP"}, "10.245.0.7"), "udp", 1, 0},
+		{"an endpoint on a Docker node that is not ready", dnsSlice("kube-system", "kube-dns", "node-1", false, []string{"dns/UDP", "dns-tcp/TCP"}, "10.245.0.7"), "", 0, 0},
 	} {
 		w.s.slices.Replace(nil, "")
 		if tc.slice != nil {
