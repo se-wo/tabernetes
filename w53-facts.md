@@ -60,3 +60,8 @@ pion webrtc v4.2.26 / sctp v1.12.0: with DetachDataChannels + EnableDataChannelB
 - Page drop log (<= every 10 s): "udp channel: dropped N messages (reason=count ...)"; reasons: short, version, type, size, port, credit, queue, source, destination, no channel, table, address, state, buffered, send, closed.
 - Relaying between other nodes is control-plane CPU, not charged to a pod.
 - Local test-web on Node 22 has 27 failures (no WebAssembly.promising), same on main; CI is green.
+
+## W4.5a final (PR #91, late report) — for W5.3
+- docs/docker-node-check/wasi-udp.sh has one SKIP line for ND ("phase 5, package W5.3"); add the ND checks there with the same helpers (udp_exec, udp_fact, udp_refused, check).
+- Server pods stay ready: the echo pod's own client runs for 60 s, and the headless Services use publishNotReadyAddresses. UD13 uses the FQDN (/etc/hosts maps the short pod name to the pod IP).
+- Echo modes and output lines: header of wasm-images/rust/echo/src/main.rs.
