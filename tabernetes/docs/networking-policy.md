@@ -649,6 +649,15 @@ Where the code differs from the design above:
   with the real destination. What arrives at `tabpods1` is not tracked by
   conntrack a second time; after DNAT the second entry would collide with
   the first.
+- `tabpods1` has the address 169.254.77.2/32 with scope link. The node
+  does not send from it. The reverse path filter needs it: in the loose
+  mode (`rp_filter` 2, the default of Ubuntu and of the GitHub runner) the
+  kernel drops each packet that arrives at an interface without an IPv4
+  address when the route back to the source uses a different interface.
+  The kernel takes the higher value of `all` and of the interface, thus
+  `rp_filter` 0 on `tabpods1` alone does not prevent this. Without the
+  address, path H8 (TCP and UDP) did not work on such a node: the TPROXY
+  rule accepted the packet, then the input route dropped it.
 - A second rule (`socket transparent 1`) delivers the answers to transparent
   dials whose source is outside the pod network: host traffic of a tab node
   in a Web Worker, which comes from its node IP.
