@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"net/netip"
-	"slices"
 	"sync"
 	"time"
 
@@ -169,14 +168,10 @@ func (s *serviceProxy) translateUDP(src, dst netip.AddrPort) (netip.AddrPort, bo
 	if len(eps) == 0 {
 		return dst, true, udpRefuse // UD10, UD11, fact 17
 	}
-	// Until phase 5, only the endpoints on this tab node (section 8.8). A
-	// Service with only endpoints on other nodes drops the datagram without
-	// an error. W5.1 sends these datagrams on the udp channel at this point.
-	local := slices.DeleteFunc(slices.Clone(eps), func(e endpoint) bool { return e.remote })
-	if len(local) == 0 {
-		return dst, true, udpDrop
-	}
-	e := local[s.pick(*t, src.Addr().String(), local)] // FL10, FL11
+	// All ready endpoints, also on other nodes (section 8.8): the UDP table
+	// gives a datagram to a remote endpoint to udpToNode. endpoints keeps
+	// only the endpoints on this node for internalTrafficPolicy Local.
+	e := eps[s.pick(*t, src.Addr().String(), eps)] // FL10, FL11
 	ip, err := netip.ParseAddr(e.ip)
 	if err != nil {
 		return dst, true, udpDrop

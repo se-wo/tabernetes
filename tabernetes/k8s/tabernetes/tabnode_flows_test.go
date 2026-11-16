@@ -232,24 +232,6 @@ func TestUDPServiceNoPort(t *testing.T) {
 	}
 }
 
-// Until phase 5: a Service with only endpoints on other nodes drops the
-// datagram without an error (section 8.8).
-func TestUDPServiceRemoteEndpoints(t *testing.T) {
-	es := udpSlice("far", udpEPPort("dns", 53))
-	es.Endpoints = []discoveryv1.Endpoint{{Addresses: []string{"10.244.1.5"}, NodeName: ptr.To("node-1"), Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}}}
-	s := flowNode(t, []*v1.Service{udpService("far", "10.96.88.13", udpSvcPort("dns", 53))}, es)
-	c := udpDial(t, podCtx(t, nextLoopbackIP()), "10.96.88.13:53")
-	for range 2 {
-		if _, err := c.Write([]byte("q")); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	udpNothing(t, c)
-	if n := s.flowCount(); n != 0 {
-		t.Errorf("%d flows", n)
-	}
-}
-
 // UD13: a pod sends to its own Service and gets the datagram. The answer
 // comes from the ClusterIP.
 func TestUDPServiceOwnPod(t *testing.T) {
@@ -475,9 +457,9 @@ func TestUDPFlowAffinity(t *testing.T) {
 	}
 }
 
-// FL11: internalTrafficPolicy Local. Until phase 5 the translation selects
-// only endpoints on this node anyway. The flag stays on the target for
-// phase 5, and the local endpoint gets the datagram.
+// FL11: internalTrafficPolicy Local. The local endpoint gets each
+// datagram, never the endpoint on node-1 (TestUDPNodeLocalPolicy checks
+// that the remote endpoint gets datagrams without Local).
 func TestUDPFlowLocalPolicy(t *testing.T) {
 	eip := nextLoopbackIP()
 	svc := udpService("local", "10.96.88.20", udpSvcPort("u", 53))
