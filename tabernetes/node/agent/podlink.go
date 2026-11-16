@@ -76,8 +76,9 @@ const (
 
 // podLinkRules hands what arrives at podLinkIn to the agent: TCP goes to the
 // TPROXY listener (an established socket wins over the listener in TPROXY's
-// lookup), everything else is dropped, because only TCP has a way into the
-// tab and the route would send it around again.
+// lookup), UDP to the TPROXY socket of udplink_net.go, everything else is
+// dropped, because only TCP and UDP have a way into the tab and the route
+// would send it around again.
 //
 // These packets have passed the node once already, on their way into the
 // veth pair, where conntrack and the DNAT of kube-proxy saw them; a cluster
@@ -88,6 +89,11 @@ const (
 // transparent dials: from a tab pod they would take the veth pair as well,
 // from the node IP of a tab node in a Web Worker (host traffic of that
 // node) nothing else brings them back. It needs nft_socket in the kernel.
+//
+// UDP (udplink_net.go) has the same two rules. The UDP socket of a tab
+// address is bound but not connected, and tproxy finds only connected UDP
+// sockets: so with socketRule a datagram to a tab address with an open
+// socket goes to that socket, without it to the TPROXY socket of the agent.
 const podLinkRulesFormat = `table inet tabernetes_podlink
 delete table inet tabernetes_podlink
 table inet tabernetes_podlink {
@@ -98,6 +104,7 @@ table inet tabernetes_podlink {
 	chain prerouting {
 		type filter hook prerouting priority mangle; policy accept;
 %[4]s		iifname "%[1]s" meta nfproto ipv4 meta l4proto tcp tproxy ip to :%[2]d meta mark set %#[3]x accept
+		iifname "%[1]s" meta nfproto ipv4 meta l4proto udp tproxy ip to :%[2]d meta mark set %#[3]x accept
 		iifname "%[1]s" drop
 	}
 }
@@ -106,7 +113,9 @@ table inet tabernetes_podlink {
 func podLinkRules(socketRule bool) string {
 	rule := ""
 	if socketRule {
-		rule = fmt.Sprintf("\t\tmeta l4proto tcp socket transparent 1 meta mark set %#x accept\n", tproxyMark)
+		for _, proto := range []string{"tcp", "udp"} {
+			rule += fmt.Sprintf("\t\tmeta l4proto %s socket transparent 1 meta mark set %#x accept\n", proto, tproxyMark)
+		}
 	}
 	return fmt.Sprintf(podLinkRulesFormat, podLinkIn, tproxyPort, tproxyMark, rule)
 }
@@ -346,7 +355,7 @@ func dialTransparent(ctx context.Context, src net.IP, dst *net.TCPAddr) (net.Con
 	if src4 == nil || dst4 == nil {
 		return nil, errors.New("IPv4 only")
 	}
-	fd, err := socketAs(podLinkUID)
+	fd, err := socketAs(podLinkUID, syscall.SOCK_STREAM)
 	if err != nil {
 		return nil, err
 	}
@@ -401,10 +410,11 @@ func dialTransparent(ctx context.Context, src net.IP, dst *net.TCPAddr) (net.Con
 	return net.FileConn(f)
 }
 
-// socketAs creates a TCP socket owned by uid: the kernel takes the owner of
+// socketAs creates an IPv4 socket of type typ (syscall.SOCK_STREAM or
+// syscall.SOCK_DGRAM) owned by uid: the kernel takes the owner of
 // a socket from the file system uid of the thread that creates it. The
 // thread changes its fsuid and back; a thread that cannot go back ends.
-func socketAs(uid int) (int, error) {
+func socketAs(uid, typ int) (int, error) {
 	type result struct {
 		fd  int
 		err error
@@ -420,7 +430,7 @@ func socketAs(uid int) (int, error) {
 		if cur, _, _ := syscall.RawSyscall(syscall.SYS_SETFSUID, ^uintptr(0), 0, 0); int(cur) != uid {
 			fd, err = -1, fmt.Errorf("cannot create sockets as uid %d", uid)
 		} else {
-			fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+			fd, err = syscall.Socket(syscall.AF_INET, typ|syscall.SOCK_CLOEXEC, 0)
 		}
 		syscall.RawSyscall(syscall.SYS_SETFSUID, 0, 0, 0)
 		// setfsuid returns the previous fsuid: -1 asks without changing it.

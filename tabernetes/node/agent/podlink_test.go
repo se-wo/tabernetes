@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -58,16 +60,7 @@ func TestPodLinkNetns(t *testing.T) {
 			t.Fatalf("%s: %v\n%s", cmd, err, out)
 		}
 	}
-	// The node: the bridge cni0 with a pod 10.244.1.5 behind it, as the
-	// bridge plugin of CNI builds it, and a default route elsewhere (eth0).
-	// A tab pod is 10.244.0.7. With bridge-nf-call-iptables the packets of
-	// the pod pass prerouting inside the bridge, where TPROXY does not work.
-	sh("mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up && sysctl -qw net.ipv4.ip_forward=1")
-	sh("ip link add cni0 type bridge && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up")
-	sh("ip link add veth0 type veth peer name eth0p && ip link set veth0 master cni0 && ip link set veth0 up")
-	sh("ip link add eth0 type veth peer name eth0up && ip addr add 192.168.65.3/24 dev eth0 && ip link set eth0 up && ip link set eth0up up && ip route add default via 192.168.65.1")
-	sh("ip netns add pod && ip link set eth0p netns pod")
-	sh("ip netns exec pod sh -c 'ip link set lo up; ip addr add 10.244.1.5/24 dev eth0p; ip link set eth0p up; ip route add default via 10.244.1.1'")
+	netnsNode(t)
 	// The rules for a kernel without nft_socket load too.
 	if err := nft(podLinkRules(false)); err != nil {
 		t.Fatal(err)
@@ -170,6 +163,40 @@ func TestPodLinkNetns(t *testing.T) {
 		if !errors.Is(err, syscall.ECONNREFUSED) {
 			t.Fatalf("dial %d to a closed port: %v, want refused", i, err)
 		}
+	}
+}
+
+// netnsNodeOnce builds the node of the network namespace tests one time:
+// the tests with the gate TABERNETES_NETNS_TEST run in the same namespace.
+var (
+	netnsNodeOnce sync.Once
+	netnsNodeErr  error
+)
+
+// netnsNode builds the node: the bridge cni0 with a pod 10.244.1.5 behind
+// it (network namespace "pod"), as the bridge plugin of CNI builds it, and
+// a default route elsewhere (eth0). A tab pod is 10.244.0.7. With
+// bridge-nf-call-iptables the packets of the pod pass prerouting inside the
+// bridge, where TPROXY does not work.
+func netnsNode(t *testing.T) {
+	t.Helper()
+	netnsNodeOnce.Do(func() {
+		for _, cmd := range []string{
+			"mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up && sysctl -qw net.ipv4.ip_forward=1",
+			"ip link add cni0 type bridge && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up",
+			"ip link add veth0 type veth peer name eth0p && ip link set veth0 master cni0 && ip link set veth0 up",
+			"ip link add eth0 type veth peer name eth0up && ip addr add 192.168.65.3/24 dev eth0 && ip link set eth0 up && ip link set eth0up up && ip route add default via 192.168.65.1",
+			"ip netns add pod && ip link set eth0p netns pod",
+			"ip netns exec pod sh -c 'ip link set lo up; ip addr add 10.244.1.5/24 dev eth0p; ip link set eth0p up; ip route add default via 10.244.1.1'",
+		} {
+			if out, err := exec.Command("sh", "-c", cmd).CombinedOutput(); err != nil {
+				netnsNodeErr = fmt.Errorf("%s: %v\n%s", cmd, err, out)
+				return
+			}
+		}
+	})
+	if netnsNodeErr != nil {
+		t.Fatal(netnsNodeErr)
 	}
 }
 
