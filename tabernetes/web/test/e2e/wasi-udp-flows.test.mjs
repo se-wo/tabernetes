@@ -14,11 +14,10 @@
 //               the real waits are 31 to 100 seconds (plan rule 5).
 //   FL6, FL7    TestUDPPolicyIngress, TestUDPPolicyProtocol,
 //               TestUDPPolicyOneDecision (W4.2b).
-//   FL11        TestUDPFlowLocalPolicy (W4.2a). Until phase 5, the Service
-//               translation selects only endpoints on the same node, so
-//               internalTrafficPolicy: Local gives the same result as the
-//               default on the tab node. The test on a node worker is in
-//               package W5.1b.
+//   FL11        TestUDPFlowLocalPolicy (W4.2a) on the tab node. Between
+//               nodes (phase 5): TestUDPNodeLocalPolicy and the test
+//               "FL11: ..." of wasi-udp-nodes.test.mjs (W5.1b), with
+//               endpoints on the tab node and on a node worker.
 //   FL13        TestUDPFlowReleaseIP (W4.2a).
 //
 // The tests run one after the other in one namespace. FL10 runs before FL5,

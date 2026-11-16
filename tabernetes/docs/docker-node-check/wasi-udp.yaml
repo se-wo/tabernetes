@@ -1,6 +1,7 @@
 # Objects of the step wasi-udp (wasi-udp.sh): UDP of phase 4 of
-# ../wasi-sockets.md on runwasi. All pods run on node-1 with the test images
-# of the step wasi-images. The UDP modes of wasi-test-echo are in
+# ../wasi-sockets.md on runwasi. The pods of phase 4 run on node-1 with the
+# test images of the step wasi-images; the pods of phase 5 (at the end) run
+# on node-1 and on the tab node. The UDP modes of wasi-test-echo are in
 # wasm-images/rust/echo/src/main.rs. The client containers wait with DELAY_MS
 # until their servers listen and their names resolve.
 ---
@@ -259,3 +260,129 @@ spec:
   nodeSelector: {kubernetes.io/hostname: node-1}
   containers:
     - {name: c, image: busybox, imagePullPolicy: IfNotPresent, command: [sleep, "86400"]}
+---
+# Phase 5, UDP between nodes (W5.3): the servers and the busybox clients.
+# The pods with "tab" in the nodeSelector run on the tab node, the others
+# on node-1. The clients of the echo image are in wasi-udp.sh: they get the
+# IPs of these pods as literals. Each running component on the tab uses one
+# Wasm memory (section 14 of ../wasi-sockets.md): two echo servers there,
+# the other tab pods are busybox.
+#
+# ND3 to ND5, ND16, ND18: the UDP echo server on node-1 and its Service (the
+# only endpoint is on node-1).
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-dock, labels: {wasi-check: udp, app: wasi-nd-dock}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: PROTO, value: udp}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-nd-dock}
+spec:
+  selector: {app: wasi-nd-dock}
+  ports: [{port: 7, protocol: UDP}]
+---
+# ND13 to ND15: the UDP echo server on the tab node and its Service (the
+# only endpoint is on the tab node).
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-tab, labels: {wasi-check: udp, app: wasi-nd-tab}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: tab}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      env: [{name: PROTO, value: udp}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wasi-nd-tab}
+spec:
+  selector: {app: wasi-nd-tab}
+  ports: [{port: 7, protocol: UDP}]
+---
+# ND9: a UDP echo server on the tab node with a policy that denies all its
+# ingress. The engine of the tab node decides.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-in, labels: {wasi-check: udp, app: wasi-nd-in}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: tab}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      env: [{name: PROTO, value: udp}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wasi-nd-in}
+spec:
+  podSelector: {matchLabels: {app: wasi-nd-in}}
+  policyTypes: [Ingress]
+---
+# ND10, ND17: a UDP echo server on node-1 with a policy that permits only
+# the tab pod wasi-nd-ok. kube-network-policies on node-1 (nfqueue)
+# examines the datagrams of the transparent sockets of the agent (uid
+# 65534); the second tab pod wasi-nd-bb gets no answer.
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-pol, labels: {wasi-check: udp, app: wasi-nd-pol}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: PROTO, value: udp}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wasi-nd-pol}
+spec:
+  podSelector: {matchLabels: {app: wasi-nd-pol}}
+  policyTypes: [Ingress]
+  ingress: [{from: [{podSelector: {matchLabels: {app: wasi-nd-ok}}}]}]
+---
+# The busybox clients on the tab node: wasi-nd-bb (nslookup, ping, nc -u;
+# the second tab pod of ND17), wasi-nd-ok (the tab pod that the policy of
+# ND10 permits) and wasi-nd-eg (ND6: a policy denies all its egress).
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-bb, labels: {wasi-check: udp, app: wasi-nd-bb}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: tab}
+  terminationGracePeriodSeconds: 1
+  containers: [{name: c, image: busybox, command: [sleep, "86400"]}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-ok, labels: {wasi-check: udp, app: wasi-nd-ok}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: tab}
+  terminationGracePeriodSeconds: 1
+  containers: [{name: c, image: busybox, command: [sleep, "86400"]}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-eg, labels: {wasi-check: udp, app: wasi-nd-eg}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: tab}
+  terminationGracePeriodSeconds: 1
+  containers: [{name: c, image: busybox, command: [sleep, "86400"]}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wasi-nd-eg}
+spec:
+  podSelector: {matchLabels: {app: wasi-nd-eg}}
+  policyTypes: [Egress]

@@ -151,6 +151,38 @@ Only transport errors (a node that is gone) try the next one.
 NodePorts on the tab answer only on the node IP and 127.0.0.1, so their
 callers are the host as well.
 
+### UDP on the tab nodes
+
+The UDP table of a tab node (`tabnode_udp.go`, `tabnode_flows.go`,
+`docs/wasi-sockets.md` section 8.8) asks the engine through the hook
+`udpPolicy` (`allowedUDP` in `tabnode_netpol.go`):
+
+- The engine sees each new flow once, after the Service translation. One
+  call evaluates the egress of the source and the ingress of the
+  destination. The ports of a policy match the port of the endpoint, not of
+  the Service.
+- The datagrams of an open flow are not examined again. The strict mode
+  removes the flows that a policy change denies, 200 ms after the change
+  (`recheckFlows`).
+- The host of the node is not examined: a source in 127.0.0.0/8, the node
+  IP, and a datagram of a pod to its own pod IP.
+- Until the informers have synced, all datagrams pass.
+- A denied datagram is lost. The sender gets no error, as on a real node.
+
+Between nodes, the source node and the destination node each examine their
+part (see "The udp channel").
+
+### ICMP on the tab nodes
+
+`ping` (`docs/wasi-sockets.md`, section 7.9) asks the engine for each echo
+request through the hook `icmpPolicy` (`allowedICMP`): one call with no
+protocol and port 0, as kube-network-policies does for ICMP. A rule with
+ports thus never matches ICMP; a rule without ports does. The same sources
+as for UDP are not examined; `ping` also skips the engine for a destination
+in 127.0.0.0/8 or its own pod IP. Until the informers have synced, it
+allows. A ClusterIP gives no reply, and ICMP between nodes is not
+available. A Docker node examines only the first echo request of a flow.
+
 ## Source identity between nodes
 
 ### The pod channel
@@ -178,6 +210,27 @@ the sending node or lies in its `podCIDR`. A node can speak for its own pods,
 not for others. Then it asks its own engine (H6). Both nodes deciding is what
 upstream does as well: each node evaluates the whole pipeline for the packets
 it sees.
+
+### The udp channel
+
+UDP between nodes does not use the `pod` channel. Each node has one channel
+`udp` to the page (`docs/wasi-sockets.md`, section 8.9.1): a MessagePort for
+a node worker, an unordered WebRTC data channel without retransmits
+(`ordered: false`, `maxRetransmits: 0`) for a Docker node. The node opens
+it; the page never does. Each message is one datagram with a header of 14
+bytes: the source and the destination IP and port.
+
+- The page examines each datagram, not only the first one of a flow: the
+  source IP must be the node IP of the sending node or lie in its
+  `podCIDR` (ND7, ND8). Else the page drops it. The page then finds the
+  node of the destination by its pod CIDR or node IP and sends the datagram
+  on the channel of that node.
+- The source node examines the egress policy of the source pod (ND6). A tab
+  node that is the destination examines the ingress policy of the
+  destination pod (ND9). A Docker node leaves both to the nftables rules of
+  kube-network-policies (ND10, H7 and H8 below).
+- There is no answer line and no refusal: a denied or lost datagram is
+  only lost. `connection-refused` between nodes is not available.
 
 ### Why the receiving node may trust it
 
@@ -267,6 +320,16 @@ answers come back through the same TPROXY rule and routing table as H8. If the
 packet is dropped, the helper's connect times out and the agent sends no
 answer on the channel. The tab side times out too.
 
+UDP takes the same way (`node/agent/udplink.go`, `udplink_net.go`). For
+each tab address of a flow (the IP and the port of the tab pod), the agent
+opens one UDP socket with `IP_TRANSPARENT`, bound to that address, on a
+thread whose file system uid is 65534 (ND16, ND17). The rules of
+kube-network-policies thus examine its datagrams like those of a pod (the
+rule for uid 0 does not accept them). A dropped datagram is only lost. The
+answers of the Docker pod go to the same socket, and the agent sends them
+back to the page on the channel `udp` (ND18). A socket closes after the
+last flow of its address (the timeouts of FL2 to FL4, ND19).
+
 ### Docker pod to tab pod (H8)
 
 Today a Docker pod cannot reach a tab pod at all: nothing routes into the
@@ -293,6 +356,30 @@ to the tab node of that pod CIDR, with the Docker pod as the source. The tab
 node checks the source against the Docker node's `podCIDR` and decides
 ingress (H6). This lifts the limit "Pods on Docker nodes cannot reach pods on
 the tab nodes" for TCP.
+
+For UDP, the chain `prerouting` of the table `tabernetes_podlink` on
+`tabpods1` (see "Implementation", `podLinkRules` in `node/agent/podlink.go`)
+has the same two rules as for TCP (ND13):
+
+- `meta l4proto udp socket transparent 1 ... accept`: a datagram to a tab
+  address with an open transparent socket goes to that socket. TPROXY finds
+  only connected UDP sockets, and these sockets are not connected. This
+  rule needs `nft_socket`.
+- `iifname "tabpods1" ... meta l4proto udp tproxy ip to :15001 ... accept`:
+  the other datagrams go to one transparent UDP socket on 0.0.0.0:15001 of
+  uid 65534 (`node/agent/udplink_net.go`). It reads the original
+  destination of each datagram with `IP_RECVORIGDSTADDR` (ND14) and sends
+  it on the channel `udp` with the Docker pod as the source.
+- The answers to the Docker pod leave from a socket with the tab address as
+  its address, so they have the tab pod IP as their source (ND15).
+
+So there are two rule sets: with `nft_socket` the two `socket transparent 1`
+rules come first, without it the agent loads the rules without them. Then
+all datagrams go to the socket on :15001, and only the host of a tab node
+in a Web Worker gets no UDP answers from Docker pods (log line "udp
+channel: no socket match, ..."). The kernel needs `nft_tproxy` and
+`nf_defrag` for UDP. The drop rule `iifname "tabpods1" drop` stays last,
+and the packets from `tabpods1` are not tracked (`notrack`).
 
 The service IPs of tab pods need nothing more: kube-proxy on the Docker node
 DNATs a cluster IP to the endpoint's pod IP, and the TPROXY rule sees the
@@ -333,9 +420,10 @@ Their dials have no `procOf(ctx)` pod and come from 127.0.0.1 or the node IP.
 
 ## Gaps
 
-- **UDP.** The tab nodes have no UDP sockets for pods; services skip UDP
-  ports. UDP rules are evaluated correctly but cannot be tested there. SCTP
-  never.
+- **SCTP.** Never. UDP has no gap left: see "UDP on the tab nodes", "The
+  udp channel", H7 and H8. The built-in `agnhost connect` still prints
+  `OTHER` for `--protocol=udp`, so the UDP cases of the end-to-end tests
+  fail.
 - **Egress to the internet.** `wget` and `curl` to other hosts go through the
   browser's `fetch()`. There is no IP. For a pod with egress policy, the
   engine is asked with the destination 0.0.0.0 on port 80 or 443: a rule with
@@ -440,7 +528,8 @@ What it takes:
 
 Expected failures:
 
-- every UDP case (no UDP on tab nodes), SCTP everywhere;
+- every UDP case (`agnhost connect` has no UDP on tab nodes), SCTP
+  everywhere;
 - cases that expect a probe to the internet through an `ipBlock` with
   `except` (the `fetch()` approximation);
 - timing: the tab runs one thread. Many pods and the exec probes of 3x3x3
@@ -527,6 +616,9 @@ Each phase is one small PR.
 | 4 Docker nodes | #14, #18 | agent tests in a network namespace with a bridge; a joined Docker node (below) |
 | 5 ClusterNetworkPolicy | #15 | unit tests, browser |
 | 6 strict mode | #16 | unit tests, browser regression |
+| UDP on the tab nodes (`docs/wasi-sockets.md`, phase 4) | #95, #97 | unit tests, end-to-end tests |
+| UDP between nodes (`docs/wasi-sockets.md`, phase 5) | #102, #104, #105, #107 and the step `wasi-udp` of the Docker check | unit tests; `TestUDPLinkNetns` by hand; end-to-end tests with a node worker; the Docker check with a Docker node (below) |
+| ICMP echo (`docs/wasi-sockets.md`, phase 6) | #106 | unit tests, end-to-end tests |
 
 "Browser" means the built page in headless Chromium, with scripts in the
 terminal that create pods and policies and probe with `agnhost connect`.
@@ -592,10 +684,24 @@ machine, `addnode 1`, and pods on all three nodes:
   the tab pod times out;
 - a Service whose endpoint is a hostNetwork pod of the Docker node: open.
 
-Not tested: the DaemonSet deciding on the Docker node (traffic between two
-Docker pods, and the egress of a Docker pod). The kernel of the test
-machine has no `nft_queue`, so kube-network-policies started, failed to
-bind its queue and exited. Pod traffic went on, as its rules never loaded.
+The kernel of that test machine had no `nft_queue`: kube-network-policies
+started, failed to bind its queue and exited, and pod traffic went on. On
+the GitHub runner, the Docker check (`docs/docker-node-check/check.sh`)
+tests the DaemonSet deciding on the Docker node: the step `netpol` (traffic
+between two Docker pods), the lines CR1/CR8 and TC10 of the steps
+`wasi-proxy` and `wasi-sockets`, and in the step `wasi-udp` UDP between the
+tab node and the Docker node:
+
+- tab pod to a Docker pod and its Service, Docker pod to a tab pod and its
+  Service, with the pod IPs as sources (ND13 to ND18);
+- the terminal of the tab node to a Docker pod, with the node IP as the
+  source;
+- an egress policy on a tab pod (ND6) and an ingress policy on a tab pod
+  (ND9): the engine of the tab node decides;
+- an ingress policy on a Docker pod that permits one tab pod and denies a
+  second one (ND10, ND17): kube-network-policies on the Docker node decides.
+
+A host kernel without `nft_queue` makes the lines of the DaemonSet SKIP.
 
 ### Running the end-to-end tests
 

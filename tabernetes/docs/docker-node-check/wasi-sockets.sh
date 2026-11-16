@@ -16,7 +16,9 @@
 #   TC15, TC16                      a tcpSocket probe, kubectl port-forward
 #   TC6, TC7                        a listener on [::]; SKIP without IPv6
 #   TC9                             the ephemeral port of a client
-#   TC10                            SKIP: deferred (decision 16)
+#   TC10                            a NetworkPolicy on node-1 denies a
+#                                   client (deferred test; SKIP with a
+#                                   host kernel without nft_queue)
 #   TC11                            a client to a port without a listener
 #   TC13                            a client that closes its send direction
 #   TC18, TC19, TC20, TC21          the error codes of fact 12
@@ -51,6 +53,67 @@ so_exec() {
 # so_ready <pod>: "<container>=<ready> ..." of the pod.
 so_ready() {
 	tab run "kubectl get pod $1 -o jsonpath='{range .status.containerStatuses[*]}{.name}={.ready} {end}'" 2>&1 | tail -1 | tr -d '\r' | sed 's/ $//'
+}
+
+# so_tc10: TC10 on node-1. A NetworkPolicy denies all ingress of the TCP echo
+# server wasi-tc10, and kube-network-policies drops the SYN (nfqueue).
+# runwasi gives timeout after 127 seconds (section 4.3). The step makes sure
+# that a component client gets no answer and no error within 10 seconds,
+# and does not wait for the timeout (wasi-sockets-plan.md, rule 5).
+so_tc10() {
+	local ip a s st ok
+	run tab run "kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wasi-tc10}
+spec:
+  podSelector: {matchLabels: {app: wasi-tc10}}
+  policyTypes: [Ingress]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-tc10, labels: {wasi-check: sockets, app: wasi-tc10}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+EOF"
+	if ! wait_for 'kubectl get pod wasi-tc10' 'Running' 120; then
+		result FAIL "TC10: the pod wasi-tc10 does not run"
+		k delete networkpolicy wasi-tc10
+		return 1
+	fi
+	ip="$(pod_ip wasi-tc10)"
+	run tab run "kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-tc10-client, labels: {wasi-check: sockets}}
+spec:
+  runtimeClassName: wasmtime
+  nodeSelector: {kubernetes.io/hostname: node-1}
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: ghcr.io/se-wo/tabernetes/wasi-test-echo:latest
+      imagePullPolicy: Never
+      env: [{name: MODE, value: client}, {name: CONNECT, value: '$ip:7'}, {name: LINE, value: tc10}]
+EOF"
+	wait_for 'kubectl get pod wasi-tc10-client' 'Running|Completed|Error' 60 >/dev/null
+	sleep 10
+	a="$(so_logs wasi-tc10-client)"
+	s="$(so_logs wasi-tc10)"
+	st="$(tab run "kubectl get pod wasi-tc10-client -o jsonpath='{.status.phase}'" 2>&1 | tail -1 | tr -d '\r')"
+	ok=0
+	grep -qE '^(answer|error) ' <<<"$a" && ok=1
+	grep -q '^tcp from ' <<<"$s" && ok=1
+	grep -qx 'tcp echo on 0.0.0.0:7' <<<"$s" || ok=1
+	[ "$st" = Running ] || ok=1
+	check TC10 "$ok" "a component client to the denied server $ip:7 after 10 s: phase $st, '$(grep -E '^(answer|error)' <<<"$a" | tr '\n' ' ')' (want Running without an answer or an error; runwasi gives timeout after 127 s); the server sees '$(grep '^tcp from' <<<"$s" | head -1)' (want nothing)"
+	k delete pod wasi-tc10 wasi-tc10-client --wait=false
+	k delete networkpolicy wasi-tc10
 }
 
 step_wasi_sockets() {
@@ -104,7 +167,12 @@ step_wasi_sockets() {
 	if [[ "$b $lport" =~ ^[0-9]+\ [0-9]+$ ]] && ((b >= 32768 && b <= 60999 && lport >= 32768 && lport <= 60999)); then ok=0; fi
 	check TC9 "$ok" "the local ports are '$b' (another pod) and '$lport' (127.0.0.1) (want 32768 to 60999)"
 
-	result SKIP "TC10: NetworkPolicy on a Docker node is a deferred test (nfqueue, decision 16)"
+	# TC10 (deferred test, decision 16).
+	if ! udp_module nft_queue || ! udp_module nfnetlink_queue; then
+		result SKIP "TC10: host kernel without nft_queue"
+	else
+		so_tc10
+	fi
 
 	# TC11
 	b="$(so_logs wasi-echo-client refused)"

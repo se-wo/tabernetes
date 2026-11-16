@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -603,13 +602,12 @@ func (s *serviceProxy) serveDNSUDP(ctx context.Context, c *udpConn, st *corednsS
 
 // kubeDNSProto is the protocol of nslookup to the default server, the
 // ClusterIP of kube-dns (UD19, section 8.7). "udp": kube-dns has a ready
-// endpoint for 53/UDP on this tab node. "tcp": else, kube-dns has an
-// endpoint for 53/TCP; the service proxy forwards TCP also to another node.
-// "": kube-dns has no endpoint (or the service proxy did not sync), and
-// nslookup answers from the service proxy as before.
-//
-// Phase 5 removes the TCP exception: then datagrams also go to CoreDNS on
-// another node.
+// endpoint for 53/UDP, on this tab node or on another node (phase 5: the
+// UDP table sends datagrams to other nodes on the udp channel). "": kube-dns
+// has no ready endpoint for 53/UDP (or the service proxy did not sync), and
+// nslookup answers from the service proxy as before. busybox gives ";;
+// connection timed out; no servers could be reached" in this case; the
+// answer of the service proxy keeps nslookup usable before CoreDNS runs.
 func (s *serviceProxy) kubeDNSProto() string {
 	if s == nil || !s.synced.Load() || s.slices == nil {
 		return ""
@@ -618,34 +616,13 @@ func (s *serviceProxy) kubeDNSProto() string {
 	if err != nil {
 		return ""
 	}
-	proto := ""
 	for _, sp := range svc.Spec.Ports {
-		if sp.Port != 53 {
-			continue
-		}
-		switch sp.Protocol {
-		case v1.ProtocolUDP:
-			if s.localUDPEndpoint(svc.Namespace, svc.Name, sp.Name) {
-				return "udp"
-			}
-		case v1.ProtocolTCP, "":
-			if len(s.endpoints(svcPort{namespace: svc.Namespace, name: svc.Name, portName: sp.Name})) > 0 {
-				proto = "tcp"
-			}
+		if sp.Port == 53 && sp.Protocol == v1.ProtocolUDP &&
+			len(s.endpoints(svcPort{namespace: svc.Namespace, name: svc.Name, portName: sp.Name, proto: v1.ProtocolUDP})) > 0 {
+			return "udp"
 		}
 	}
-	return proto
-}
-
-// localUDPEndpoint reports whether the service has a ready endpoint for its
-// UDP port portName with a pod IP of this tab node: a socket of the UDP
-// table can be there.
-func (s *serviceProxy) localUDPEndpoint(namespace, name, portName string) bool {
-	if theTabNode == nil {
-		return false
-	}
-	return slices.ContainsFunc(s.endpoints(svcPort{namespace: namespace, name: name, portName: portName, proto: v1.ProtocolUDP}),
-		func(e endpoint) bool { return theTabNode.isTabPodIP(e.ip) })
+	return ""
 }
 
 // --- the image ---
