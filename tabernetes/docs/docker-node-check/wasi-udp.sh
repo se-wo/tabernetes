@@ -80,14 +80,24 @@ udp_module() {
 # udp_diagnose <tab pod IP>: records what the page, the agent and the kernel
 # of the node show for UDP from node-1 to a tab pod (after a FAIL of ND13).
 udp_diagnose() {
-	local f="${CONSOLE_LOG:-browser-console.log}" out ns
+	local f="${CONSOLE_LOG:-browser-console.log}" out ns cnt
+	# shellcheck disable=SC2016 # for the shell in the node
+	cnt='grep -E "^(Ip|Udp):" /proc/net/snmp | tr -s " " | cut -d" " -f1-8,15-18 | tr "\n" " "; ip -s link show tabpods0 | sed -n 4p; ip -s link show tabpods1 | sed -n 4p'
+	# shellcheck disable=SC2086 # crictl_ns is a list of flags
+	udp_fact "diagnose: counters before: $(udp_lines "$(docker exec "$N" nsenter $crictl_ns sh -c "$cnt" 2>&1)")"
 	out="$(udp_exec "echo diag | nc -u -w 2 $1 7; echo rc=\$?")"
 	udp_fact "diagnose: busybox nc -u from node-1 to $1:7: $(udp_lines "$out")"
+	# shellcheck disable=SC2086 # crictl_ns is a list of flags
+	udp_fact "diagnose: counters after: $(udp_lines "$(docker exec "$N" nsenter $crictl_ns sh -c "$cnt" 2>&1)")"
+	# TCP takes the same route and the TPROXY rule for TCP: the agent
+	# accepts the connection before the tab node decides.
+	out="$(udp_exec "echo diag | nc -w 2 $1 7; echo rc=\$?")"
+	udp_fact "diagnose: busybox nc (TCP) from node-1 to $1:7: $(udp_lines "$out")"
 	udp_fact "diagnose: page console: $(udp_lines "$(grep -ai 'udp' "$f" 2>/dev/null | tail -8)")"
-	udp_fact "diagnose: agent: $(udp_lines "$(docker logs "$N" 2>&1 | grep -aiE 'udp|pod channel' | tail -8)")"
+	udp_fact "diagnose: agent: $(udp_lines "$(docker logs "$N" 2>&1 | grep -aiE 'udp channel|pod channel' | tail -8)")"
 	# shellcheck disable=SC2016,SC2086 # for the shell in the node; crictl_ns is a list of flags
 	for ns in "" "nsenter $crictl_ns"; do
-		udp_fact "diagnose: node ${ns:-container}: $(udp_lines "$(docker exec "$N" $ns sh -c 'nft list table inet tabernetes_podlink 2>&1 | grep -E "udp|drop|notrack"; ip route get '"$1"' 2>&1; ip -br link 2>&1 | grep tabpods; (ss -uanp 2>/dev/null || cat /proc/net/udp) | grep -iE "15001|3A97|'"$1"'" | head -5; conntrack -L -p udp 2>/dev/null | grep '"$1"' | head -3' 2>&1)")"
+		udp_fact "diagnose: node ${ns:-container}: $(udp_lines "$(docker exec "$N" $ns sh -c 'nft list table inet tabernetes_podlink 2>&1 | grep -E "udp|drop|notrack"; ip route get '"$1"' 2>&1; ip rule 2>&1; ip route show table all 2>&1 | grep -E "local default|tabpods"; for s in all default cni0 tabpods0 tabpods1; do echo "rp_filter $s $(cat /proc/sys/net/ipv4/conf/$s/rp_filter 2>&1)"; done; ip -br link 2>&1 | grep tabpods; (ss -uanp 2>/dev/null || cat /proc/net/udp) | grep -iE "15001|3A97|'"$1"'" | head -5; grep '"$1"' /proc/net/nf_conntrack 2>/dev/null | head -3; iptables -S FORWARD 2>&1 | head -12; nft list ruleset 2>/dev/null | grep -E "queue|drop|reject" | head -12' 2>&1)")"
 	done
 }
 
