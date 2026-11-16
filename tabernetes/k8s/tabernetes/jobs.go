@@ -35,8 +35,12 @@ var jobs jobTable
 func init() { interp.BackgroundContext = jobs.start }
 
 // start registers a job and returns its context and the func the shell calls
-// when the job ends.
+// when the job ends. A job of a container is not a job of the terminal:
+// podJob.
 func (t *jobTable) start(ctx context.Context, stmt *syntax.Stmt) (context.Context, func()) {
+	if pe := procOf(ctx); pe != nil && pe.c != nil {
+		return podJob(ctx, pe)
+	}
 	var cmd strings.Builder
 	syntax.NewPrinter(syntax.SingleLine(true)).Print(&cmd, stmt)
 	ctx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), jobKey{}, true))
@@ -132,4 +136,40 @@ func killCmd(hc interp.HandlerContext, args []string) error {
 		jobs.stop(j)
 	}
 	return exitCode(code)
+}
+
+// podJob gives a background job of a container ("sh -c 'nc db 5432 &
+// sleep 3600'") its context. On a node, every process of a container ends
+// with the container: the runtime sends SIGTERM and, after the grace period,
+// SIGKILL to all of them. Thus the job ends with the run of the container
+// (startNative), not with the shell that started it, and not with the
+// terminal: when the run is killed, its context ends, and with it the
+// connections of the job (pipeConn, ncUDPCopy and the like close them).
+//
+// A job of the main process has the context of the run. A job of an exec, a
+// hook or a probe outlives its shell, like a process that its parent left
+// behind, but not the run of the container.
+func podJob(ctx context.Context, pe *procEnv) (context.Context, func()) {
+	p := pe.proc
+	if p == nil {
+		pe.c.w.mu.Lock()
+		p = pe.c.proc
+		pe.c.w.mu.Unlock()
+	}
+	if p == nil || p.ctx == nil {
+		// No run (a wasm run, or a run that ended): the job ends with its
+		// shell.
+		return context.WithCancel(ctx)
+	}
+	if pe.proc == nil {
+		ctx = context.WithoutCancel(ctx)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.ctx, cancel)
+	p.jobs.add()
+	return ctx, func() {
+		stop()
+		cancel()
+		p.jobs.done()
+	}
 }

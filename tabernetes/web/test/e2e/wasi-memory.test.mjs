@@ -20,9 +20,9 @@
 //
 //   node web/test/e2e/run.mjs web/test/e2e/wasi-memory.test.mjs
 //
-// Note: the background processes of a busybox pod on the tab node do not stop
-// when the pod is deleted. So the clients of this file use wget -T to close
-// their connections.
+// The clients of this file use wget -T, so each request has a time limit.
+// When a pod is deleted, its background processes stop with it
+// (pod-jobs.test.mjs).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";

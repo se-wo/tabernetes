@@ -778,7 +778,9 @@ same on macOS and Linux:
 - mvdan.cc/sh is vendored into the checkout at `MVDAN_SH_VERSION` from
   `mise.toml`. Kubernetes already vendors its only dependencies. A hook in
   its interpreter gives background jobs their own context, so they outlive
-  their command line.
+  their command line. In a container, a background job stops with the
+  container (the kill at the end of the stop, or the end of the main
+  process), and its connections close.
 - gojq (with timefmt-go) and goawk are vendored the same way
   (`GOJQ_VERSION`, `TIMEFMT_GO_VERSION`, `GOAWK_VERSION`).
 - The decision packages of kube-network-policies and the client of
