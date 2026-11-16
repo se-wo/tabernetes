@@ -65,3 +65,10 @@ pion webrtc v4.2.26 / sctp v1.12.0: with DetachDataChannels + EnableDataChannelB
 - docs/docker-node-check/wasi-udp.sh has one SKIP line for ND ("phase 5, package W5.3"); add the ND checks there with the same helpers (udp_exec, udp_fact, udp_refused, check).
 - Server pods stay ready: the echo pod's own client runs for 60 s, and the headless Services use publishNotReadyAddresses. UD13 uses the FQDN (/etc/hosts maps the short pod name to the pod IP).
 - Echo modes and output lines: header of wasm-images/rust/echo/src/main.rs.
+
+## W5.2b final (PR #104 merged 447323b) — for W5.3
+- Tests: TestUDPLinkNetns (gate TABERNETES_NETNS_TEST=1; ND13-ND18, 65,507 bytes, non-pod source with socket rule; ND17 policy part is yours), TestParseOrigDst, TestPodLinkRulesUDP, TestSocketAsType, TestBindTransparentUDPIPv4. Netns helper netnsNode shared by both netns tests.
+
+## Flakes seen (fix or report; never skip a test)
+1. e2e `web/test/e2e/wasi-udp.test.mjs:404`, UD14 rule 7 on the tab node ("connected send, send, receive..."): got "ok, connection-refused", expected "ok, ok"; a rerun passed (PR #104, head 08850c3). Cause: the section 11 row of W4.5b says the send right after a refused datagram works on the tab node because the Go-side error arrives a moment later; the test assumes the error always arrives late. Make the expected value timing-independent in line with that row (for example accept "ok" or "connection-refused" for that one send and assert the later send gets connection-refused), and name the fix in your PR.
+2. Docker check: once wasi-udp UD2/UD7/UD13 and wasi-sockets NL1 failed with NXDOMAIN for DNS lookups in pods on node-1; a rerun passed (PR #104, head c3eb387). If you see it again, find the cause (CoreDNS readiness after join?) before you add more DNS-dependent checks.
