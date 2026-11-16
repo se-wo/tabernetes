@@ -1859,6 +1859,11 @@ rule of `tabpods1`:
   address is not connected. Thus without `nft_socket`, all datagrams
   arrive at the TPROXY socket.
 
+Both rules need the address 169.254.77.2/32 on `tabpods1`. Without an
+IPv4 address on `tabpods1`, the loose reverse path filter (`rp_filter` 2)
+drops the datagram after the rule (see "Implementation" in
+`networking-policy.md`).
+
 The socket of a tab address has `IP_TRANSPARENT` and the address and port
 of the tab side (ND16). A thread with the file system uid 65534 makes it
 (ND17). It is not connected: two Docker pods can share it. The answers of

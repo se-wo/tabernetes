@@ -61,6 +61,9 @@ const (
 	// The next hop of that route. Nothing has this address: a permanent
 	// neighbour entry names podLinkIn.
 	podLinkGateway = "169.254.77.1"
+	// The address of podLinkIn. Only the reverse path filter needs it, see
+	// setupPodLinkRoute.
+	podLinkInAddr = "169.254.77.2/32"
 	// Connections of pods here to tab pods arrive at this port.
 	tproxyPort = 15001
 	// The mark and routing table that deliver them to the agent.
@@ -182,6 +185,14 @@ func setupPodLinkRoute() error {
 		if err := os.WriteFile(conf+"all/rp_filter", []byte("2"), 0o644); err != nil {
 			return fmt.Errorf("rp_filter: %w", err)
 		}
+	}
+	// The loose reverse path filter (2, the default of many distributions)
+	// drops every packet that arrives at an interface without an IPv4
+	// address, when the route back does not go through that interface. An
+	// address with scope link lets the packets through, and the node does
+	// not use it as a source address.
+	if err := ipCmd("addr", "replace", podLinkInAddr, "dev", podLinkIn, "scope", "link"); err != nil {
+		return err
 	}
 	if err := ipCmd("neigh", "replace", podLinkGateway, "lladdr", in.HardwareAddr.String(), "dev", podLinkOut, "nud", "permanent"); err != nil {
 		return err

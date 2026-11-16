@@ -183,6 +183,8 @@ func netnsNode(t *testing.T) {
 	netnsNodeOnce.Do(func() {
 		for _, cmd := range []string{
 			"mount -t tmpfs none /run && mkdir -p /run/netns && ip link set lo up && sysctl -qw net.ipv4.ip_forward=1",
+			// The loose reverse path filter, as on many hosts (Ubuntu).
+			"sysctl -qw net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.default.rp_filter=2",
 			"ip link add cni0 type bridge && ip addr add 10.244.1.1/24 dev cni0 && ip link set cni0 up",
 			"ip link add veth0 type veth peer name eth0p && ip link set veth0 master cni0 && ip link set veth0 up",
 			"ip link add eth0 type veth peer name eth0up && ip addr add 192.168.65.3/24 dev eth0 && ip link set eth0 up && ip link set eth0up up && ip route add default via 192.168.65.1",
