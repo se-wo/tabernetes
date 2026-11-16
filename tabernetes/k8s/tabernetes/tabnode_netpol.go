@@ -141,6 +141,31 @@ func (p *netPolicy) allowedUDP(ctx context.Context, src, dst netip.AddrPort) boo
 	return p.decide(ctx, v1.ProtocolUDP, net.IP(s.AsSlice()), int(src.Port()), net.IP(d.AsSlice()), int(dst.Port()))
 }
 
+// allowedICMP reports whether an ICMP echo request from src to dst may pass
+// (IC4, IC5). The tab node gets no IP packets (decision 11), so it asks the
+// engine for each echo request, as kube-network-policies does for a new
+// ICMP flow: no protocol and port 0 (fact 15). A policy rule with ports thus
+// does not match ICMP (IC7). The engine evaluates the egress of the source
+// and the ingress of the destination in one call. As for TCP and UDP, the
+// host of the node is not examined: a source in 127.0.0.0/8, the node IP,
+// and an echo request of a pod to its own pod IP.
+func (p *netPolicy) allowedICMP(ctx context.Context, src, dst net.IP) bool {
+	if src.IsLoopback() || src.Equal(dst) || src.String() == tabNodeIP {
+		return true
+	}
+	return p.decide(ctx, "", src, 0, dst, 0)
+}
+
+// icmpPolicy decides one echo request of ping (IC8: each one). Without a
+// tab node, it allows. Tests replace it to count the decisions.
+var icmpPolicy = func(ctx context.Context, src, dst net.IP) bool {
+	n := theTabNode
+	if n == nil {
+		return true
+	}
+	return n.policy.allowedICMP(ctx, src, dst)
+}
+
 // decide asks the engine about the first packet of a connection or a flow
 // of the protocol proto. Until the informers have synced it allows
 // everything.
