@@ -281,12 +281,18 @@ func (c *ctr) runOnce() (code int, ok bool) {
 	case <-c.w.killCtx.Done():
 		proc.kill("")
 	}
+	killed := time.After(2 * time.Second)
 	select {
 	case <-proc.done:
-	case <-time.After(2 * time.Second):
+	case <-killed:
 		// A goroutine that ignores its context: the code is gone
 		// with the tab only, but the container counts as stopped.
 	}
+	// The main process ended: like the kernel when PID 1 of a container
+	// ends, end the background jobs that are left (podJob), with their
+	// connections.
+	proc.cancel()
+	proc.jobs.wait(killed)
 	code = proc.exitCode()
 	reason := terminatedReason(code, proc.oom.Load())
 	msg := proc.killReason()
@@ -341,6 +347,55 @@ type process struct {
 	killed   atomic.Bool
 	stopping atomic.Bool // a stop (preStop hook, kill) is under way
 	oom      atomic.Bool // killed for passing limits.memory (tabnode_oom.go)
+
+	// ctx is the context of a native run: it ends with the kill, or when
+	// the main process ended. The background jobs of the container end
+	// with it (podJob), jobs counts those still running.
+	ctx  context.Context
+	jobs procJobs
+}
+
+// procJobs counts the background jobs of a run, so that the stop of the
+// container waits for them like for the main process.
+type procJobs struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n drops to 0
+}
+
+func (j *procJobs) add() {
+	j.mu.Lock()
+	if j.n == 0 {
+		j.idle = make(chan struct{})
+	}
+	j.n++
+	j.mu.Unlock()
+}
+
+func (j *procJobs) done() {
+	j.mu.Lock()
+	if j.n--; j.n == 0 {
+		close(j.idle)
+	}
+	j.mu.Unlock()
+}
+
+// wait returns when no job runs, or at the timeout. It reports whether no
+// job runs.
+func (j *procJobs) wait(timeout <-chan time.Time) bool {
+	j.mu.Lock()
+	idle := j.idle
+	n := j.n
+	j.mu.Unlock()
+	if n == 0 {
+		return true
+	}
+	select {
+	case <-idle:
+		return true
+	case <-timeout:
+		return false
+	}
 }
 
 func newProcess(cancel context.CancelFunc) *process {
@@ -386,6 +441,7 @@ func (c *ctr) startNative(ctx context.Context, logs *logBuf) (*process, error) {
 	_, ip := c.w.podInfo()
 	ctx, cancel := context.WithCancel(ctx)
 	p := newProcess(cancel)
+	p.ctx = ctx
 	pe := &procEnv{w: c.w, c: c, root: root, ip: ip, cpu: newThrottle(c.spec.Resources), proc: p}
 	var stdin io.Reader = strings.NewReader("")
 	if c.stdin != nil {
