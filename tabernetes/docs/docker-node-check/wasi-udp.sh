@@ -213,9 +213,12 @@ EOF"
 	[ "$ok" = 0 ] || udp_diagnose "$tabip"
 
 	# H8 for TCP (networking-policy.md): busybox nc on node-1 connects to
-	# the TCP server of a tab pod and gets its line.
+	# the TCP server of a tab pod and gets its line. stdin stays open for 2
+	# seconds: at the end of stdin, nc closes its side of the connection,
+	# and the relay can end the connection before the line arrives (as for
+	# px_raw in wasi-proxy.sh).
 	p="$(pod_ip wasi-nd-tcp)"
-	out="$(udp_exec "echo hi | nc -w 2 $p 8080; echo rc=\$?")"
+	out="$(udp_exec "{ echo hi; sleep 2; } | nc -w 3 $p 8080; echo rc=\$?")"
 	ok=0
 	[ "$(head -1 <<<"$out")" = tcp-ok ] || ok=1
 	check "H8 (TCP)" "$ok" "busybox nc on node-1 to the TCP server of the tab pod $p:8080: '$(udp_lines "$out")' (want tcp-ok)"
