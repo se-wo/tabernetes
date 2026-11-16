@@ -144,6 +144,29 @@ const release = () => evalOn(TAB_NODE, () => {
   return true;
 });
 
+// lateWaits checks that the request of late-client waits (PX34) while late
+// has no Wasm memory. The hold takes a free memory only every 100 ms. On the
+// full tab, the collect rounds of the broker (W2.4: after each memory-full of
+// the parked containers, and while their asks wait) make the pod workers
+// collect their garbage, so memories become free and are taken again all the
+// time. The retry of late (every second) can take such a memory before the
+// hold: section 8.6 allows this, other pods of the tab can free memory. One
+// memory is enough: the first instance gets the memory of the link check at
+// the garbage collection of the pod worker. So a served request must come
+// after the line of late that its instance got its memory. It gives true if
+// late got a memory during the hold.
+async function lateWaits(ns, t) {
+  if (!/served/.test(await logs(ns, "late-client"))) return false;
+  // The two logs have no common order: wait a short time for the line of late.
+  await waitFor(async () => /^tabernetes: a new instance got its Wasm memory after \d+\.\d s$/m.test(await logs(ns, "late")), {
+    timeout: 30,
+    interval: 1,
+    what: "a served request of late only after its instance got its memory",
+  });
+  t.diagnostic("late got a Wasm memory that a pod worker freed before the hold took it; its request was served");
+  return true;
+}
+
 // quiet waits until no namespace of the cluster is in deletion. The other
 // test files delete their namespaces without a wait: until their pods end,
 // their pod workers free memories during the measurement.
@@ -271,7 +294,7 @@ test("a full tab: requests wait (PX34), a new proxy container waits with a line 
   const lateIP = await runningIP(ns, "late");
   await apply(client("late-client", `wget -q -O /dev/null http://${lateIP}:8080/context && echo served $(date +%s)`), ns);
   await waitFor(async () => /no Wasm memory left for a new instance; .*\(PX34\)/.test(await logs(ns, "late")), { what: "the line of PX34 in the log of late" });
-  assert.doesNotMatch(await logs(ns, "late-client"), /served/);
+  let lateServed = await lateWaits(ns, t);
 
   // A command component fails with exit code 137 and the text of the full tab.
   await apply(component("cmd", "wasi-test-cmd", TAB_NODE), ns);
@@ -296,14 +319,16 @@ test("a full tab: requests wait (PX34), a new proxy container waits with a line 
   const checks = (Date.now() - began) / 1000;
   t.diagnostic(`the checks of the full tab ended ${checks.toFixed(1)} s after the start of the parked requests`);
   assert.ok(checks < TIMEOUT, "the checks of the full tab ended before the parked requests");
-  assert.doesNotMatch(await logs(ns, "late-client"), /served/);
+  lateServed = lateServed || (await lateWaits(ns, t));
 
   // The hold ends, and then the parked requests: the waiting request of late
   // gets an instance.
   await release();
   const released = Date.now();
   const served = await waitFor(async () => /served/.test(await logs(ns, "late-client")) && Date.now(), { timeout: TIMEOUT + 180, what: "the request of late" });
-  t.diagnostic(`the request of the new container: served ${((served - released) / 1000).toFixed(1)} s after the end of the hold, ${((served - began) / 1000).toFixed(1)} s after the start of the parked requests`);
+  // The time of the wait (section 14) only applies to a request that waited
+  // until the end of the hold.
+  if (!lateServed) t.diagnostic(`the request of the new container: served ${((served - released) / 1000).toFixed(1)} s after the end of the hold, ${((served - began) / 1000).toFixed(1)} s after the start of the parked requests`);
   assert.match(await logs(ns, "late"), /^tabernetes: a new instance got its Wasm memory after \d+\.\d s$/m);
 
   // The memories of the ended instances stay until the garbage collection of
