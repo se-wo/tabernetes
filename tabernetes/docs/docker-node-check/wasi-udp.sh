@@ -93,6 +93,22 @@ udp_diagnose() {
 	# accepts the connection before the tab node decides.
 	out="$(udp_exec "echo diag | nc -w 2 $1 7; echo rc=\$?")"
 	udp_fact "diagnose: busybox nc (TCP) from node-1 to $1:7: $(udp_lines "$out")"
+	# W5.4 DIAG (temporary): trace the packets to the tab pod in all tables.
+	# shellcheck disable=SC2086,SC2016
+	docker exec "$N" nsenter $crictl_ns sh -c 'nft add table inet tabtrace; nft "add chain inet tabtrace pre { type filter hook prerouting priority -500; }"; nft add rule inet tabtrace pre ip daddr '"$1"' meta nftrace set 1; nft add rule inet tabtrace pre iifname tabpods1 meta nftrace set 1' 2>&1 | sed 's/^/w54 trace setup: /'
+	# shellcheck disable=SC2086
+	timeout 15 docker exec "$N" nsenter $crictl_ns timeout 12 nft monitor trace >"$OUT/w54-trace.txt" 2>&1 &
+	sleep 2
+	out="$(udp_exec "echo diag | nc -u -w 2 $1 7; echo rc=\$?; echo diag | nc -w 2 $1 7; echo rc=\$?")"
+	wait
+	echo "w54: nc: $(udp_lines "$out")"
+	echo "w54: trace begin"
+	head -c 30000 "$OUT/w54-trace.txt"
+	echo "w54: trace end"
+	# shellcheck disable=SC2086,SC2016
+	docker exec "$N" nsenter $crictl_ns sh -c 'echo "--- hooks"; nft list hooks 2>&1 | head -80; echo "--- link"; ip -s -s -d link show tabpods1; ip -s -s link show tabpods0; echo "--- neigh"; ip neigh show dev tabpods0; echo "--- podlink"; nft -a list table inet tabernetes_podlink; echo "--- tables"; nft list tables; echo "--- knp"; nft list ruleset 2>/dev/null | grep -B3 -A3 -E "queue|hook prerouting" | head -80; echo "--- sysctl"; for k in ip_forward conf/all/accept_local conf/tabpods1/accept_local conf/all/route_localnet conf/tabpods1/forwarding; do echo "$k $(cat /proc/sys/net/ipv4/$k)"; done; echo "--- ct"; cat /proc/net/stat/nf_conntrack 2>&1 | head -3; echo "--- nstat"; nstat -az 2>/dev/null | grep -vE " 0 +0.0$" | head -60; echo "--- udp sockets"; cat /proc/net/udp | head -20; echo "--- uname"; uname -a' 2>&1 | sed 's/^/w54 /'
+	# shellcheck disable=SC2086
+	docker exec "$N" nsenter $crictl_ns nft delete table inet tabtrace 2>&1 | sed 's/^/w54 /'
 	udp_fact "diagnose: page console: $(udp_lines "$(grep -ai 'udp' "$f" 2>/dev/null | tail -8)")"
 	udp_fact "diagnose: agent: $(udp_lines "$(docker logs "$N" 2>&1 | grep -aiE 'udp channel|pod channel' | tail -8)")"
 	# shellcheck disable=SC2016,SC2086 # for the shell in the node; crictl_ns is a list of flags
