@@ -703,6 +703,9 @@ tab node and the Docker node:
 
 - tab pod to a Docker pod and its Service, Docker pod to a tab pod and its
   Service, with the pod IPs as sources (ND13 to ND18);
+- Docker pod to a TCP server in a tab pod (H8 for TCP, the line "H8 (TCP)").
+  Before the address on `tabpods1` (see "Implementation"), H8 did not work
+  on the GitHub runner for TCP and for UDP, and no line showed it;
 - the terminal of the tab node to a Docker pod, with the node IP as the
   source;
 - an egress policy on a tab pod (ND6) and an ingress policy on a tab pod

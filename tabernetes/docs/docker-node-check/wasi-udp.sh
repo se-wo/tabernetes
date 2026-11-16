@@ -116,6 +116,8 @@ udp_diagnose() {
 #                     on node-1, the default server in a tab pod and in the
 #                     terminal; a pod on node-1 to CoreDNS on the tab node if
 #                     it runs there (else a fact)
+#   H8 (TCP)          busybox nc on node-1 to a TCP server in a tab pod
+#                     (the TPROXY rule for TCP, networking-policy.md)
 #   Host              nc -u in the terminal of the tab node to a pod on
 #                     node-1 (SKIP without nft_socket and without answer)
 #   IC3               ping from a tab pod to a pod on node-1
@@ -127,7 +129,7 @@ udp_diagnose() {
 # (W5.2a). A deny test waits at most 10 seconds for "no answer".
 udp_nodes() {
 	local p dock dsvc tabip tsvc inip polip cl dc ok out a b c s k8s dns cd1 cdt n
-	for p in wasi-nd-dock wasi-nd-tab wasi-nd-in wasi-nd-pol wasi-nd-bb wasi-nd-ok wasi-nd-eg; do
+	for p in wasi-nd-dock wasi-nd-tab wasi-nd-in wasi-nd-pol wasi-nd-bb wasi-nd-ok wasi-nd-eg wasi-nd-tcp; do
 		if ! wait_for "kubectl get pod $p" 'Running' 240; then
 			k get pods -l wasi-check=udp -o wide
 			result FAIL "ND rows: the pods of phase 5 do not run ($p)"
@@ -209,6 +211,14 @@ EOF"
 	grep -q "^udp 4 bytes from $dc:" <<<"$s" || ok=1
 	check "ND13, ND14, ND15" "$ok" "the pod $dc on node-1 to the tab pod $tabip:7: $(udp_lines "$(grep -E '^(answer|no answer|error)' <<<"$a")"); to its Service $tsvc:7: $(udp_lines "$(grep -E '^(answer|no answer|error)' <<<"$b")") (want the answers from $tabip:7 and $tsvc:7); the tab pod sees '$(grep "bytes from $dc:" <<<"$s" | head -1)'"
 	[ "$ok" = 0 ] || udp_diagnose "$tabip"
+
+	# H8 for TCP (networking-policy.md): busybox nc on node-1 connects to
+	# the TCP server of a tab pod and gets its line.
+	p="$(pod_ip wasi-nd-tcp)"
+	out="$(udp_exec "echo hi | nc -w 2 $p 8080; echo rc=\$?")"
+	ok=0
+	[ "$(head -1 <<<"$out")" = tcp-ok ] || ok=1
+	check "H8 (TCP)" "$ok" "busybox nc on node-1 to the TCP server of the tab pod $p:8080: '$(udp_lines "$out")' (want tcp-ok)"
 
 	# ND16, ND18: the tab pod to the pod on node-1 and to its Service; busybox
 	# nc -u too.

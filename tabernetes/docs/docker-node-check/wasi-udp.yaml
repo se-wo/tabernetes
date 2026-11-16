@@ -380,6 +380,16 @@ spec:
   terminationGracePeriodSeconds: 1
   containers: [{name: c, image: busybox, command: [sleep, "86400"]}]
 ---
+# H8 of ../networking-policy.md for TCP: a TCP server on the tab node that a
+# pod on node-1 connects to (the TPROXY rule for TCP of the agent).
+apiVersion: v1
+kind: Pod
+metadata: {name: wasi-nd-tcp, labels: {wasi-check: udp, app: wasi-nd-tcp}}
+spec:
+  nodeSelector: {kubernetes.io/hostname: tab}
+  terminationGracePeriodSeconds: 1
+  containers: [{name: c, image: busybox, command: [sh, -c, "while true; do echo tcp-ok | nc -l -p 8080; done"]}]
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: wasi-nd-eg}
