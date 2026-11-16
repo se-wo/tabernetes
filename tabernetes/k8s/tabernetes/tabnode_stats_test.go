@@ -28,8 +28,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/transport"
-	"k8s.io/streaming/pkg/httpstream/spdy"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
+	"k8s.io/streaming/pkg/httpstream/spdy"
 	"sigs.k8s.io/yaml"
 )
 
