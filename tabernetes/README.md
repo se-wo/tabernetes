@@ -914,8 +914,10 @@ WebAssembly pods and has no label: libcontainer has no `--no-pivot`.
 
 ## Limits
 
-- Wasm runs on one thread. The boot takes about 15 seconds. Everything shares
-  one CPU core.
+- Wasm runs on one thread. The boot takes about 18 seconds to the prompt
+  (headless Chromium on a 4-core cloud machine, a first visit and a return
+  visit alike; [docs/boot-time.md](docs/boot-time.md) has the phases).
+  Everything shares one CPU core.
 - Containers on the tab nodes get no signals. A container that stops gets
   its preStop hook and is then killed at once; the rest of the grace period
   is not waited for. `kubectl debug --target` shares no processes.
