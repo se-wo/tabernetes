@@ -4,11 +4,14 @@
 import { Terminal } from "@xterm/xterm";
 import { fitTerminal } from "./fit.js";
 import { installFS } from "./fs.js";
-import { countBusy, patchWalltime } from "./clock.js";
+import { bootMark, countBusy, patchWalltime, startBootMarks } from "./clock.js";
 
 const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
 
 export async function startTerminal(el, opts) {
+  // ?bootmarks in the URL: performance marks of the boot (docs/boot-time.md).
+  if (new URLSearchParams(location.search).has("bootmarks")) startBootMarks();
+  bootMark("terminal");
   const term = new Terminal({
     convertEol: true,
     cursorBlink: true,
@@ -71,8 +74,10 @@ export async function startTerminal(el, opts) {
   const t0 = performance.now();
   const since = () => ((performance.now() - t0) / 1000).toFixed(1).padStart(5);
   globalThis.tabernetesStatus = (s) => term.writeln(`${DIM(`[${since()}s]`)} ${s}`);
+  bootMark("fetch");
   const dl = await download(opts.wasmURL);
   const { body, cached } = dl;
+  bootMark(cached ? "response-cache" : "response");
   // The page knows the exact size of the file (data-size), the header only maybe.
   const total = opts.wasmSize || dl.total;
   let loaded = 0;
@@ -90,16 +95,19 @@ export async function startTerminal(el, opts) {
   };
   const counted = body.pipeThrough(new TransformStream({
     transform(chunk, ctl) {
+      if (!loaded) bootMark("first-chunk");
       loaded += chunk.length;
       term.write(progress(loaded, total));
       ctl.enqueue(chunk);
     },
+    flush() { bootMark("downloaded"); },
   }));
   const go = new globalThis.Go();
   go.env = { HOME: "/root", USER: "root", PATH: "/usr/bin" };
   patchWalltime(go);
   countBusy(go);
   const instance = await instantiate(unpack(opts.wasmURL, counted, total, opts.workerURL), go.importObject);
+  bootMark("compiled");
   term.writeln("");
   globalThis.tabernetesStatus(cached ? "compiled WebAssembly from the browser cache" : "downloaded and compiled WebAssembly");
   // The "free" command reads the size of the linear memory from here.
@@ -112,9 +120,15 @@ export async function startTerminal(el, opts) {
       term.writeln(DIM("The full trace is in tabernetesCrash in the DevTools console."));
     }
   };
-  go.run(instance).then(() => exited(), (e) => exited(e?.message ?? String(e)));
+  bootMark("go-run");
+  const goRun = () => go.run(instance);
+  (go._countedRun ? go._countedRun(goRun) : goRun()).then(() => exited(), (e) => exited(e?.message ?? String(e)));
+  // go.run returns once Go waits for the first time: the runtime start, the
+  // package init and main ran in that one call.
+  bootMark("go-yield");
   try {
     await globalThis.tabernetes.ready;
+    bootMark("ready");
   } catch (e) {
     term.writeln(`\r\n\x1b[31mthe cluster did not start: ${e.message}\x1b[0m`);
     term.writeln(DIM("The control plane logs are in tabernetesLogs in the DevTools console. Reload to try again."));
@@ -296,6 +310,7 @@ export async function startTerminal(el, opts) {
   }
 
   redraw();
+  bootMark("prompt");
   term.onData((data) => {
     // A builtin that asks for a line (join) gets the keys first.
     if (reader) return readerFeed(data);
@@ -524,6 +539,7 @@ function unpack(url, stream, size, workerURL) {
           last = last.then(() => out).then((b) => ctl.enqueue(b));
         }
         await last;
+        bootMark("unpacked");
         ctl.close();
       } catch (e) {
         ctl.error(e);
