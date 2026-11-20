@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -338,6 +339,31 @@ func (s *serviceProxy) watchCorefile(ctx context.Context) {
 	factory.Start(ctx.Done())
 }
 
+// loadbalance tells whether the Corefile has the loadbalance plugin, which
+// shuffles the A records of each answer (the shipped addons/coredns.yaml
+// has it). Before the tab has seen a Corefile, it is the shipped one.
+func (s *serviceProxy) loadbalance() bool {
+	st := s.corefile.Load()
+	if st == nil || st.cf == nil {
+		return true
+	}
+	_, ok := st.cf.plugins["loadbalance"]
+	return ok
+}
+
+// shuffled is ips in a random order, as the loadbalance plugin of CoreDNS
+// answers them, or ips unchanged without the plugin.
+func (s *serviceProxy) shuffled(ips []string) []string {
+	if len(ips) < 2 || !s.loadbalance() {
+		return ips
+	}
+	ips = slices.Clone(ips)
+	s.mu.Lock()
+	s.rand.Shuffle(len(ips), func(i, j int) { ips[i], ips[j] = ips[j], ips[i] })
+	s.mu.Unlock()
+	return ips
+}
+
 // lookupName answers one fully qualified name: the Corefile first (rewrite,
 // hosts), then the services.
 func (s *serviceProxy) lookupName(name string) (dnsAnswer, bool) {
@@ -479,7 +505,7 @@ func (s *serviceProxy) answerDNS(req []byte, proto string, st *corednsStats) ([]
 			}
 		}
 		if q.Type == dnsmessage.TypeA {
-			for _, ip := range a.ips {
+			for _, ip := range s.shuffled(a.ips) {
 				if v4 := net.ParseIP(ip).To4(); v4 != nil {
 					r := dnsmessage.AResource{}
 					copy(r.A[:], v4)

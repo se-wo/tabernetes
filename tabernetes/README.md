@@ -378,9 +378,10 @@ kube-proxy and DNS of the tab: it listens on every cluster IP and node port
 and forwards to ready endpoints (endpoints on a Docker node through the
 port-forward of the apiserver). `wget`, `curl` and `nslookup` resolve service names
 with the search path of the pod, in pods and in the terminal:
-`k expose deploy web --port 80; wget -qO- web`. Endpoints rotate, but with
-`sessionAffinity: ClientIP` a client IP (a pod, or the node IP for the
-terminal) keeps its endpoint for `timeoutSeconds`, and
+`k expose deploy web --port 80; wget -qO- web`. Each new connection gets one
+of the endpoints at random, as kube-proxy in iptables mode picks it on a
+Docker node, but with `sessionAffinity: ClientIP` a client IP (a pod, or the
+node IP for the terminal) keeps its first endpoint for `timeoutSeconds`, and
 `internalTrafficPolicy: Local` uses the endpoints on the tab node only. The apiserver dials pods
 directly (`k8s/patch.go`), so its service and pod proxy work, too.
 
@@ -669,7 +670,7 @@ the NetworkPolicy implementation of SIG Network. The design is in
 - The tab nodes have the engine in the binary (`tabnode_netpol.go`). It
   decides when a connection opens, which is what it gets on a real node: the
   first packet of a connection. A pod dials from its pod IP, and a service IP
-  goes to one endpoint first, like kube-proxy's DNAT. A denied connection
+  goes to one endpoint first, like the DNAT of kube-proxy. A denied connection
   times out, like a dropped SYN. A service without endpoints is refused.
 - Pods of different nodes talk over a `pod` channel (`podlink.go`), not the
   port-forward of the apiserver. Its first line names the source and the
