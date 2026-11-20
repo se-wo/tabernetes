@@ -67,7 +67,7 @@ marks of this change.
   every pod of the tab node when it is first seen and first Ready.
   `clock.js` records every call into Go with its start, its end and the
   timer Go asked for before it went idle, and `fs.js` counts the file system
-  calls. The controller-manager times come from the time stamps of its
+  calls. The controller-manager times come from the timestamps of its
   klog lines. Without `?bootmarks` all of this is one check of a flag.
 - Cost of the marks: 24 boots without them took 17.9 s (17.2-18.6) against
   18.2 s (16.8-19.7) with them, inside the spread.
@@ -114,7 +114,7 @@ the previous step.
 | PKI and kubeconfigs (ECDSA) | 64 (54-65, 40-68) | 72 (64-78, 51-90) | 53 (48-78, 13-87) |
 | etcd shim start | 5 (5-8, 3-33) | 7 (7-9, 4-17) | 5 (4-7, 0-10) |
 | kube-apiserver: start to first answer | 3887 (3755-4209, 3634-4239) | 3714 (3689-3794, 3631-4048) | 3654 (3467-3775, 2374-4417) |
-| kube-apiserver: first answer to `/readyz` ok | 2403 (2088-2562, 1915-2781) | 2084 (1989-2207, 1918-2483) | 2092 (1894-2363, 1649-2703) |
+| kube-apiserver: first answer to `/readyz` OK | 2403 (2088-2562, 1915-2781) | 2084 (1989-2207, 1918-2483) | 2092 (1894-2363, 1649-2703) |
 | controller-manager and scheduler started (goroutines) | 7 | 7 | 7 |
 | addons: `kubectl apply --server-side` | 3505 (3399-3695, 3293-4140) | 3221 (2749-3452, 2600-3773) | 3191 (2862-3331, 2598-3807) |
 | tab node: register (Node, status) | 64 (59-70, 51-79) | 64 (62-191, 54-554) | 62 (53-67, 50-81) |
@@ -228,7 +228,7 @@ between 8 and 15 % of the boot.
 
 ### No preemption
 
-Go on js/wasm runs one goroutine until it blocks; there is no preemption
+Go on `js/wasm` runs one goroutine until it blocks; there is no preemption
 and the page's event loop only runs when every goroutine is blocked.
 
 - 330 calls into Go (median) until the prompt. The longest one is the first:
@@ -316,14 +316,14 @@ The Wasm self time by group:
 | k8s.io/apimachinery | 505 |
 | Go allocation | 432 |
 | k8s.io/kubernetes | 426 |
-| k8s.io/api types | 411 |
+| `k8s.io/api` types | 411 |
 | Go package init | 379 |
 | reflect | 338 |
-| net, net/http, net/url | 295 |
+| `net`, `net/http`, `net/url` | 295 |
 | server-side apply (structured-merge-diff) | 278 |
 | k8s.io/client-go | 276 |
 | Prometheus metrics | 164 |
-| regexp | 102 |
+| `regexp` | 102 |
 | YAML | 81 |
 | klog | 29 |
 
