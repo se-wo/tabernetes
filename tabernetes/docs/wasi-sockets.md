@@ -1754,6 +1754,8 @@ table does these steps:
   mode (`-m statistic --mode random`). A new client of `sessionAffinity`
   gets an endpoint at random too and keeps it. The flow keeps its endpoint
   until it closes, as conntrack does: only a new flow gets a new selection.
+  The unit tests seed the random source. The end-to-end test of FL11 sends
+  16 flows without `Local`: all on one node has a probability of 2^-15.
   With `internalTrafficPolicy: Local`, it selects only endpoints on this
   tab node. The flow keeps an endpoint on another node, and step 4 of
   section 8.7 gives the datagram to `udpToNode`. The answers through
@@ -2415,7 +2417,7 @@ The column "Nodes" gives the nodes for the test:
 | FL5 | A client sends one datagram each second to a UDP Deployment with 2 replicas. The test deletes the pod that answered. The client then gets answers from the other endpoint. The unit test is `TestUDPFlowEndpointGone`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
 | FL8, FL9 | A new policy denies an open flow. The next datagram does not arrive. The unit test is `TestUDPPolicyStrictMode`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
 | FL10 | With `sessionAffinity: ClientIP`, 10 sockets with different source ports in one client pod get answers from one endpoint. Without it, the endpoints are selected at random: both get datagrams, in no fixed order. The unit test is `TestUDPFlowAffinity`, with a fixed seed of the random source. End-to-end test: `wasi-udp-flows.test.mjs`. 10 `nc -u` at the same time give the 10 sockets. | tab |
-| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. A Service without `Local` has endpoints on the tab node and on a node worker. Unit tests: `TestUDPFlowLocalPolicy` (one node), `TestUDPNodeLocalPolicy` (two nodes, with a fixed seed). End-to-end test: `wasi-udp-nodes.test.mjs` ("FL11: ..."), on the tab node and on the node worker. Without `Local`, 16 flows at the same time go to both nodes; all on one node has a probability of 2^-15. | tab, worker |
+| FL11 | With `internalTrafficPolicy: Local`, datagrams from a tab pod go only to endpoints on the same tab node. A Service without `Local` has endpoints on the tab node and on a node worker. Unit tests: `TestUDPFlowLocalPolicy` (one node), `TestUDPNodeLocalPolicy` (two nodes). End-to-end test: `wasi-udp-nodes.test.mjs` ("FL11: ..."), on the tab node and on the node worker. | tab, worker |
 | FL12 | A policy denies a datagram. A new policy then allows it. The next datagram arrives in less than 5 seconds. Unit tests: `TestUDPFlowPolicyDeny`, `TestUDPPolicyDeniedNoFlow`. End-to-end test: `wasi-udp-flows.test.mjs`. | tab |
 | FL13 | A unit test removes a pod. The flow table has no flow of its pod IP. The unit test is `TestUDPFlowReleaseIP`. | tab |
 | ND1 | The tests with "worker" or "Docker" in this table. Each of these rows has a test, or a SKIP line with the reason in the Docker check. | worker, Docker |
