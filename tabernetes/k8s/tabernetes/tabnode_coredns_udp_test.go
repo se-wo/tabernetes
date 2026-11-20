@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -500,5 +501,70 @@ func TestNcUDPListen(t *testing.T) {
 	// Without a datagram, -w ends it.
 	if _, code := sh(t, "nc -u -l -w 0.1 -p 5354"); code != 1 {
 		t.Errorf("no datagram: exit %d", code)
+	}
+}
+
+// The A records of a headless Service follow the loadbalance plugin of the
+// Corefile, as CoreDNS answers them: with it (the shipped addons/coredns.yaml)
+// each answer has them in a random order, and a lookup of the tab takes one
+// at random; without it, the order stays and a lookup takes the first.
+func TestDNSLoadbalance(t *testing.T) {
+	w := newDNSWorld(t)
+	seedProxy(w.s, 3)
+	const name = "many.default.svc.cluster.local."
+	order := func(id uint16) []string {
+		t.Helper()
+		m := w.tcpDNS(t, id, name, dnsmessage.TypeA)
+		var ips []string
+		for _, a := range m.Answers {
+			r := a.Body.(*dnsmessage.AResource)
+			ips = append(ips, netip.AddrFrom4(r.A).String())
+		}
+		if len(ips) != 40 {
+			t.Fatalf("%d A records", len(ips))
+		}
+		return ips
+	}
+
+	// The Corefile of newDNSWorld has no loadbalance.
+	first := order(1)
+	if !slices.IsSorted(first) {
+		t.Errorf("without loadbalance the order changed: %v", first)
+	}
+	for id := range uint16(5) {
+		if got := order(10 + id); !reflect.DeepEqual(got, first) {
+			t.Fatalf("without loadbalance the order changed: %v", got)
+		}
+		if ip, ok := w.s.resolve("many", "default"); !ok || ip != first[0] {
+			t.Fatalf("without loadbalance resolve gave %s %v, want %s", ip, ok, first[0])
+		}
+	}
+
+	w.s.setCorefile(".:53 {\n hosts {\n 10.1.2.3 foo.example.com\n }\n loadbalance\n}\n")
+	changed := false
+	for id := range uint16(5) {
+		got := order(20 + id)
+		if !reflect.DeepEqual(got, first) {
+			changed = true
+		}
+		sorted := slices.Clone(got)
+		slices.Sort(sorted)
+		if !reflect.DeepEqual(sorted, first) {
+			t.Fatalf("loadbalance changed the records: %v", got)
+		}
+	}
+	if !changed {
+		t.Error("loadbalance: the A records keep their order")
+	}
+	seen := map[string]bool{}
+	for range 1000 {
+		ip, ok := w.s.resolve("many", "default")
+		if !ok {
+			t.Fatal("many does not resolve")
+		}
+		seen[ip] = true
+	}
+	if len(seen) != 40 {
+		t.Errorf("loadbalance: resolve gave %d of the 40 addresses", len(seen))
 	}
 }

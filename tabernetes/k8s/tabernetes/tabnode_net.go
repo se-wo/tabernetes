@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -57,8 +58,8 @@ type serviceProxy struct {
 	mu        sync.Mutex
 	listeners map[string]*svcListener // by ip:port
 	failed    map[string]string       // addresses that could not listen, by error
-	next      map[string]uint32       // round robin of each service port
 	sticky    map[string]*stickyEP    // sessionAffinity: service port and client IP
+	rand      *rand.Rand              // picks endpoints and shuffles A records; tests seed it
 
 	// The UDP Services (UD16, UD17). UDP has no listener: the flow table
 	// (tabnode_flows.go) translates each new datagram with these targets.
@@ -98,8 +99,8 @@ func newServiceProxy(client kubernetes.Interface) *serviceProxy {
 		kick:      make(chan struct{}, 1),
 		listeners: map[string]*svcListener{},
 		failed:    map[string]string{},
-		next:      map[string]uint32{},
 		sticky:    map[string]*stickyEP{},
+		rand:      rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
 	}
 	return s
 }
@@ -302,10 +303,11 @@ type endpoint struct {
 	remote bool // on another node, out of reach of this instance
 }
 
-// forward connects c to an endpoint of t: round robin over all ready
-// endpoints like kube-proxy, the ones on this node directly, the ones on
-// other nodes (Docker, Web Workers) through the apiserver. If one cannot be
-// reached, the next one is tried.
+// forward connects c to an endpoint of t: one of all ready endpoints at
+// random, as kube-proxy in iptables mode does, the ones on this node
+// directly, the ones on other nodes (Docker, Web Workers) through the
+// apiserver. If one cannot be reached, the next one in the list after it is
+// tried. kube-proxy does not retry; that is a finding of #98 of its own.
 func (s *serviceProxy) forward(c net.Conn, t svcPort, client string) {
 	eps := s.endpoints(t)
 	if len(eps) == 0 {
@@ -331,21 +333,21 @@ func (s *serviceProxy) forward(c net.Conn, t svcPort, client string) {
 	c.Close()
 }
 
-// rotate is the round robin of a service port, like kube-proxy's.
-func (s *serviceProxy) rotate(t svcPort) uint32 {
-	key := t.namespace + "/" + t.name + ":" + t.portName
+// randomIndex is one of 0 to n-1, each with the same probability: the
+// statistic match of kube-proxy in iptables mode (--mode random
+// --probability 1/n, 1/(n-1), ...).
+func (s *serviceProxy) randomIndex(n int) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	start := s.next[key]
-	s.next[key]++
-	return start
+	return s.rand.IntN(n)
 }
 
 // pick is the index in eps for a new connection of client: the endpoint it is
-// bound to by sessionAffinity, else the next one in round robin.
+// bound to by sessionAffinity, else one at random. A new client of
+// sessionAffinity gets an endpoint at random too, and sticks to it.
 func (s *serviceProxy) pick(t svcPort, client string, eps []endpoint) int {
 	if t.affinity <= 0 || client == "" {
-		return int(s.rotate(t)) % len(eps)
+		return s.randomIndex(len(eps))
 	}
 	key := t.namespace + "/" + t.name + ":" + t.portName + "|" + client
 	now := time.Now()
@@ -362,7 +364,7 @@ func (s *serviceProxy) pick(t svcPort, client string, eps []endpoint) int {
 			}
 		}
 	}
-	i := int(s.rotate(t)) % len(eps)
+	i := s.randomIndex(len(eps))
 	s.mu.Lock()
 	s.sticky[key] = &stickyEP{addr: net.JoinHostPort(eps[i].ip, strconv.Itoa(int(eps[i].port))), last: now}
 	s.mu.Unlock()
@@ -728,12 +730,13 @@ func (s *serviceProxy) resolve(host, namespace string) (string, bool) {
 	if len(a.ips) == 1 {
 		return a.ips[0], true
 	}
-	// Several A records (headless services): round robin, like DNS.
-	s.mu.Lock()
-	i := s.next["dns:"+a.name]
-	s.next["dns:"+a.name]++
-	s.mu.Unlock()
-	return a.ips[int(i)%len(a.ips)], true
+	// Several A records (headless services): the client takes the first
+	// one. The loadbalance plugin of CoreDNS shuffles them in each answer,
+	// so that is one at random; without it, always the same one.
+	if !s.loadbalance() {
+		return a.ips[0], true
+	}
+	return a.ips[s.randomIndex(len(a.ips))], true
 }
 
 // reverse is the PTR record of a cluster IP: the name of its service.

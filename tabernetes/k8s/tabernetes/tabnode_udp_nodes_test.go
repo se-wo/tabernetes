@@ -165,8 +165,8 @@ func TestUDPNodeReceiveNodeIP(t *testing.T) {
 }
 
 // FL11: with internalTrafficPolicy Local, the translation selects only the
-// endpoint on this node. Without it, round robin selects the endpoint on
-// node-1 too (section 8.8).
+// endpoint on this node. Without it, the random pick selects the endpoint
+// on node-1 too (section 8.8); a fixed seed keeps the test repeatable.
 func TestUDPNodeLocalPolicy(t *testing.T) {
 	eip := nextLoopbackIP()
 	slice := func(svc string) *discoveryv1.EndpointSlice {
@@ -177,7 +177,8 @@ func TestUDPNodeLocalPolicy(t *testing.T) {
 	local := udpService("loc", "10.96.88.31", udpSvcPort("u", 53))
 	local.Spec.InternalTrafficPolicy = ptr.To(v1.ServiceInternalTrafficPolicyLocal)
 	cluster := udpService("all", "10.96.88.32", udpSvcPort("u", 53))
-	flowNode(t, []*v1.Service{local, cluster}, slice("loc"), slice("all"))
+	s := flowNode(t, []*v1.Service{local, cluster}, slice("loc"), slice("all"))
+	seedProxy(s, 1)
 	rec := udpNodeRecord(t)
 	ep := udpListen(t, podCtx(t, eip), ":53")
 	ctx := podCtx(t, nextLoopbackIP())
@@ -190,7 +191,7 @@ func TestUDPNodeLocalPolicy(t *testing.T) {
 	}
 
 	here := 0
-	for i := range 4 {
+	for i := range 10 {
 		udpNodeWrite(t, udpDial(t, ctx, "10.96.88.32:53"), strconv.Itoa(i))
 	}
 	for {
@@ -201,8 +202,8 @@ func TestUDPNodeLocalPolicy(t *testing.T) {
 		here++
 	}
 	got := rec.calls()
-	if here != 2 || len(got) != 2 {
-		t.Fatalf("Cluster: %d datagrams on this node, udpToNode got %v; want 2 and 2", here, got)
+	if here+len(got) != 10 || here == 0 || len(got) == 0 {
+		t.Fatalf("Cluster: %d datagrams on this node, udpToNode got %v; want 10 on both nodes", here, got)
 	}
 	for _, s := range got {
 		if s.dst.String() != "10.244.1.6:53" {

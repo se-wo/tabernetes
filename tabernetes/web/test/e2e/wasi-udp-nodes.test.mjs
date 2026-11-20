@@ -143,23 +143,24 @@ forEachNode(["tab", "worker"], (kind) => {
 
   test(`FL11: with internalTrafficPolicy Local, only the echo pod on the same node answers; without it, both on ${kind}`, async () => {
     const ip = IP[p.bb];
-    const ask = async (svc, text) => {
+    const ask = async (svc, text, n) => {
       const cip = await clusterIP(svc);
-      // The four nc run at the same time: a later nc would get the same
-      // first free port (UD3) and use the open flow of the one before (FL1).
-      const r = await inPod(ns, p.bb, `for i in 1 2 3 4; do echo ${text} | nc -u -w 2 ${cip} 7 & done; wait`);
+      // The nc run at the same time: a later nc would get the same first
+      // free port (UD3) and use the open flow of the one before (FL1).
+      const r = await inPod(ns, p.bb, `for i in $(seq ${n}); do echo ${text} | nc -u -w 2 ${cip} 7 & done; wait`);
       // The shell can also print a line for each job.
-      assert.equal(r.out.split("\n").filter((l) => l === `echo ${text}`).length, 4, `${svc}: ${r.out}`);
+      assert.equal(r.out.split("\n").filter((l) => l === `echo ${text}`).length, n, `${svc}: ${r.out}`);
     };
     // "fl11-local\n" has 11 bytes, "fl11-cluster\n" 13. Each nc is a new
-    // flow, and round robin selects the endpoints in turn.
-    await ask("both-local", "fl11-local");
+    // flow, and each new flow gets an endpoint at random, as kube-proxy in
+    // iptables mode picks it: 16 flows all on one node is a chance of 2^-15.
+    await ask("both-local", "fl11-local", 4);
     assert.equal(await received(p.echo, 11, ip), 4);
     assert.equal(await received(o.echo, 11, ip), 0);
-    await ask("both", "fl11-cluster");
+    await ask("both", "fl11-cluster", 16);
     const here = await received(p.echo, 13, ip);
     const there = await received(o.echo, 13, ip);
-    assert.equal(here + there, 4);
+    assert.equal(here + there, 16);
     assert.ok(here > 0 && there > 0, `${here} on this node, ${there} on the other node`);
   });
 

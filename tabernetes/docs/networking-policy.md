@@ -105,7 +105,7 @@ pins (v0.2.1).
 - **H1** `dialCluster` binds `LocalAddr` to the pod IP of `procOf(ctx)`. The
   fake network keeps it, so every listener sees which pod dials.
 - **H2** A cluster IP is resolved in `dialCluster`: the service proxy's
-  endpoint list and round robin pick one endpoint. The engine then sees the
+  endpoint list and a random pick give one endpoint. The engine then sees the
   endpoint pod, as on a real node after DNAT.
 - **H3** The engine evaluates egress and ingress (`PolicyEngine.EvaluatePacket`
   runs both, as upstream). Deny: no connection is made.

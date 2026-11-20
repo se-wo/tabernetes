@@ -419,13 +419,15 @@ func TestUDPFlowEndpointGone(t *testing.T) {
 }
 
 // FL10: with sessionAffinity ClientIP, 10 sockets of one client get one
-// endpoint. Without it, round robin.
+// endpoint. Without it, each new flow gets an endpoint at random, so both
+// get some (a fixed seed keeps the test repeatable).
 func TestUDPFlowAffinity(t *testing.T) {
 	e1, e2 := nextLoopbackIP(), nextLoopbackIP()
 	sticky := udpService("sticky", "10.96.88.18", udpSvcPort("u", 53))
 	sticky.Spec.SessionAffinity = v1.ServiceAffinityClientIP
 	plain := udpService("plain", "10.96.88.19", udpSvcPort("u", 53))
 	s := flowNode(t, []*v1.Service{sticky, plain}, udpSlice("sticky", udpEPPort("u", 53), e1, e2), udpSlice("plain", udpEPPort("u", 53), e1, e2))
+	seedProxy(s, 1)
 	ep1, ep2 := udpListen(t, podCtx(t, e1), ":53"), udpListen(t, podCtx(t, e2), ":53")
 	ctx := podCtx(t, nextLoopbackIP())
 	count := func(addr string) (n1, n2 int) {
@@ -449,8 +451,8 @@ func TestUDPFlowAffinity(t *testing.T) {
 	if n1, n2 := count("10.96.88.18:53"); n1+n2 != 10 || (n1 != 0 && n2 != 0) {
 		t.Errorf("sessionAffinity: %d and %d datagrams, want 10 at one endpoint", n1, n2)
 	}
-	if n1, n2 := count("10.96.88.19:53"); n1 != 5 || n2 != 5 {
-		t.Errorf("round robin: %d and %d datagrams", n1, n2)
+	if n1, n2 := count("10.96.88.19:53"); n1+n2 != 10 || n1 == 0 || n2 == 0 {
+		t.Errorf("random: %d and %d datagrams, want 10 at both endpoints", n1, n2)
 	}
 	if n := s.flowCount(); n != 20 {
 		t.Errorf("%d flows, want 20", n)
