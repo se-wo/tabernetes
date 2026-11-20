@@ -23,16 +23,63 @@ export function patchWalltime(go) {
 // milliseconds, with the call that runs now. The node reports it as its CPU.
 export function countBusy(go) {
   const resume = go._resume;
+  const idle = globalThis.tabernetesIdle;
+  let timer = -1;
   let busy = 0;
   let depth = 0;
   let since = 0;
-  go._resume = function () {
-    if (depth++ === 0) since = performance.now();
+  let rec = false; // this call goes into tabernetesIdle
+  const counted = (fn) => {
+    if (depth++ === 0) {
+      since = performance.now();
+      rec = !!idle && idle.length < 3e6;
+      if (rec) idle.push(since);
+    }
     try {
-      return resume.call(this);
+      return fn();
     } finally {
-      if (--depth === 0) busy += performance.now() - since;
+      if (--depth === 0) {
+        const now = performance.now();
+        busy += now - since;
+        if (rec) idle.push(now, timer);
+        timer = -1;
+      }
     }
   };
+  go._resume = function () {
+    return counted(() => resume.call(this));
+  };
+  // go.run runs the runtime start, the package init and main up to the
+  // first wait in one call that does not go through _resume. With boot
+  // marks, terminal.js counts it through this.
+  if (idle) go._countedRun = counted;
+  // With boot marks: the timer Go asked for before it went idle.
+  if (idle) {
+    const schedule = go.importObject.gojs["runtime.scheduleTimeoutEvent"];
+    go.importObject.gojs["runtime.scheduleTimeoutEvent"] = function (sp) {
+      const sp0 = sp >>> 0;
+      timer = go.mem.getUint32(sp0 + 8, true) + go.mem.getInt32(sp0 + 12, true) * 4294967296;
+      return schedule.call(this, sp);
+    };
+  }
   globalThis.tabernetesBusy = () => busy + (depth > 0 ? performance.now() - since : 0);
+}
+
+// Boot marks (?bootmarks, docs/boot-time.md): performance marks "js:<name>"
+// of the page, with the busy time of Go so far, and the Go marks of
+// k8s/tabernetes/bootmarks.go. globalThis.tabernetesIdle gets, for every
+// call into Go, its start, its end and the timeout in milliseconds that Go
+// asked for before it went idle (-1 for none): a flat array of triples.
+// Off by default; then bootMark costs one check.
+let marking = false;
+
+export function startBootMarks() {
+  marking = true;
+  globalThis.tabernetesBootMarks = true;
+  globalThis.tabernetesIdle = [];
+}
+
+export function bootMark(name) {
+  if (!marking) return;
+  performance.mark(`js:${name}`, { detail: { busy: globalThis.tabernetesBusy?.() ?? 0 } });
 }

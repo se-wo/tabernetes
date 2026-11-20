@@ -199,11 +199,20 @@ export function createFS({ cwd = "/", onOutput = () => {} } = {}) {
   };
 
   const fs = { constants };
+  // With boot marks (docs/boot-time.md): calls and milliseconds per
+  // operation, without the callback into Go.
+  const stats = globalThis.tabernetesBootMarks ? (globalThis.tabernetesFsStats = {}) : null;
   for (const [name, fn] of Object.entries(ops)) {
     fs[name] = (...args) => {
       const cb = args.pop();
       let res, err = null;
+      const t0 = stats && performance.now();
       try { res = fn(...args); } catch (e) { err = e; }
+      if (stats) {
+        const s = (stats[name] ??= { calls: 0, ms: 0 });
+        s.calls++;
+        s.ms += performance.now() - t0;
+      }
       if (name === "read" || name === "write") cb(err, res ?? 0);
       else cb(err, res);
     };

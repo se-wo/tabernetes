@@ -182,6 +182,7 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 	if err := n.register(ctx); err != nil {
 		return fmt.Errorf("registering node %s: %w", tabNodeName, err)
 	}
+	bootMark("node-registered")
 	if err := n.serve(ctx); err != nil {
 		return fmt.Errorf("kubelet server: %w", err)
 	}
@@ -210,9 +211,11 @@ func startTabNode(ctx context.Context, nc nodeCreds) error {
 
 	// The pod CIDR comes from the node IPAM controller of the
 	// controller-manager, a moment after the node exists.
+	bootMark("node-wait-pod-cidr")
 	if err := n.waitPodCIDR(ctx); err != nil {
 		return err
 	}
+	bootMark("node-pod-cidr")
 
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 0,
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
@@ -435,6 +438,8 @@ func (n *tabNode) heartbeat(ctx context.Context) {
 		}
 		if err != nil && ctx.Err() == nil {
 			fmt.Fprintln(os.Stderr, "tab node: lease:", err)
+		} else if err == nil && bootMarksOn {
+			bootMarkOnce("node-lease")
 		}
 		if time.Since(lastStatus) > time.Minute {
 			if err := n.updateStatus(ctx); err != nil && ctx.Err() == nil {
@@ -512,6 +517,7 @@ func (n *tabNode) isTabPodIP(ip string) bool {
 }
 
 func (n *tabNode) podChanged(pod *v1.Pod) {
+	bootMarkPod(pod)
 	if n.static.observe(pod) { // a mirror pod
 		return
 	}

@@ -85,6 +85,7 @@ func boot() (*cluster, error) {
 	must(os.MkdirAll("/root", 0o755))
 	os.Setenv("HOME", "/root")
 
+	bootMark("boot")
 	status("generating PKI")
 	ca := newPKI("ca", "tabernetes-ca")
 	ca.issue("apiserver", "kube-apiserver", nil, true,
@@ -114,13 +115,16 @@ func boot() (*cluster, error) {
 	cfg, err := os.ReadFile(kubeconfigPath("admin"))
 	must(err)
 	must(os.WriteFile("/root/.kube/config", cfg, 0o600))
+	bootMark("pki")
 
 	status("starting etcd")
 	l, err := net.Listen("tcp", etcdListen)
 	must(err)
 	startEtcd(l)
+	bootMark("etcd")
 
 	status("starting kube-apiserver")
+	bootMark("apiserver-launch")
 	apiserver := startComponent("kube-apiserver", app.NewAPIServerCommand(), []string{
 		"--etcd-servers=" + etcdClientURL,
 		"--bind-address=127.0.0.1",
@@ -164,6 +168,7 @@ func boot() (*cluster, error) {
 	if err := waitReady(c, "https://127.0.0.1:6443/readyz", apiserver); err != nil {
 		return nil, fmt.Errorf("kube-apiserver did not get ready: %w", err)
 	}
+	bootMark("apiserver-ready")
 
 	status("starting kube-controller-manager")
 	startComponent("kube-controller-manager", cmapp.NewControllerManagerCommand(), []string{
@@ -187,6 +192,7 @@ func boot() (*cluster, error) {
 		"--v=1",
 	})
 
+	bootMark("controller-manager-launched")
 	status("starting kube-scheduler")
 	startComponent("kube-scheduler", schedapp.NewSchedulerCommand(), []string{
 		"--kubeconfig=" + kubeconfigPath("scheduler"),
@@ -199,10 +205,16 @@ func boot() (*cluster, error) {
 		"--v=1",
 	})
 
+	bootMark("scheduler-launched")
+	if bootMarksOn {
+		go waitComponentReady("kube-controller-manager", "https://127.0.0.1:10257/healthz")
+		go waitComponentReady("kube-scheduler", "https://127.0.0.1:10259/readyz")
+	}
 	status("installing addons")
 	if err := installAddons(context.Background(), c); err != nil {
 		return nil, fmt.Errorf("installing addons: %w", err)
 	}
+	bootMark("addons-applied")
 	status("starting the tab node")
 	nc, err := c.issueNodeCreds(tabNodeName, tabNodeIP)
 	if err == nil {
@@ -211,6 +223,7 @@ func boot() (*cluster, error) {
 	if err != nil {
 		status("the tab node did not start: " + err.Error())
 	}
+	bootMark("tab-node-started")
 	status("ready")
 	return c, nil
 }
@@ -225,6 +238,7 @@ func waitReady(c *cluster, url string, exited <-chan error) error {
 		DialContext:     (&net.Dialer{}).DialContext, // force Go networking instead of fetch()
 	}}
 	deadline := time.After(bootTimeout)
+	answered, passed := false, map[string]bool{}
 	for {
 		req, _ := http.NewRequest(http.MethodGet, url+"?verbose", nil)
 		req.Header.Set("Authorization", "Bearer "+c.adminToken)
@@ -232,6 +246,9 @@ func waitReady(c *cluster, url string, exited <-chan error) error {
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if bootMarksOn {
+				markReadyz(&answered, passed, body)
+			}
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
@@ -275,6 +292,8 @@ func main() {
 	// stack and dies with "invalid runtime symbol table". Nobody profiles
 	// the browser tab, so turn it off.
 	runtime.MemProfileRate = 0
+	initBootMarks()
+	bootMark("main")
 	// wasm32 ends at 4 GiB. With GOGC=100 the heap may grow to twice the live
 	// heap first; the limit makes the GC work harder before it gets there.
 	debug.SetMemoryLimit(3 << 30)
