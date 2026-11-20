@@ -22,6 +22,8 @@
 //   --out FILE          all raw data as JSON (default boot-time.json)
 //   --log FILE          the console of the first boot (default none)
 //   --summary FILE      print the tables of an earlier --out file, boot nothing
+//   --reprofile FILE    analyse the profile of an earlier --profile run again
+//                       (FILE.json and FILE.cpuprofile), boot nothing
 //
 // It serves --site itself on 127.0.0.1 with Cache-Control: max-age=600 and
 // ETags, like GitHub Pages, and uses the Chromium of Playwright
@@ -53,7 +55,7 @@ const sampling = Number(opt("sampling", 200));
 const throttle = Number(opt("throttle", 0));
 const outFile = opt("out", "boot-time.json");
 const logFile = opt("log", "");
-if (!argv.includes("--summary") && !fs.existsSync(path.join(site, "index.html"))) {
+if (!argv.includes("--summary") && !argv.includes("--reprofile") && !fs.existsSync(path.join(site, "index.html"))) {
   console.error(`${site}/index.html is missing; run "mise run build" and "mise run site" in tabernetes/`);
   process.exit(2);
 }
@@ -148,6 +150,9 @@ async function boot(ctx, page, how, podDelay, wantLog) {
   res.wallToPrompt = Date.now() - t0;
   // The size of the Wasm memory at the prompt: what a snapshot would hold.
   res.memBytes = await page.evaluate(() => globalThis.tabernetesMemory?.buffer.byteLength);
+  // The calls of Go into the file system of the page (fs.js) up to the
+  // prompt: stderr of all components included.
+  res.fsStats = await page.evaluate(() => structuredClone(globalThis.tabernetesFsStats || null));
   if (marks && podDelay !== undefined) res.pod = await firstPod(page, podDelay);
   if (marks) {
     // The pods of the addons get ready after the prompt.
@@ -403,6 +408,16 @@ function summary() {
     const rs = byCase(c);
     console.log(`  ${c}: requests ${fmt(stats(rs.map((r) => r.served.length)))}, bytes ${fmt(stats(rs.map((r) => r.served.reduce((a, s) => a + s.bytes, 0))))}`);
   }
+  const withFs = ok.filter((r) => r.fsStats);
+  if (withFs.length) {
+    console.log("\nfs.js calls up to the prompt (per boot, medians): operation, calls, ms");
+    const ops = [...new Set(withFs.flatMap((r) => Object.keys(r.fsStats)))];
+    const tot = (r) => Object.values(r.fsStats).reduce((a, s) => a + s.ms, 0);
+    for (const op of ops.sort((a, b) => (stats(withFs.map((r) => r.fsStats[b]?.ms ?? 0)).med - stats(withFs.map((r) => r.fsStats[a]?.ms ?? 0)).med))) {
+      console.log(`  ${op}: ${stats(withFs.map((r) => r.fsStats[op]?.calls ?? 0)).med} calls, ${stats(withFs.map((r) => r.fsStats[op]?.ms ?? 0)).med.toFixed(0)} ms`);
+    }
+    console.log(`  all: ${fmt(stats(withFs.map(tot)))} ms`);
+  }
   const mem = stats(ok.map((r) => r.memBytes / 1048576));
   if (mem) console.log(`Wasm memory at the prompt: ${fmt(mem)} MiB`);
   const ext = ok.flatMap((r) => r.external);
@@ -442,7 +457,7 @@ async function profileRun() {
 // (the function was on top) and total time (on the stack). Go on js/wasm
 // unwinds the Wasm stack when a goroutine yields, so the stacks are cut
 // there and the total times of callers are too low; the self times hold.
-function analyzeProfile(prof, r, align) {
+function analyzeProfile(prof, r, align, knownOffset) {
   const nodes = new Map(prof.nodes.map((n) => [n.id, n]));
   const parent = new Map();
   for (const n of prof.nodes) for (const c of n.children || []) parent.set(c, n.id);
@@ -458,12 +473,45 @@ function analyzeProfile(prof, r, align) {
     if (["(program)", "(idle)", "(garbage collector)", "(root)"].includes(f.functionName)) return f.functionName;
     return "js";
   };
+  // V8 shows a Go name with "_" for "/" and "__T_" for "(*T)", for example
+  // k8s.io_client_go_transport.__tlsTransportCache_.get. The package ends at
+  // the first "." after the host name of the module path.
   const pkgOf = (name) => {
     if (name.startsWith("(")) return name;
-    const slash = name.lastIndexOf("/", name.indexOf("(") < 0 ? name.length : name.indexOf("("));
-    const dot = name.indexOf(".", slash + 1);
+    const host = /^(vendor_)?([a-z0-9-]+\.)+(io|com|org|in|dev|net|cc|sh)_/.exec(name);
+    const from = host ? host[0].length : 0;
+    const dot = name.indexOf(".", from);
     return dot < 0 ? name : name.slice(0, dot);
   };
+  // Coarse groups of the self time of Wasm functions.
+  const groups = [
+    ["Go package init", (n) => /\.init(\.|$)|doInit/.test(n)],
+    ["Go GC (mark, scan, sweep)", (n, p) => p === "runtime" && /gc|[sS]can|[mM]ark|[sS]weep|findObject|greyobject|wbBuf|typePointers|heapBits|spanOf|bgsweep|tryDeferToSpanScan|markBits|gcw/.test(n)],
+    ["Go allocation", (n, p) => p === "runtime" && /malloc|newobject|growslice|makeslice|memclr|nextFree|refill|allocSpan|newarray|rawstring|rawbyteslice|concatstring|initHeapBits/.test(n)],
+    ["Go stacks and tracebacks", (n, p) => p === "runtime" && /pcvalue|step|findfunc|stkframe|getStackMap|funcInfo|gentraceback|unwind|copystack|morestack|adjustframe|newstack|readvarint|funcdata|pcdatavalue/.test(n)],
+    ["Go maps", (n, p) => p.startsWith("internal_runtime_maps") || /^runtime\.map/.test(n)],
+    ["Go scheduler, channels, timers, locks", (n, p) => p === "runtime" && /select|chan|sched|park|ready|runq|findRunnable|execute|gogo|mcall|lock|sema|timer|netpoll|beforeIdle|handleEvent|pause|wakep|goready|casgstatus|nanotime|walltime|time_now|gosched|checkTimers/i.test(n) || p === "sync" || p === "internal_sync" || p === "context"],
+    ["Go runtime, other", (n, p) => p === "runtime" || p.startsWith("internal_") || p === "wasm_pc_f_loop" || p === "sync_atomic"],
+    ["OpenAPI (kube-openapi, generated definitions)", (n, p) => /kube_openapi|generated_openapi|openapi/.test(p)],
+    ["JSON (encoding/json, json-iter, sigs.k8s.io/json)", (n, p) => /json/i.test(p) && !/openapi/.test(p)],
+    ["protobuf, gRPC, HTTP/2", (n, p) => /protobuf|grpc|http2|gogo/.test(p)],
+    ["TLS and crypto", (n, p) => /crypto|tls/.test(p)],
+    ["klog and logging", (n, p) => /klog|logs|zap|logr/.test(p)],
+    ["reflect", (n, p) => p === "reflect"],
+    ["server-side apply (structured-merge-diff)", (n, p) => /structured_merge_diff|managedfields|fieldmanager/.test(p)],
+    ["YAML", (n, p) => /yaml/i.test(p)],
+    ["Prometheus metrics", (n, p) => /prometheus|component_base_metrics/.test(p)],
+    ["net, net/http, net/url", (n, p) => /^net(_|$)|^vendor_golang.org_x_net/.test(p)],
+    ["k8s.io/api types (deepcopy, conversion, defaults)", (n, p) => /^k8s.io_api_|k8s.io_kubernetes_pkg_apis_/.test(p)],
+    ["fmt, strings, strconv, bytes, sort, unicode, time", (n, p) => /^(fmt|strings|strconv|bytes|sort|slices|unicode|unicode_utf8|time|math|bufio|errors|io|os|syscall|syscall_js|path|path_filepath|hash|encoding_binary|encoding_base64|encoding_hex|encoding_pem|encoding_asn1|compress)/.test(p)],
+    ["regexp", (n, p) => p.startsWith("regexp")],
+    ["k8s.io/apimachinery", (n, p) => /apimachinery/.test(p)],
+    ["k8s.io/apiserver", (n, p) => /k8s.io_apiserver/.test(p)],
+    ["k8s.io/client-go", (n, p) => /client_go/.test(p)],
+    ["k8s.io/kubernetes", (n, p) => /k8s.io_kubernetes/.test(p)],
+    ["other Go", () => true],
+  ];
+  const groupOf = (n) => { const p = pkgOf(n); return groups.find(([, f]) => f(n, p))[0]; };
   // Time of each sample: timeDeltas, in µs from startTime.
   let ts = prof.startTime;
   const times = prof.timeDeltas.map((d) => (ts += d));
@@ -472,12 +520,12 @@ function analyzeProfile(prof, r, align) {
     for (let x = id; x !== undefined; x = parent.get(x)) if (nodes.get(x).callFrame.functionName === "tabernetesProfileAlign") return true;
     return false;
   });
-  const offset = alignIdx >= 0 ? times[alignIdx] / 1000 - align : null;
+  const offset = knownOffset ?? (alignIdx >= 0 ? times[alignIdx] / 1000 - align : null);
   const pageT = (i) => (offset === null ? NaN : times[i] / 1000 - offset);
   const mark = (n) => r.marks?.find((m) => m.name === n)?.t;
-  const windows = phases.filter(([, f, to]) => (f === null || mark(f) !== undefined) && mark(to) !== undefined)
+  const windows = phases.filter(([name]) => name !== "main until Go waits the first time").filter(([, f, to]) => (f === null || mark(f) !== undefined) && mark(to) !== undefined)
     .map(([name, f, to]) => ({ name, from: f ? mark(f) : 0, to: mark(to) }));
-  const self = new Map(), total = new Map(), pkgSelf = new Map(), kinds = new Map(), byPhase = new Map();
+  const self = new Map(), total = new Map(), pkgSelf = new Map(), kinds = new Map(), byPhase = new Map(), groupSelf = new Map(), jsSelf = new Map();
   const prompt = mark("js:prompt"), goRun = mark("js:go-run");
   const add = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
   for (let i = 0; i < prof.samples.length; i++) {
@@ -488,7 +536,8 @@ function analyzeProfile(prof, r, align) {
     const name = nameOf(leaf);
     add(self, name, dt);
     add(kinds, kind(leaf), dt);
-    if (kind(leaf) === "wasm") add(pkgSelf, pkgOf(name), dt);
+    if (kind(leaf) === "wasm") { add(pkgSelf, pkgOf(name), dt); add(groupSelf, groupOf(name), dt); }
+    if (kind(leaf) === "js") add(jsSelf, `${name} ${leaf.callFrame.url.split("/").pop().replace(/\?.*/, "")}:${leaf.callFrame.lineNumber}:${leaf.callFrame.columnNumber}`, dt);
     const seen = new Set();
     for (let x = leaf.id; x !== undefined; x = parent.get(x)) {
       const nm = nameOf(nodes.get(x));
@@ -497,15 +546,19 @@ function analyzeProfile(prof, r, align) {
     const w = windows.find((w) => tp >= w.from && tp < w.to);
     if (w && kind(leaf) === "wasm") {
       if (!byPhase.has(w.name)) byPhase.set(w.name, new Map());
-      add(byPhase.get(w.name), pkgOf(name), dt);
+      add(byPhase.get(w.name), groupOf(name), dt);
     }
   }
   const top = (m, n) => [...m].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => [k, Math.round(v)]);
   const out = {
-    aligned: offset !== null, prompt, goRun,
+    aligned: offset !== null, offset, prompt, goRun,
     kinds: top(kinds, 10),
-    topSelf: top(self, 40), topTotal: top(total, 60), topPackagesSelf: top(pkgSelf, 40),
-    phases: Object.fromEntries([...byPhase].map(([k, m]) => [k, top(m, 8)])),
+    groupsSelf: top(groupSelf, 30),
+    topSelf: top(self, 50), topPackagesSelf: top(pkgSelf, 50), topJSSelf: top(jsSelf, 15),
+    // Not reliable for callers: see above. Kept for the Go functions that
+    // call into JavaScript (syscall/js), whose callbacks run Go again.
+    topTotal: top(total, 60),
+    phases: Object.fromEntries([...byPhase].map(([k, m]) => [k, top(m, 6)])),
   };
   console.log(JSON.stringify(out, null, 1));
   return out;
@@ -513,7 +566,14 @@ function analyzeProfile(prof, r, align) {
 
 // ---- main ----
 const old = opt("summary", "");
-if (old) {
+const reprofile = opt("reprofile", "");
+if (reprofile) {
+  const base = reprofile.replace(/\.json$/, "");
+  const d = JSON.parse(fs.readFileSync(`${base}.json`, "utf8"));
+  const prof = JSON.parse(fs.readFileSync(`${base}.cpuprofile`, "utf8"));
+  d.profile = analyzeProfile(prof, d.result, null, d.profile?.offset);
+  fs.writeFileSync(`${base}.json`, JSON.stringify(d, null, 1));
+} else if (old) {
   results.push(...JSON.parse(fs.readFileSync(old, "utf8")).results);
   summary();
 } else if (profile) {
